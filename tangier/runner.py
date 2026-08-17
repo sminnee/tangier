@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -69,6 +70,10 @@ class Subprocess:
 
     `echo=True` prints each command before running it, preserving
     build-github's echo-then-run behaviour so CI logs still show the buildx line.
+
+    The echo goes to **stderr**, not stdout. Several commands have a stdout
+    contract a caller parses — `image exists` is captured and string-compared by
+    CI — and a trace line on stdout would corrupt it.
     """
 
     def __init__(self, *, echo: bool = False) -> None:
@@ -84,7 +89,7 @@ class Subprocess:
         check: bool = False,
     ) -> Result:
         if self.echo:
-            print(" ".join(argv))
+            print(" ".join(argv), file=sys.stderr)
         proc = subprocess.run(
             argv,
             input=input,
@@ -146,7 +151,11 @@ class Subprocess:
 
 
 class DryRun:
-    """Prints what would run and reports success without running it."""
+    """Reports what would run, on stderr, and reports success without running it.
+
+    Like `Subprocess`, the trace goes to stderr so a command's stdout contract
+    survives a dry run.
+    """
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
@@ -161,13 +170,13 @@ class DryRun:
         check: bool = False,
     ) -> Result:
         self.calls.append(list(argv))
-        print("would run: " + " ".join(argv))
+        print("would run: " + " ".join(argv), file=sys.stderr)
         return Result(0)
 
     def pipe(self, stages: list[list[str]], *, input: str | None = None, env: dict[str, str] | None = None) -> Result:
         for stage in stages:
             self.calls.append(list(stage))
-        print("would run: " + " | ".join(" ".join(s) for s in stages))
+        print("would run: " + " | ".join(" ".join(s) for s in stages), file=sys.stderr)
         return Result(0)
 
     def sleep(self, seconds: float) -> None:

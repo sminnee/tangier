@@ -44,9 +44,12 @@ jobs:
           print("dependencies == []")
           EOF
       - name: Import every module in isolated mode
-        # -I ignores site-packages and PYTHONPATH, so any third-party import fails.
+        # -I ignores site-packages and PYTHONPATH, so any third-party import
+        # fails here. The checkout dir is added back explicitly — that is the
+        # only path tangier itself is allowed to come from.
         run: |
           python -I -c "
+          import sys; sys.path.insert(0, '.')
           import tangier.cli, tangier.config, tangier.globs, tangier.git
           import tangier.runner, tangier.changemap, tangier.image, tangier.deploy
           import tangier.commands.changemap_cmds

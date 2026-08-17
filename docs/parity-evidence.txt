@@ -22,6 +22,33 @@ tangier parity check
   rewrote [k8s] -> [tags.k8s]
 
 ═══ parity report ═══
+feat/932-count-integration   runners-append-neutral:sha                 OK
+feat/932-count-integration   runners-append-neutral:outputs             OK
+feat/932-count-integration   base-resolves-identically                  OK
+feat/932-count-integration   sha-all                                    OK
+feat/932-count-integration   sha-notice                                 OK
+feat/932-count-integration   github-outputs                             OK
+feat/932-count-integration   items-unittest                             OK
+feat/932-count-integration   items-e2e                                  OK
+feat/932-count-integration   items-eval                                 OK
+feat/932-count-integration   list                                       OK
+feat/932-count-integration   list-graph                                 OK
+feat/932-count-integration   list-ignored                               OK
+feat/932-count-integration   explain                                    OK
+feat/932-count-integration   GITHUB_OUTPUT-file                         OK
+feat/932-count-integration   sha astrochat                              OK
+feat/932-count-integration   sha astrochat == --all line                OK
+feat/932-count-integration   sha astronort-fetcher-mcp                  OK
+feat/932-count-integration   sha astronort-fetcher-mcp == --all line    OK
+feat/932-count-integration   sha astronort-lector                       OK
+feat/932-count-integration   sha astronort-lector == --all line         OK
+feat/932-count-integration   sha astronort-scheduler                    OK
+feat/932-count-integration   sha astronort-scheduler == --all line      OK
+feat/932-count-integration   sha astronort-typesetter                   OK
+feat/932-count-integration   sha astronort-typesetter == --all line     OK
+feat/932-count-integration   sha smartypants                            OK
+feat/932-count-integration   sha smartypants == --all line              OK
+feat/932-count-integration   library-surface                            OK
 fix/delete-superadmin-playbook runners-append-neutral:sha                 OK
 fix/delete-superadmin-playbook runners-append-neutral:outputs             OK
 fix/delete-superadmin-playbook base-resolves-identically                  OK
@@ -103,33 +130,6 @@ feat/1065-created-docs-artefact-search sha astronort-typesetter == --all line   
 feat/1065-created-docs-artefact-search sha smartypants                            OK
 feat/1065-created-docs-artefact-search sha smartypants == --all line              OK
 feat/1065-created-docs-artefact-search library-surface                            OK
-feat/932-count-integration   runners-append-neutral:sha                 OK
-feat/932-count-integration   runners-append-neutral:outputs             OK
-feat/932-count-integration   base-resolves-identically                  OK
-feat/932-count-integration   sha-all                                    OK
-feat/932-count-integration   sha-notice                                 OK
-feat/932-count-integration   github-outputs                             OK
-feat/932-count-integration   items-unittest                             OK
-feat/932-count-integration   items-e2e                                  OK
-feat/932-count-integration   items-eval                                 OK
-feat/932-count-integration   list                                       OK
-feat/932-count-integration   list-graph                                 OK
-feat/932-count-integration   list-ignored                               OK
-feat/932-count-integration   explain                                    OK
-feat/932-count-integration   GITHUB_OUTPUT-file                         OK
-feat/932-count-integration   sha astrochat                              OK
-feat/932-count-integration   sha astrochat == --all line                OK
-feat/932-count-integration   sha astronort-fetcher-mcp                  OK
-feat/932-count-integration   sha astronort-fetcher-mcp == --all line    OK
-feat/932-count-integration   sha astronort-lector                       OK
-feat/932-count-integration   sha astronort-lector == --all line         OK
-feat/932-count-integration   sha astronort-scheduler                    OK
-feat/932-count-integration   sha astronort-scheduler == --all line      OK
-feat/932-count-integration   sha astronort-typesetter                   OK
-feat/932-count-integration   sha astronort-typesetter == --all line     OK
-feat/932-count-integration   sha smartypants                            OK
-feat/932-count-integration   sha smartypants == --all line              OK
-feat/932-count-integration   library-surface                            OK
 feat/extract-changemap       runners-append-neutral:sha                 OK
 feat/extract-changemap       runners-append-neutral:outputs             OK
 feat/extract-changemap       base-resolves-identically                  OK

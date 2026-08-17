@@ -6,8 +6,10 @@ import argparse
 import os
 import sys
 
-from tangier.commands import changemap_cmds
+from tangier.commands import changemap_cmds, deploy_cmds, image_cmds
 from tangier.config import ConfigError, read_config
+from tangier.deploy import DeployError
+from tangier.image import ImageError
 
 # The config lives in the repo tangier runs from — each project carries its own
 # pipeline.toml at its root. TANGIER_CONFIG lets the parity harness point both
@@ -39,6 +41,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
+    except (ImageError, DeployError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
 
 def _add_diff_args(p: argparse.ArgumentParser) -> None:
@@ -67,6 +72,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="group")
     _add_changemap_parser(sub)
+    image_cmds.add_parsers(sub)
+    deploy_cmds.add_parsers(sub)
     return p
 
 
