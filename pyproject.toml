@@ -1,0 +1,30 @@
+[project]
+name = "tangier"
+version = "0.1.0"
+description = "Content-addressed CI/deploy pipeline toolkit: change mapping, image tagging, kustomize deploys"
+readme = "README.md"
+requires-python = ">=3.11"
+# Non-negotiable: tangier runs on GitHub Actions runners without setup-python,
+# against the system Python. Pure stdlib only — CI asserts this list stays empty.
+dependencies = []
+
+[project.scripts]
+tangier = "tangier.cli:cli_main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tangier"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into module internals by design.
+"tangier/tests/*" = ["E501"]

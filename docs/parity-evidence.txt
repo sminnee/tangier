@@ -1,0 +1,487 @@
+tangier parity check
+  consumer: /Users/sminnee/Projects/askastro/_main
+  config:   changemap.toml
+  refs:     17
+
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+  rewrote [k8s] -> [tags.k8s]
+
+═══ parity report ═══
+fix/delete-superadmin-playbook runners-append-neutral:sha                 OK
+fix/delete-superadmin-playbook runners-append-neutral:outputs             OK
+fix/delete-superadmin-playbook base-resolves-identically                  OK
+fix/delete-superadmin-playbook sha-all                                    OK
+fix/delete-superadmin-playbook sha-notice                                 OK
+fix/delete-superadmin-playbook github-outputs                             OK
+fix/delete-superadmin-playbook items-unittest                             OK
+fix/delete-superadmin-playbook items-e2e                                  OK
+fix/delete-superadmin-playbook items-eval                                 OK
+fix/delete-superadmin-playbook list                                       OK
+fix/delete-superadmin-playbook list-graph                                 OK
+fix/delete-superadmin-playbook list-ignored                               OK
+fix/delete-superadmin-playbook explain                                    OK
+fix/delete-superadmin-playbook GITHUB_OUTPUT-file                         OK
+fix/delete-superadmin-playbook sha astrochat                              OK
+fix/delete-superadmin-playbook sha astrochat == --all line                OK
+fix/delete-superadmin-playbook sha astronort-fetcher-mcp                  OK
+fix/delete-superadmin-playbook sha astronort-fetcher-mcp == --all line    OK
+fix/delete-superadmin-playbook sha astronort-lector                       OK
+fix/delete-superadmin-playbook sha astronort-lector == --all line         OK
+fix/delete-superadmin-playbook sha astronort-scheduler                    OK
+fix/delete-superadmin-playbook sha astronort-scheduler == --all line      OK
+fix/delete-superadmin-playbook sha astronort-typesetter                   OK
+fix/delete-superadmin-playbook sha astronort-typesetter == --all line     OK
+fix/delete-superadmin-playbook sha smartypants                            OK
+fix/delete-superadmin-playbook sha smartypants == --all line              OK
+fix/delete-superadmin-playbook library-surface                            OK
+main                         runners-append-neutral:sha                 OK
+main                         runners-append-neutral:outputs             OK
+main                         base-resolves-identically                  OK
+main                         sha-all                                    OK
+main                         sha-notice                                 OK
+main                         github-outputs                             OK
+main                         items-unittest                             OK
+main                         items-e2e                                  OK
+main                         items-eval                                 OK
+main                         list                                       OK
+main                         list-graph                                 OK
+main                         list-ignored                               OK
+main                         explain                                    OK
+main                         GITHUB_OUTPUT-file                         OK
+main                         sha astrochat                              OK
+main                         sha astrochat == --all line                OK
+main                         sha astronort-fetcher-mcp                  OK
+main                         sha astronort-fetcher-mcp == --all line    OK
+main                         sha astronort-lector                       OK
+main                         sha astronort-lector == --all line         OK
+main                         sha astronort-scheduler                    OK
+main                         sha astronort-scheduler == --all line      OK
+main                         sha astronort-typesetter                   OK
+main                         sha astronort-typesetter == --all line     OK
+main                         sha smartypants                            OK
+main                         sha smartypants == --all line              OK
+main                         library-surface                            OK
+feat/1065-created-docs-artefact-search runners-append-neutral:sha                 OK
+feat/1065-created-docs-artefact-search runners-append-neutral:outputs             OK
+feat/1065-created-docs-artefact-search base-resolves-identically                  OK
+feat/1065-created-docs-artefact-search sha-all                                    OK
+feat/1065-created-docs-artefact-search sha-notice                                 OK
+feat/1065-created-docs-artefact-search github-outputs                             OK
+feat/1065-created-docs-artefact-search items-unittest                             OK
+feat/1065-created-docs-artefact-search items-e2e                                  OK
+feat/1065-created-docs-artefact-search items-eval                                 OK
+feat/1065-created-docs-artefact-search list                                       OK
+feat/1065-created-docs-artefact-search list-graph                                 OK
+feat/1065-created-docs-artefact-search list-ignored                               OK
+feat/1065-created-docs-artefact-search explain                                    OK
+feat/1065-created-docs-artefact-search GITHUB_OUTPUT-file                         OK
+feat/1065-created-docs-artefact-search sha astrochat                              OK
+feat/1065-created-docs-artefact-search sha astrochat == --all line                OK
+feat/1065-created-docs-artefact-search sha astronort-fetcher-mcp                  OK
+feat/1065-created-docs-artefact-search sha astronort-fetcher-mcp == --all line    OK
+feat/1065-created-docs-artefact-search sha astronort-lector                       OK
+feat/1065-created-docs-artefact-search sha astronort-lector == --all line         OK
+feat/1065-created-docs-artefact-search sha astronort-scheduler                    OK
+feat/1065-created-docs-artefact-search sha astronort-scheduler == --all line      OK
+feat/1065-created-docs-artefact-search sha astronort-typesetter                   OK
+feat/1065-created-docs-artefact-search sha astronort-typesetter == --all line     OK
+feat/1065-created-docs-artefact-search sha smartypants                            OK
+feat/1065-created-docs-artefact-search sha smartypants == --all line              OK
+feat/1065-created-docs-artefact-search library-surface                            OK
+feat/932-count-integration   runners-append-neutral:sha                 OK
+feat/932-count-integration   runners-append-neutral:outputs             OK
+feat/932-count-integration   base-resolves-identically                  OK
+feat/932-count-integration   sha-all                                    OK
+feat/932-count-integration   sha-notice                                 OK
+feat/932-count-integration   github-outputs                             OK
+feat/932-count-integration   items-unittest                             OK
+feat/932-count-integration   items-e2e                                  OK
+feat/932-count-integration   items-eval                                 OK
+feat/932-count-integration   list                                       OK
+feat/932-count-integration   list-graph                                 OK
+feat/932-count-integration   list-ignored                               OK
+feat/932-count-integration   explain                                    OK
+feat/932-count-integration   GITHUB_OUTPUT-file                         OK
+feat/932-count-integration   sha astrochat                              OK
+feat/932-count-integration   sha astrochat == --all line                OK
+feat/932-count-integration   sha astronort-fetcher-mcp                  OK
+feat/932-count-integration   sha astronort-fetcher-mcp == --all line    OK
+feat/932-count-integration   sha astronort-lector                       OK
+feat/932-count-integration   sha astronort-lector == --all line         OK
+feat/932-count-integration   sha astronort-scheduler                    OK
+feat/932-count-integration   sha astronort-scheduler == --all line      OK
+feat/932-count-integration   sha astronort-typesetter                   OK
+feat/932-count-integration   sha astronort-typesetter == --all line     OK
+feat/932-count-integration   sha smartypants                            OK
+feat/932-count-integration   sha smartypants == --all line              OK
+feat/932-count-integration   library-surface                            OK
+feat/extract-changemap       runners-append-neutral:sha                 OK
+feat/extract-changemap       runners-append-neutral:outputs             OK
+feat/extract-changemap       base-resolves-identically                  OK
+feat/extract-changemap       sha-all                                    OK
+feat/extract-changemap       sha-notice                                 OK
+feat/extract-changemap       github-outputs                             OK
+feat/extract-changemap       items-unittest                             OK
+feat/extract-changemap       items-e2e                                  OK
+feat/extract-changemap       items-eval                                 OK
+feat/extract-changemap       list                                       OK
+feat/extract-changemap       list-graph                                 OK
+feat/extract-changemap       list-ignored                               OK
+feat/extract-changemap       explain                                    OK
+feat/extract-changemap       GITHUB_OUTPUT-file                         OK
+feat/extract-changemap       sha astrochat                              OK
+feat/extract-changemap       sha astrochat == --all line                OK
+feat/extract-changemap       sha astronort-fetcher-mcp                  OK
+feat/extract-changemap       sha astronort-fetcher-mcp == --all line    OK
+feat/extract-changemap       sha astronort-lector                       OK
+feat/extract-changemap       sha astronort-lector == --all line         OK
+feat/extract-changemap       sha astronort-scheduler                    OK
+feat/extract-changemap       sha astronort-scheduler == --all line      OK
+feat/extract-changemap       sha astronort-typesetter                   OK
+feat/extract-changemap       sha astronort-typesetter == --all line     OK
+feat/extract-changemap       sha smartypants                            OK
+feat/extract-changemap       sha smartypants == --all line              OK
+feat/extract-changemap       library-surface                            OK
+feat/1062-facebook-pages-integration runners-append-neutral:sha                 OK
+feat/1062-facebook-pages-integration runners-append-neutral:outputs             OK
+feat/1062-facebook-pages-integration base-resolves-identically                  OK
+feat/1062-facebook-pages-integration sha-all                                    OK
+feat/1062-facebook-pages-integration sha-notice                                 OK
+feat/1062-facebook-pages-integration github-outputs                             OK
+feat/1062-facebook-pages-integration items-unittest                             OK
+feat/1062-facebook-pages-integration items-e2e                                  OK
+feat/1062-facebook-pages-integration items-eval                                 OK
+feat/1062-facebook-pages-integration list                                       OK
+feat/1062-facebook-pages-integration list-graph                                 OK
+feat/1062-facebook-pages-integration list-ignored                               OK
+feat/1062-facebook-pages-integration explain                                    OK
+feat/1062-facebook-pages-integration GITHUB_OUTPUT-file                         OK
+feat/1062-facebook-pages-integration sha astrochat                              OK
+feat/1062-facebook-pages-integration sha astrochat == --all line                OK
+feat/1062-facebook-pages-integration sha astronort-fetcher-mcp                  OK
+feat/1062-facebook-pages-integration sha astronort-fetcher-mcp == --all line    OK
+feat/1062-facebook-pages-integration sha astronort-lector                       OK
+feat/1062-facebook-pages-integration sha astronort-lector == --all line         OK
+feat/1062-facebook-pages-integration sha astronort-scheduler                    OK
+feat/1062-facebook-pages-integration sha astronort-scheduler == --all line      OK
+feat/1062-facebook-pages-integration sha astronort-typesetter                   OK
+feat/1062-facebook-pages-integration sha astronort-typesetter == --all line     OK
+feat/1062-facebook-pages-integration sha smartypants                            OK
+feat/1062-facebook-pages-integration sha smartypants == --all line              OK
+feat/1062-facebook-pages-integration library-surface                            OK
+fix/maint-sources-delete-2026-08-17 runners-append-neutral:sha                 OK
+fix/maint-sources-delete-2026-08-17 runners-append-neutral:outputs             OK
+fix/maint-sources-delete-2026-08-17 base-resolves-identically                  OK
+fix/maint-sources-delete-2026-08-17 sha-all                                    OK
+fix/maint-sources-delete-2026-08-17 sha-notice                                 OK
+fix/maint-sources-delete-2026-08-17 github-outputs                             OK
+fix/maint-sources-delete-2026-08-17 items-unittest                             OK
+fix/maint-sources-delete-2026-08-17 items-e2e                                  OK
+fix/maint-sources-delete-2026-08-17 items-eval                                 OK
+fix/maint-sources-delete-2026-08-17 list                                       OK
+fix/maint-sources-delete-2026-08-17 list-graph                                 OK
+fix/maint-sources-delete-2026-08-17 list-ignored                               OK
+fix/maint-sources-delete-2026-08-17 explain                                    OK
+fix/maint-sources-delete-2026-08-17 GITHUB_OUTPUT-file                         OK
+fix/maint-sources-delete-2026-08-17 sha astrochat                              OK
+fix/maint-sources-delete-2026-08-17 sha astrochat == --all line                OK
+fix/maint-sources-delete-2026-08-17 sha astronort-fetcher-mcp                  OK
+fix/maint-sources-delete-2026-08-17 sha astronort-fetcher-mcp == --all line    OK
+fix/maint-sources-delete-2026-08-17 sha astronort-lector                       OK
+fix/maint-sources-delete-2026-08-17 sha astronort-lector == --all line         OK
+fix/maint-sources-delete-2026-08-17 sha astronort-scheduler                    OK
+fix/maint-sources-delete-2026-08-17 sha astronort-scheduler == --all line      OK
+fix/maint-sources-delete-2026-08-17 sha astronort-typesetter                   OK
+fix/maint-sources-delete-2026-08-17 sha astronort-typesetter == --all line     OK
+fix/maint-sources-delete-2026-08-17 sha smartypants                            OK
+fix/maint-sources-delete-2026-08-17 sha smartypants == --all line              OK
+fix/maint-sources-delete-2026-08-17 library-surface                            OK
+feat/project-list            runners-append-neutral:sha                 OK
+feat/project-list            runners-append-neutral:outputs             OK
+feat/project-list            base-resolves-identically                  OK
+feat/project-list            sha-all                                    OK
+feat/project-list            sha-notice                                 OK
+feat/project-list            github-outputs                             OK
+feat/project-list            items-unittest                             OK
+feat/project-list            items-e2e                                  OK
+feat/project-list            items-eval                                 OK
+feat/project-list            list                                       OK
+feat/project-list            list-graph                                 OK
+feat/project-list            list-ignored                               OK
+feat/project-list            explain                                    OK
+feat/project-list            GITHUB_OUTPUT-file                         OK
+feat/project-list            sha astrochat                              OK
+feat/project-list            sha astrochat == --all line                OK
+feat/project-list            sha astronort-fetcher-mcp                  OK
+feat/project-list            sha astronort-fetcher-mcp == --all line    OK
+feat/project-list            sha astronort-lector                       OK
+feat/project-list            sha astronort-lector == --all line         OK
+feat/project-list            sha astronort-scheduler                    OK
+feat/project-list            sha astronort-scheduler == --all line      OK
+feat/project-list            sha astronort-typesetter                   OK
+feat/project-list            sha astronort-typesetter == --all line     OK
+feat/project-list            sha smartypants                            OK
+feat/project-list            sha smartypants == --all line              OK
+feat/project-list            library-surface                            OK
+fix/superadmin-integration-access runners-append-neutral:sha                 OK
+fix/superadmin-integration-access runners-append-neutral:outputs             OK
+fix/superadmin-integration-access base-resolves-identically                  OK
+fix/superadmin-integration-access sha-all                                    OK
+fix/superadmin-integration-access sha-notice                                 OK
+fix/superadmin-integration-access github-outputs                             OK
+fix/superadmin-integration-access items-unittest                             OK
+fix/superadmin-integration-access items-e2e                                  OK
+fix/superadmin-integration-access items-eval                                 OK
+fix/superadmin-integration-access list                                       OK
+fix/superadmin-integration-access list-graph                                 OK
+fix/superadmin-integration-access list-ignored                               OK
+fix/superadmin-integration-access explain                                    OK
+fix/superadmin-integration-access GITHUB_OUTPUT-file                         OK
+fix/superadmin-integration-access sha astrochat                              OK
+fix/superadmin-integration-access sha astrochat == --all line                OK
+fix/superadmin-integration-access sha astronort-fetcher-mcp                  OK
+fix/superadmin-integration-access sha astronort-fetcher-mcp == --all line    OK
+fix/superadmin-integration-access sha astronort-lector                       OK
+fix/superadmin-integration-access sha astronort-lector == --all line         OK
+fix/superadmin-integration-access sha astronort-scheduler                    OK
+fix/superadmin-integration-access sha astronort-scheduler == --all line      OK
+fix/superadmin-integration-access sha astronort-typesetter                   OK
+fix/superadmin-integration-access sha astronort-typesetter == --all line     OK
+fix/superadmin-integration-access sha smartypants                            OK
+fix/superadmin-integration-access sha smartypants == --all line              OK
+fix/superadmin-integration-access library-surface                            OK
+chore/1045-simplify-search-tool-guidance runners-append-neutral:sha                 OK
+chore/1045-simplify-search-tool-guidance runners-append-neutral:outputs             OK
+chore/1045-simplify-search-tool-guidance base-resolves-identically                  OK
+chore/1045-simplify-search-tool-guidance sha-all                                    OK
+chore/1045-simplify-search-tool-guidance sha-notice                                 OK
+chore/1045-simplify-search-tool-guidance github-outputs                             OK
+chore/1045-simplify-search-tool-guidance items-unittest                             OK
+chore/1045-simplify-search-tool-guidance items-e2e                                  OK
+chore/1045-simplify-search-tool-guidance items-eval                                 OK
+chore/1045-simplify-search-tool-guidance list                                       OK
+chore/1045-simplify-search-tool-guidance list-graph                                 OK
+chore/1045-simplify-search-tool-guidance list-ignored                               OK
+chore/1045-simplify-search-tool-guidance explain                                    OK
+chore/1045-simplify-search-tool-guidance GITHUB_OUTPUT-file                         OK
+chore/1045-simplify-search-tool-guidance sha astrochat                              OK
+chore/1045-simplify-search-tool-guidance sha astrochat == --all line                OK
+chore/1045-simplify-search-tool-guidance sha astronort-fetcher-mcp                  OK
+chore/1045-simplify-search-tool-guidance sha astronort-fetcher-mcp == --all line    OK
+chore/1045-simplify-search-tool-guidance sha astronort-lector                       OK
+chore/1045-simplify-search-tool-guidance sha astronort-lector == --all line         OK
+chore/1045-simplify-search-tool-guidance sha astronort-scheduler                    OK
+chore/1045-simplify-search-tool-guidance sha astronort-scheduler == --all line      OK
+chore/1045-simplify-search-tool-guidance sha astronort-typesetter                   OK
+chore/1045-simplify-search-tool-guidance sha astronort-typesetter == --all line     OK
+chore/1045-simplify-search-tool-guidance sha smartypants                            OK
+chore/1045-simplify-search-tool-guidance sha smartypants == --all line              OK
+chore/1045-simplify-search-tool-guidance library-surface                            OK
+fix/985-multiuser-playbook-save runners-append-neutral:sha                 OK
+fix/985-multiuser-playbook-save runners-append-neutral:outputs             OK
+fix/985-multiuser-playbook-save base-resolves-identically                  OK
+fix/985-multiuser-playbook-save sha-all                                    OK
+fix/985-multiuser-playbook-save sha-notice                                 OK
+fix/985-multiuser-playbook-save github-outputs                             OK
+fix/985-multiuser-playbook-save items-unittest                             OK
+fix/985-multiuser-playbook-save items-e2e                                  OK
+fix/985-multiuser-playbook-save items-eval                                 OK
+fix/985-multiuser-playbook-save list                                       OK
+fix/985-multiuser-playbook-save list-graph                                 OK
+fix/985-multiuser-playbook-save list-ignored                               OK
+fix/985-multiuser-playbook-save explain                                    OK
+fix/985-multiuser-playbook-save GITHUB_OUTPUT-file                         OK
+fix/985-multiuser-playbook-save sha astrochat                              OK
+fix/985-multiuser-playbook-save sha astrochat == --all line                OK
+fix/985-multiuser-playbook-save sha astronort-fetcher-mcp                  OK
+fix/985-multiuser-playbook-save sha astronort-fetcher-mcp == --all line    OK
+fix/985-multiuser-playbook-save sha astronort-lector                       OK
+fix/985-multiuser-playbook-save sha astronort-lector == --all line         OK
+fix/985-multiuser-playbook-save sha astronort-scheduler                    OK
+fix/985-multiuser-playbook-save sha astronort-scheduler == --all line      OK
+fix/985-multiuser-playbook-save sha astronort-typesetter                   OK
+fix/985-multiuser-playbook-save sha astronort-typesetter == --all line     OK
+fix/985-multiuser-playbook-save sha smartypants                            OK
+fix/985-multiuser-playbook-save sha smartypants == --all line              OK
+fix/985-multiuser-playbook-save library-surface                            OK
+fix/maint-token-accounting-2026-08-17 runners-append-neutral:sha                 OK
+fix/maint-token-accounting-2026-08-17 runners-append-neutral:outputs             OK
+fix/maint-token-accounting-2026-08-17 base-resolves-identically                  OK
+fix/maint-token-accounting-2026-08-17 sha-all                                    OK
+fix/maint-token-accounting-2026-08-17 sha-notice                                 OK
+fix/maint-token-accounting-2026-08-17 github-outputs                             OK
+fix/maint-token-accounting-2026-08-17 items-unittest                             OK
+fix/maint-token-accounting-2026-08-17 items-e2e                                  OK
+fix/maint-token-accounting-2026-08-17 items-eval                                 OK
+fix/maint-token-accounting-2026-08-17 list                                       OK
+fix/maint-token-accounting-2026-08-17 list-graph                                 OK
+fix/maint-token-accounting-2026-08-17 list-ignored                               OK
+fix/maint-token-accounting-2026-08-17 explain                                    OK
+fix/maint-token-accounting-2026-08-17 GITHUB_OUTPUT-file                         OK
+fix/maint-token-accounting-2026-08-17 sha astrochat                              OK
+fix/maint-token-accounting-2026-08-17 sha astrochat == --all line                OK
+fix/maint-token-accounting-2026-08-17 sha astronort-fetcher-mcp                  OK
+fix/maint-token-accounting-2026-08-17 sha astronort-fetcher-mcp == --all line    OK
+fix/maint-token-accounting-2026-08-17 sha astronort-lector                       OK
+fix/maint-token-accounting-2026-08-17 sha astronort-lector == --all line         OK
+fix/maint-token-accounting-2026-08-17 sha astronort-scheduler                    OK
+fix/maint-token-accounting-2026-08-17 sha astronort-scheduler == --all line      OK
+fix/maint-token-accounting-2026-08-17 sha astronort-typesetter                   OK
+fix/maint-token-accounting-2026-08-17 sha astronort-typesetter == --all line     OK
+fix/maint-token-accounting-2026-08-17 sha smartypants                            OK
+fix/maint-token-accounting-2026-08-17 sha smartypants == --all line              OK
+fix/maint-token-accounting-2026-08-17 library-surface                            OK
+main                         runners-append-neutral:sha                 OK
+main                         runners-append-neutral:outputs             OK
+main                         base-resolves-identically                  OK
+main                         sha-all                                    OK
+main                         sha-notice                                 OK
+main                         github-outputs                             OK
+main                         items-unittest                             OK
+main                         items-e2e                                  OK
+main                         items-eval                                 OK
+main                         list                                       OK
+main                         list-graph                                 OK
+main                         list-ignored                               OK
+main                         explain                                    OK
+main                         GITHUB_OUTPUT-file                         OK
+main                         sha astrochat                              OK
+main                         sha astrochat == --all line                OK
+main                         sha astronort-fetcher-mcp                  OK
+main                         sha astronort-fetcher-mcp == --all line    OK
+main                         sha astronort-lector                       OK
+main                         sha astronort-lector == --all line         OK
+main                         sha astronort-scheduler                    OK
+main                         sha astronort-scheduler == --all line      OK
+main                         sha astronort-typesetter                   OK
+main                         sha astronort-typesetter == --all line     OK
+main                         sha smartypants                            OK
+main                         sha smartypants == --all line              OK
+main                         library-surface                            OK
+main~1                       runners-append-neutral:sha                 OK
+main~1                       runners-append-neutral:outputs             OK
+main~1                       base-resolves-identically                  OK
+main~1                       sha-all                                    OK
+main~1                       sha-notice                                 OK
+main~1                       github-outputs                             OK
+main~1                       items-unittest                             OK
+main~1                       items-e2e                                  OK
+main~1                       items-eval                                 OK
+main~1                       list                                       OK
+main~1                       list-graph                                 OK
+main~1                       list-ignored                               OK
+main~1                       explain                                    OK
+main~1                       GITHUB_OUTPUT-file                         OK
+main~1                       sha astrochat                              OK
+main~1                       sha astrochat == --all line                OK
+main~1                       sha astronort-fetcher-mcp                  OK
+main~1                       sha astronort-fetcher-mcp == --all line    OK
+main~1                       sha astronort-lector                       OK
+main~1                       sha astronort-lector == --all line         OK
+main~1                       sha astronort-scheduler                    OK
+main~1                       sha astronort-scheduler == --all line      OK
+main~1                       sha astronort-typesetter                   OK
+main~1                       sha astronort-typesetter == --all line     OK
+main~1                       sha smartypants                            OK
+main~1                       sha smartypants == --all line              OK
+main~1                       library-surface                            OK
+main~5                       runners-append-neutral:sha                 OK
+main~5                       runners-append-neutral:outputs             OK
+main~5                       base-resolves-identically                  OK
+main~5                       sha-all                                    OK
+main~5                       sha-notice                                 OK
+main~5                       github-outputs                             OK
+main~5                       items-unittest                             OK
+main~5                       items-e2e                                  OK
+main~5                       items-eval                                 OK
+main~5                       list                                       OK
+main~5                       list-graph                                 OK
+main~5                       list-ignored                               OK
+main~5                       explain                                    OK
+main~5                       GITHUB_OUTPUT-file                         OK
+main~5                       sha astrochat                              OK
+main~5                       sha astrochat == --all line                OK
+main~5                       sha astronort-fetcher-mcp                  OK
+main~5                       sha astronort-fetcher-mcp == --all line    OK
+main~5                       sha astronort-lector                       OK
+main~5                       sha astronort-lector == --all line         OK
+main~5                       sha astronort-scheduler                    OK
+main~5                       sha astronort-scheduler == --all line      OK
+main~5                       sha astronort-typesetter                   OK
+main~5                       sha astronort-typesetter == --all line     OK
+main~5                       sha smartypants                            OK
+main~5                       sha smartypants == --all line              OK
+main~5                       library-surface                            OK
+main~20                      runners-append-neutral:sha                 OK
+main~20                      runners-append-neutral:outputs             OK
+main~20                      base-resolves-identically                  OK
+main~20                      sha-all                                    OK
+main~20                      sha-notice                                 OK
+main~20                      github-outputs                             OK
+main~20                      items-unittest                             OK
+main~20                      items-e2e                                  OK
+main~20                      items-eval                                 OK
+main~20                      list                                       OK
+main~20                      list-graph                                 OK
+main~20                      list-ignored                               OK
+main~20                      explain                                    OK
+main~20                      GITHUB_OUTPUT-file                         OK
+main~20                      sha astrochat                              OK
+main~20                      sha astrochat == --all line                OK
+main~20                      sha astronort-fetcher-mcp                  OK
+main~20                      sha astronort-fetcher-mcp == --all line    OK
+main~20                      sha astronort-lector                       OK
+main~20                      sha astronort-lector == --all line         OK
+main~20                      sha astronort-scheduler                    OK
+main~20                      sha astronort-scheduler == --all line      OK
+main~20                      sha astronort-typesetter                   OK
+main~20                      sha astronort-typesetter == --all line     OK
+main~20                      sha smartypants                            OK
+main~20                      sha smartypants == --all line              OK
+main~20                      library-surface                            OK
+main~50                      runners-append-neutral:sha                 OK
+main~50                      runners-append-neutral:outputs             OK
+main~50                      base-resolves-identically                  OK
+main~50                      sha-all                                    OK
+main~50                      sha-notice                                 OK
+main~50                      github-outputs                             OK
+main~50                      items-unittest                             OK
+main~50                      items-e2e                                  OK
+main~50                      items-eval                                 OK
+main~50                      list                                       OK
+main~50                      list-graph                                 OK
+main~50                      list-ignored                               OK
+main~50                      explain                                    OK
+main~50                      GITHUB_OUTPUT-file                         OK
+main~50                      sha astrochat                              OK
+main~50                      sha astrochat == --all line                OK
+main~50                      sha astronort-fetcher-mcp                  OK
+main~50                      sha astronort-fetcher-mcp == --all line    OK
+main~50                      sha astronort-lector                       OK
+main~50                      sha astronort-lector == --all line         OK
+main~50                      sha astronort-scheduler                    OK
+main~50                      sha astronort-scheduler == --all line      OK
+main~50                      sha astronort-typesetter                   OK
+main~50                      sha astronort-typesetter == --all line     OK
+main~50                      sha smartypants                            OK
+main~50                      sha smartypants == --all line              OK
+main~50                      library-surface                            OK
+
+consumer HEAD: 72f81d1adfbcc3cfe161c23352f9df28ad8018bd
+checks: 459   failures: 0
+PARITY OK

@@ -1,0 +1,7 @@
+.claude/CLAUDE.local.md
+__pycache__/
+*.pyc
+.ruff_cache/
+dist/
+*.egg-info/
+.env

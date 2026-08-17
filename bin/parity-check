@@ -1,0 +1,250 @@
+#!/bin/bash
+# The cutover gate: prove `tangier changemap` is byte-identical to a repo's
+# pre-extraction `bin/changemap` across many refs.
+#
+#   bin/parity-check /path/to/consumer-repo
+#
+# Run locally, never in tangier's CI — it needs a checkout of the consuming
+# repo, which tangier's CI has no business having.
+#
+# Both sides read THE SAME config file at THE SAME path in THE SAME throwaway
+# worktree, via TANGIER_CONFIG. No copying, no symlinks, no dirty worktree.
+#
+# The one legitimate difference is `explain`'s flag rename
+# (--unittest-files/--eval-files -> repeatable --files GROUP=CSV), so both sides
+# are fed the same values, read from the old side's own github-outputs capture.
+
+set -uo pipefail
+
+REPO="${1:-}"
+if [ -z "$REPO" ]; then
+  echo "usage: $0 <path-to-consumer-repo> [config-name]" >&2
+  exit 2
+fi
+CONFIG_NAME="${2:-changemap.toml}"
+REPO="$(cd "$REPO" && pwd)"
+TANGIER_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ ! -x "$REPO/bin/changemap" ]; then
+  echo "no $REPO/bin/changemap to compare against" >&2
+  exit 2
+fi
+
+# GITHUB_OUTPUT would make both sides append to the same file; each side gets
+# its own below and those files are diffed too.
+unset GITHUB_OUTPUT
+
+# TMPDIR-honouring, and portable to macOS's bash 3.2.
+WORK="${TMPDIR:-/tmp}/tangier-parity-$$"
+mkdir -p "$WORK"
+trap 'rm -rf "$WORK"; git -C "$REPO" worktree prune >/dev/null 2>&1' EXIT
+
+# The runner block the new parser needs and the old one rejects, so it cannot
+# simply be committed to the shared config. Appended in a second pass, whose
+# parity-neutrality is proven rather than argued (see PHASE 3 below).
+RUNNERS_BLOCK='
+[runners]
+unittest = { cmd = "bin/test", files = "unittest-files" }
+e2e = { cmd = "bin/e2e-test" }
+eval = { cmd = "bin/evals", files = "eval-files" }
+'
+
+# Tag names that collide with a reserved section must move under [tags.*] at
+# cutover. The harness applies the same rewrite so both sides see the same tag
+# set, and PHASE 3 proves the rewrite does not move any SHA.
+# (askastro has exactly one: a tag named `k8s`.)
+RESERVED_TAG_NAMES="tags sha registry deploy image k8s runners"
+
+rewrite_reserved_tags() { # config-path
+  local cfg="$1" name
+  for name in $RESERVED_TAG_NAMES; do
+    if grep -qE "^\[$name\]" "$cfg"; then
+      # Only a bare `[name]` table header is rewritten; `[name.sub]` and
+      # `[name-suffix]` headers are left alone.
+      sed -i.bak -E "s/^\[$name\]$/[tags.$name]/" "$cfg" && rm -f "$cfg.bak"
+      echo "  rewrote [$name] -> [tags.$name]"
+    fi
+  done
+}
+
+# Refs: recent branches for diff-shape variety, plus fixed points in history.
+# `mapfile` is bash 4+; macOS ships bash 3.2, so read the list the portable way.
+BRANCHES=$(git -C "$REPO" for-each-ref --sort=-committerdate --count=12 --format='%(refname:short)' refs/heads/)
+REFS=()
+while IFS= read -r b; do [ -n "$b" ] && REFS+=("$b"); done <<< "$BRANCHES"
+REFS+=(main "main~1" "main~5" "main~20" "main~50")
+
+FAILURES=0
+TOTAL=0
+declare -a REPORT
+
+record() { # ref invocation status
+  REPORT+=("$(printf '%-28s %-42s %s' "$1" "$2" "$3")")
+  TOTAL=$((TOTAL + 1))
+  [ "$3" = "OK" ] || FAILURES=$((FAILURES + 1))
+}
+
+compare() { # ref label old_file new_file
+  if diff -u "$3" "$4" > "$WORK/diff.txt" 2>&1; then
+    record "$1" "$2" "OK"
+  else
+    record "$1" "$2" "DIFF"
+    echo "─── $1 :: $2 ───"
+    head -40 "$WORK/diff.txt"
+  fi
+}
+
+echo "tangier parity check"
+echo "  consumer: $REPO"
+echo "  config:   $CONFIG_NAME"
+echo "  refs:     ${#REFS[@]}"
+echo
+
+for REF in "${REFS[@]}"; do
+  if ! git -C "$REPO" rev-parse --verify --quiet "$REF^{commit}" >/dev/null; then
+    record "$REF" "(resolve)" "SKIP-missing-ref"
+    continue
+  fi
+  SHA="$(git -C "$REPO" rev-parse "$REF")"
+  WT="$WORK/wt-$(echo "$REF" | tr '/' '_')"
+  if ! git -C "$REPO" worktree add --detach "$WT" "$SHA" >/dev/null 2>&1; then
+    record "$REF" "(worktree)" "SKIP-worktree-failed"
+    continue
+  fi
+
+  CFG="$WT/$CONFIG_NAME"
+  if [ ! -f "$CFG" ]; then
+    record "$REF" "(config)" "SKIP-no-config"
+    continue
+  fi
+
+  OUT="$WORK/out-$(echo "$REF" | tr '/' '_')"
+  mkdir -p "$OUT"
+
+  # `--base origin/main` is pinned so both sides diff the same range, and the
+  # resolved sha is asserted identical across the two runs below.
+  BASE="origin/main"
+  git -C "$WT" rev-parse "$BASE" > "$OUT/base-old.txt" 2>/dev/null || echo "unresolved" > "$OUT/base-old.txt"
+
+  run_old() { # name args...
+    local name="$1"; shift
+    ( cd "$WT" && GITHUB_OUTPUT="$OUT/gho-old-$name.txt" python3 bin/changemap --config "$CONFIG_NAME" "$@" \
+        > "$OUT/$name.old" 2> "$OUT/$name.old.err" )
+  }
+  run_new() { # name args...
+    local name="$1"; shift
+    ( cd "$WT" && GITHUB_OUTPUT="$OUT/gho-new-$name.txt" TANGIER_CONFIG="$CONFIG_NAME" \
+        PYTHONPATH="$TANGIER_ROOT" python3 -m tangier changemap "$@" \
+        > "$OUT/$name.new" 2> "$OUT/$name.new.err" )
+  }
+
+  # ── PHASE 1: old side, against the pristine config ──────────────────────
+  run_old sha-all sha --all
+  run_old sha-notice sha --all --github-notice
+  run_old github-outputs github-outputs --base "$BASE"
+  run_old items-unittest items unittest --base "$BASE"
+  run_old items-e2e items e2e --base "$BASE"
+  run_old items-eval items eval --base "$BASE"
+  run_old list list
+  run_old list-graph list --graph
+  run_old list-ignored list-ignored --base "$BASE"
+
+  # explain's inputs come from the old side's own github-outputs capture, so
+  # both sides are fed identical values despite the flag rename.
+  U="$(grep '^unittest-files=' "$OUT/github-outputs.old" | head -1 | cut -d= -f2-)"
+  E="$(grep '^eval-files=' "$OUT/github-outputs.old" | head -1 | cut -d= -f2-)"
+  run_old explain explain --base "$BASE" --unittest-files "$U" --eval-files "$E"
+
+  # Per-bucket `sha <bucket>`: the composite action uses the single-bucket form.
+  # `$B` is the *_VERSION env key; the bucket name is its lowercased, dashed form.
+  BUCKETS="$(cut -d= -f1 "$OUT/sha-all.old" | sed 's/_VERSION$//')"
+  for B in $BUCKETS; do
+    LOWER="$(echo "$B" | tr 'A-Z_' 'a-z-')"
+    ( cd "$WT" && python3 bin/changemap --config "$CONFIG_NAME" sha "$LOWER" > "$OUT/one-$LOWER.old" 2>/dev/null )
+  done
+
+  # The library surface bin/build-docker-compose.py consumes, captured while the
+  # config is still readable by the old parser.
+  ( cd "$WT" && python3 - "$CONFIG_NAME" > "$OUT/lib.old" 2>/dev/null <<'PYEOF'
+import importlib.util, sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("changemap", "bin/changemap")
+spec = importlib.util.spec_from_loader("changemap", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+cfg = m.read_config(sys.argv[1])
+for b in sorted(m.buckets(cfg)):
+    print(f"{b}={m.sha_for_bucket(cfg, b)}")
+PYEOF
+  )
+
+  # ── PHASE 2: new side, with only the reserved-tag rewrite applied ────────
+  # The rewrite is unavoidable (the new parser reserves those names), so it is
+  # the baseline; the [runners] append is then shown to change nothing on top.
+  rewrite_reserved_tags "$CFG"
+  run_new sha-all-pre sha --all
+  run_new github-outputs-pre github-outputs --base "$BASE"
+
+  # ── PHASE 3: append [runners], then prove the append changed nothing ─────
+  printf '%s' "$RUNNERS_BLOCK" >> "$CFG"
+
+  run_new sha-all sha --all
+  run_new sha-notice sha --all --github-notice
+  run_new github-outputs github-outputs --base "$BASE"
+  run_new items-unittest items unittest --base "$BASE"
+  run_new items-e2e items e2e --base "$BASE"
+  run_new items-eval items eval --base "$BASE"
+  run_new list list
+  run_new list-graph list --graph
+  run_new list-ignored list-ignored --base "$BASE"
+  run_new explain explain --base "$BASE" --files "unittest-files=$U" --files "eval-files=$E"
+
+  git -C "$WT" rev-parse "$BASE" > "$OUT/base-new.txt" 2>/dev/null || echo "unresolved" > "$OUT/base-new.txt"
+
+  # The append must be parity-neutral for everything except explain.
+  compare "$REF" "runners-append-neutral:sha" "$OUT/sha-all-pre.new" "$OUT/sha-all.new"
+  compare "$REF" "runners-append-neutral:outputs" "$OUT/github-outputs-pre.new" "$OUT/github-outputs.new"
+  # The pinned base must resolve identically for both runs.
+  compare "$REF" "base-resolves-identically" "$OUT/base-old.txt" "$OUT/base-new.txt"
+
+  for name in sha-all sha-notice github-outputs items-unittest items-e2e items-eval list list-graph list-ignored explain; do
+    compare "$REF" "$name" "$OUT/$name.old" "$OUT/$name.new"
+  done
+
+  # $GITHUB_OUTPUT side-effect files must match too, not just stdout.
+  compare "$REF" "GITHUB_OUTPUT-file" "$OUT/gho-old-github-outputs.txt" "$OUT/gho-new-github-outputs.txt"
+
+  # Single-bucket form, and its agreement with the --all line.
+  for B in $BUCKETS; do
+    LOWER="$(echo "$B" | tr 'A-Z_' 'a-z-')"
+    ( cd "$WT" && TANGIER_CONFIG="$CONFIG_NAME" PYTHONPATH="$TANGIER_ROOT" python3 -m tangier changemap sha "$LOWER" \
+        > "$OUT/one-$LOWER.new" 2>/dev/null )
+    compare "$REF" "sha $LOWER" "$OUT/one-$LOWER.old" "$OUT/one-$LOWER.new"
+    # `sha <bucket>` must agree with the matching `sha --all` line.
+    grep -q "^${B}_VERSION=$(cat "$OUT/one-$LOWER.new")$" "$OUT/sha-all.new" \
+      && record "$REF" "sha $LOWER == --all line" "OK" \
+      || record "$REF" "sha $LOWER == --all line" "MISMATCH"
+  done
+
+  # ── The library surface build-docker-compose.py consumes ────────────────
+  ( cd "$WT" && PYTHONPATH="$TANGIER_ROOT" python3 - "$CONFIG_NAME" > "$OUT/lib.new" 2>/dev/null <<'PY'
+import sys
+from tangier.config import read_config
+from tangier.changemap import buckets, sha_for_bucket
+cfg = read_config(sys.argv[1])
+for b in sorted(buckets(cfg)):
+    print(f"{b}={sha_for_bucket(cfg, b)}")
+PY
+  )
+  compare "$REF" "library-surface" "$OUT/lib.old" "$OUT/lib.new"
+
+  git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1
+done
+
+echo
+echo "═══ parity report ═══"
+printf '%s\n' "${REPORT[@]}"
+echo
+echo "consumer HEAD: $(git -C "$REPO" rev-parse HEAD)"
+echo "checks: $TOTAL   failures: $FAILURES"
+[ "$FAILURES" -eq 0 ] && echo "PARITY OK" || echo "PARITY FAILED"
+exit $((FAILURES > 0))
