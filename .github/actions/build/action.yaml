@@ -66,8 +66,7 @@ runs:
         set -euo pipefail
         REF="${INPUT_REF:-$ACTION_REF}"
         if [ -z "$REF" ]; then
-          echo "::error::cannot determine which tangier ref to install." \
-               "Pass `tangier-ref` when calling this action by local path." >&2
+          echo "::error::cannot determine which tangier ref to install. Pass the tangier-ref input when calling this action by local path." >&2
           exit 1
         fi
         echo "ref=$REF" >> "$GITHUB_OUTPUT"
