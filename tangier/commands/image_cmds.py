@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 
 from tangier.config import Config
+from tangier.github import emit_outputs
 from tangier.image import (
     ImageError,
     build_argv,
@@ -69,18 +70,30 @@ def cmd_build(config: Config, args: argparse.Namespace) -> int:
     argv = build_argv(spec, ref, tag, push=args.push, load=args.load, secrets=secrets)
 
     # `--print` is a dry run, so it must not need a registry: probing first
-    # would make it fail on exactly the machine most likely to want it.
+    # would make it fail on exactly the machine most likely to want it. It
+    # therefore emits no outputs either — there is no build to describe.
     if args.print:
         print(" ".join(argv))
         return 0
 
+    # `emit_outputs` echoes to stdout, so from here on `image build`'s stdout
+    # carries `tag=`/`built=` lines. Safe: only `image exists` has a
+    # captured-string contract (see `cmd_exists`), and nothing captures this.
+    #
+    # `built`, not `published`: `image exists` already owns "published", and
+    # that word would be true both when we skipped and when we built.
+    #
     # Skip when the tag is already published: this idempotence is the whole
     # point of content-addressed tags, and losing it rebuilds every image.
     if args.push and not args.force and published(config, runner, args.bucket, tag):
         print(f"{ref}:{tag} already published; skipping build")
+        emit_outputs({"tag": tag, "built": "false"})
         return 0
 
     result = runner.run(argv, capture=False)
+    # A failed build still emits, with `built=false`; the step fails on the
+    # returncode, and a downstream `if:` reading `built` sees the truth.
+    emit_outputs({"tag": tag, "built": "true" if result.ok else "false"})
     return result.returncode
 
 

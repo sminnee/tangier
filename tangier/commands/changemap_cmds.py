@@ -8,7 +8,7 @@ contracts. `bin/parity-check` diffs them against the pre-extraction script.
 from __future__ import annotations
 
 import argparse
-import os
+import json
 import sys
 
 from tangier import git
@@ -22,6 +22,7 @@ from tangier.changemap import (
     sha_for_bucket,
 )
 from tangier.config import Config, version_var_for
+from tangier.github import emit_outputs
 
 
 def cmd_list(config: Config, args: argparse.Namespace) -> int:
@@ -163,6 +164,37 @@ def cmd_explain(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_matrix(config: Config, args: argparse.Namespace) -> int:
+    """Emit the buildable buckets this diff touches, as a JSON array for a matrix.
+
+    A separate command rather than a line in `github-outputs`, whose contract is
+    that output names are derived mechanically from config — a hardcoded
+    `build-packages` key would break that rule.
+
+    The set is BUCKETS, deduped, not tags: `sha_bucket` is many-to-one, so a
+    tag-level intersection would try to build the same bucket twice.
+
+    Built from `expanded`, not `matched`: a bucket reached only through
+    `depends` must still rebuild — that is the premise of content-addressed
+    tagging, since its hash has moved.
+
+    `build-packages-empty` exists because `strategy.matrix` over `[]` is a hard
+    error in Actions, not a skip, and a boolean an `if:` can read is far easier
+    to get right than `fromJSON(...)[0]`.
+    """
+    # No hashes: the matrix names buckets, and each leg computes its own tag.
+    answers = compute_answer_set(config, args.base, args.head, expand=not args.no_expand, compute_shas=False)
+    touched = {config.sha_bucket[t] for t in answers.expanded if t in config.sha_bucket}
+    packages = sorted(touched & set(config.images))
+    emit_outputs(
+        {
+            "build-packages": json.dumps(packages, separators=(",", ":")),
+            "build-packages-empty": "true" if not packages else "false",
+        }
+    )
+    return 0
+
+
 def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
     """Emit the answer set's CI-relevant fields.
 
@@ -172,21 +204,17 @@ def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
     `[e2e-files]` table needs no code change here).
     """
     answers = compute_answer_set(config, args.base, args.head, expand=not args.no_expand)
-    lines: list[str] = []
+    # Insertion order is the emitted order, and `bin/parity-check` diffs it
+    # against the pre-extraction script — so the four groups stay in this order.
+    pairs: dict[str, str] = {}
     for bucket in sorted(answers.shas):
-        lines.append(f"{bucket}-sha={answers.shas[bucket]}")
+        pairs[f"{bucket}-sha"] = answers.shas[bucket]
     for name in sorted(answers.items):
-        lines.append(f"{name}-items={','.join(answers.items[name])}")
+        pairs[f"{name}-items"] = ",".join(answers.items[name])
     for tag in sorted(answers.touched):
-        lines.append(f"{tag}-touched={'true' if answers.touched[tag] else 'false'}")
+        pairs[f"{tag}-touched"] = "true" if answers.touched[tag] else "false"
     for group in sorted(answers.file_sets):
-        lines.append(f"{group}={','.join(answers.file_sets[group])}")
+        pairs[group] = ",".join(answers.file_sets[group])
 
-    out_path = os.environ.get("GITHUB_OUTPUT")
-    if out_path:
-        with open(out_path, "a") as fh:
-            for line in lines:
-                _ = fh.write(line + "\n")
-    for line in lines:
-        print(line)
+    emit_outputs(pairs)
     return 0

@@ -53,7 +53,7 @@ eval = { cmd = "bin/evals", files = "eval-files" }
 # cutover. The harness applies the same rewrite so both sides see the same tag
 # set, and PHASE 3 proves the rewrite does not move any SHA.
 # (askastro has exactly one: a tag named `k8s`.)
-RESERVED_TAG_NAMES="tags sha registry deploy image k8s runners"
+RESERVED_TAG_NAMES="tags sha registry deploy image k8s runners tailnet"
 
 rewrite_reserved_tags() { # config-path
   local cfg="$1" name

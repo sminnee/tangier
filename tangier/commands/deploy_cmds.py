@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import string
 import sys
 
 from tangier.config import Config
@@ -23,6 +24,7 @@ from tangier.deploy import (
     resolve_env,
     versions,
 )
+from tangier.github import write_summary
 from tangier.runner import Runner, Subprocess
 
 
@@ -70,25 +72,31 @@ def cmd_versions(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_compare_env(config: Config, args: argparse.Namespace) -> int:
-    """The markdown build table with an `old -> **new**` column for changed buckets.
+def compare_table(runner: Runner, config: Config, env, head: str) -> str:
+    """The markdown build table, with an `old -> **new**` column for changed buckets.
+
+    Reads the cluster, so it must run BEFORE any apply — pass 1 overwrites
+    exactly the tags this compares against.
 
     Relocated here from changemap: it is the only kubectl dependency, and a
     tag/path tool shelling out to a cluster is the layering violation this
     extraction exists to fix.
     """
-    env = resolve_env(config, args.compare_env)
-    runner = _runner(args)
-    current = {b: v for b, v in _bucket_versions(config, args.head).items() if not b.endswith("-base")}
+    current = {b: v for b, v in _bucket_versions(config, head).items() if not b.endswith("-base")}
     deployed = deployed_versions(runner, config, env.namespace)
-    print("## Package builds\n")
-    print("| Package | Build ID |")
-    print("|-----|-------|")
+    lines = ["## Package builds", "", "| Package | Build ID |", "|-----|-------|"]
     for bucket, version in current.items():
         if bucket in deployed and deployed[bucket] != version:
-            print(f"| {bucket} | {deployed[bucket]} -> **{version}** |")
+            lines.append(f"| {bucket} | {deployed[bucket]} -> **{version}** |")
         else:
-            print(f"| {bucket} | {version} |")
+            lines.append(f"| {bucket} | {version} |")
+    return "\n".join(lines) + "\n"
+
+
+def cmd_compare_env(config: Config, args: argparse.Namespace) -> int:
+    """Print the build table for a live environment — a read-only diagnostic."""
+    env = resolve_env(config, args.compare_env)
+    print(compare_table(_runner(args), config, env, args.head), end="")
     return 0
 
 
@@ -107,6 +115,15 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
     version_vars = versions(config, args.head)
     ns = env.namespace
     targets = deployment_targets(config)
+
+    # BEFORE any apply: the table reads currently-deployed tags, which pass 1
+    # overwrites — and a summary is most wanted when the deploy then fails.
+    if getattr(args, "summary", False):
+        table = compare_table(runner, config, env, args.head)
+        # Falls back to stdout rather than silently doing nothing, so one
+        # invocation works both on a runner and on a laptop.
+        if not write_summary(table):
+            print(table, end="")
 
     print(f"Deploying to {env.name} ({ns})...")
     manifests = _render(runner, config, env, version_vars)
@@ -149,11 +166,37 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
 
     if _wait_for_rollout(runner, config, ns, targets):
         print("All deployments rolled out successfully")
-        return 0
+        # ONLY on success: cutting a release for a version that was just rolled
+        # back is worse than not cutting one.
+        return _run_after_hook(runner, config, env, version_vars)
 
     print("Rolling back")
     _rollback(runner, config, env, version_vars, prior, targets)
     return 1
+
+
+def _run_after_hook(runner: Runner, cfg: Config, env, version_vars: dict[str, str]) -> int:
+    """Run `[deploy] after`, if configured. Returns the deploy's exit code.
+
+    The argv was split at parse time; each token is substituted here against
+    `ENV` plus the version variables. `safe_substitute` leaves an unknown
+    `${...}` alone rather than raising — a hook is a side errand, and a typo in
+    one should not fail a deploy that has already rolled out.
+    """
+    hook = cfg.after
+    if hook is None:
+        return 0
+    mapping = {"ENV": env.name, **version_vars}
+    argv = [string.Template(token).safe_substitute(mapping) for token in hook.argv]
+    print(f"Running post-deploy hook: {' '.join(argv)}")
+    result = runner.run(argv, capture=False, env={**os.environ, **version_vars, "ENV": env.name})
+    if result.ok:
+        return 0
+    if hook.fatal:
+        print(f"post-deploy hook failed (exit {result.returncode})", file=sys.stderr)
+        return result.returncode
+    print(f"post-deploy hook failed (exit {result.returncode}); non-fatal", file=sys.stderr)
+    return 0
 
 
 def _wait_for_rollout(runner: Runner, cfg: Config, ns: str, targets: list[str]) -> bool:
@@ -251,11 +294,21 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         metavar="ENV",
         help="markdown build table comparing computed tags against a live environment",
     )
+    _ = dp.add_argument(
+        "--summary",
+        action="store_true",
+        help="write the build table to $GITHUB_STEP_SUMMARY (or stdout) before deploying",
+    )
     dp.set_defaults(func=_dispatch)
 
 
 def _dispatch(config: Config, args: argparse.Namespace) -> int:
     """Route the mutually-exclusive read-only modes before the deploying one."""
+    # Rejected rather than ignored: `--summary` decorates a deploy, and silently
+    # dropping it from a read-only mode would look like it had run.
+    if args.summary and (args.render or args.versions or args.compare_env):
+        print("error: --summary cannot be combined with --render/--versions/--compare-env", file=sys.stderr)
+        return 2
     if args.render:
         args.env = args.render
         return cmd_render(config, args)
