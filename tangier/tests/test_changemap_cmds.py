@@ -28,6 +28,9 @@ def _capture(fn, *args) -> str:
 class TestBuildMatrix(unittest.TestCase):
     """The JSON array feeding `strategy.matrix`, plus its empty guard."""
 
+    # SPEC: changemap#build-matrix-buckets
+    # SPEC: changemap#build-matrix-empty-guard
+
     def _cfg(self):
         return make_config(
             **{

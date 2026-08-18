@@ -124,6 +124,7 @@ expanded, shas, items, touched, file-sets, ignored).
 - `github-outputs` — full answer set as `name=value` lines, echoed to stdout and appended to
   `$GITHUB_OUTPUT` when set.
 - `explain` — modified tags, dependents, and the resulting runner invocations.
+- `build-matrix` — the buildable buckets this diff touches, as a JSON array for a build matrix.
 
 - `github-outputs` emits SHAs, items (csv), touched flags, and one `<group>=` line per file-set.
   The file-set group name IS the output name — no suffix is added, so a new file-set table needs no
@@ -131,6 +132,15 @@ expanded, shas, items, touched, file-sets, ignored).
 - `explain` groups changed files by tag, lists dependents, renders the runner invocation lines.
   An empty dir list renders as the literal two-character `""`, a shell-safe empty argument.
   `[explain-groups-by-tag]`
+- `build-matrix` emits `build-packages` (a JSON array) and `build-packages-empty` (a boolean).
+  The set is **buckets**, deduped, from the **expanded** set intersected with the configured
+  `[image.*]` tables. Buckets, not tags, because `sha` is many-to-one and a tag-level
+  intersection would build the same bucket twice. Expanded, not matched, because a bucket reached
+  only through `depends` has a moved content hash and must rebuild. `[build-matrix-buckets]`
+  A separate command rather than a line in `github-outputs`, whose contract is that output names
+  are derived from config — a hardcoded key would break that rule.
+  `build-packages-empty` exists because an empty `strategy.matrix` is a hard error in GitHub
+  Actions rather than a skip. `[build-matrix-empty-guard]`
 - `--no-expand` returns the un-expanded matched set (debug). `[no-expand-debug-flag]`
 
 A bad ref yields an empty diff rather than an error: `git diff` runs with `check=False`, so a
