@@ -9,6 +9,7 @@ It answers three questions that repos usually answer with a pile of copy-pasted 
 | `tangier changemap` | Which parts of the repo does this diff touch? Drives selective test runs. |
 | `tangier image` | What is this component's content hash, and does that image already exist? |
 | `tangier deploy` | Render and apply the k8s manifests for those image tags. |
+| `tangier tailnet` | Can this machine actually reach the cluster, and as what identity? |
 
 The organising idea is the **content-addressed tag**: a component's image is tagged with a hash of
 its own source tree plus everything it depends on. Rebuild only what changed, skip what is already
@@ -49,6 +50,7 @@ tangier image tag core                     # one component's hash
 tangier image build core --push            # build, unless already published
 tangier deploy --render uat                # the manifests a deploy would apply
 tangier deploy uat                         # migrate, apply, wait, roll back on failure
+tangier tailnet check uat                  # why can't I reach the cluster?
 ```
 
 `--config` defaults to `pipeline.toml`, overridable with `$TANGIER_CONFIG`.
@@ -79,12 +81,70 @@ serving.
 
 `--render` and `--versions` are read-only and are the cheapest way to see what a deploy will do.
 
+`--summary` writes a build table comparing the computed tags against what is currently deployed. It
+writes to `$GITHUB_STEP_SUMMARY` when that is set and to stdout otherwise, so one invocation works
+both on a runner and on a laptop. The table is emitted before anything is applied, because the first
+apply overwrites the tags it reads.
+
+`[deploy] after` runs a command once a deploy has fully rolled out — never after a rollback:
+
+```toml
+[deploy]
+after = "bin/sentry-release ${ENV}"
+```
+
+The command is split into arguments when the config is parsed, then each argument is substituted
+against `ENV` and the version variables. No shell is involved, so shell operators (`&&`, `|`, `;`)
+are rejected at parse time — put that logic in a script.
+
+A failed hook does not fail the deploy. The string form above always means `fatal = false`; use the
+table form to change that:
+
+```toml
+[deploy.after]
+cmd = "bin/sentry-release ${ENV}"
+fatal = true
+```
+
+## Actions
+
+tangier ships the CI scaffolding as well as the CLI, so a consumer's workflows state their packages
+and environments and nothing else.
+
+| Action | Purpose |
+|---|---|
+| `sminnee/tangier/.github/actions/build@v0` | Build and push one package, skipping when already published |
+| `sminnee/tangier/.github/actions/tailnet@v0` | Connect to the tailnet and point kubectl at the operator |
+| `sminnee/tangier/.github/actions/deploy@v0` | The tailnet connect, plus `tangier deploy <env> --summary` |
+| `sminnee/tangier/.github/workflows/build.yaml@v0` | Reusable matrixed build over a JSON array of packages |
+
+Feed the build matrix from the CLI, which also emits a boolean for the empty case — an empty
+`strategy.matrix` is a hard error in GitHub Actions, not a skip:
+
+```sh
+tangier changemap build-matrix
+# build-packages=["astrochat","smartypants"]
+# build-packages-empty=false
+```
+
+Read `docs/actions/tailnet.md` before touching any workflow that deploys. The separation between
+uat and prod rests entirely on the `environment:` line of the calling job, and that is no longer
+visible from the call site.
+
+`@v0` is a moving alias: moving it ships to every consumer at once. Pin an exact version
+(`@v0.1.0`) for reproducibility. `bin/release v0.1.0` refuses a dirty tree or a non-`main` HEAD and
+runs the tests before tagging.
+
 ## Development
 
 ```sh
 bin/test          # stdlib unittest, no dependencies
 ruff check .
 ```
+
+Releases are a maintainer step, not part of the everyday loop: `bin/release v0.1.0` tags a version
+and moves the `@v0` alias that every consumer pins. It refuses a dirty tree and any HEAD that is not
+`origin/main`, runs the tests, and stops short of pushing.
 
 `bin/parity-check <path-to-repo>` diffs `tangier changemap` against a repo's pre-extraction
 `bin/changemap` across many refs, in throwaway worktrees, and is the gate for migrating a repo onto

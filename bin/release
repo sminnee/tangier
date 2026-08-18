@@ -1,0 +1,69 @@
+#!/bin/bash
+# Tag a release and move the major-version alias.
+#
+# Usage: bin/release v0.1.0
+#
+# Consumers pin `@v0`, a moving alias. Moving it ships to every consumer at once
+# with no PR anywhere, so this script refuses to run on a dirty tree or off
+# main, and runs the tests before tagging. A consumer wanting reproducibility
+# pins the exact version instead — and because `action_ref` is passed through to
+# the CLI install, the Python follows whichever ref the action was called at.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+VERSION="${1:-}"
+if [ -z "$VERSION" ]; then
+  echo "usage: bin/release vX.Y.Z" >&2
+  exit 2
+fi
+if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "error: version must look like v0.1.0, got: $VERSION" >&2
+  exit 2
+fi
+ALIAS="${VERSION%%.*}"   # v0.1.0 -> v0
+
+# HEAD must BE the released commit — checked by commit, not by branch name.
+# tangier is developed in worktrees, where `main` is checked out somewhere else
+# entirely, so requiring it to be the current branch would make this script
+# unrunnable from the tree the work happens in.
+git fetch origin main --quiet
+HEAD_SHA="$(git rev-parse HEAD)"
+MAIN_SHA="$(git rev-parse origin/main)"
+if [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
+  echo "error: HEAD is not origin/main — releases are cut from main only" >&2
+  echo "  HEAD:        $HEAD_SHA" >&2
+  echo "  origin/main: $MAIN_SHA" >&2
+  # Tagging a stale main and force-moving the alias onto it would ship a
+  # regression to every consumer pinned at @v0 — the exact blast radius the
+  # rest of this script exists to contain.
+  echo "  run: git checkout main && git pull --ff-only" >&2
+  exit 1
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  echo "error: working tree is dirty — commit or stash first" >&2
+  git status --short >&2
+  exit 1
+fi
+if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+  echo "error: tag $VERSION already exists" >&2
+  exit 1
+fi
+
+echo "Running tests before tagging $VERSION"
+bin/test
+
+git tag -a "$VERSION" -m "Release $VERSION"
+# The alias is forced: moving it is the point, and it already exists after the
+# first release.
+git tag -f -a "$ALIAS" -m "Alias for $VERSION"
+
+cat <<EOF
+
+Tagged $VERSION and moved $ALIAS.
+
+Nothing is pushed yet. Moving $ALIAS ships to every consumer at once, so push
+deliberately:
+
+  git push origin $VERSION
+  git push origin -f $ALIAS
+EOF
