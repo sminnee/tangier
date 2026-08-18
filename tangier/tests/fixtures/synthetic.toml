@@ -1,0 +1,100 @@
+# A synthetic pipeline.toml standing in for a real monorepo's config.
+#
+# It reproduces the *shapes* that askastro's config comments record as having
+# broken production CI, with generic names — so the regressions stay covered
+# without coupling tangier's tests to another repo's file:
+#
+#   * a bucket shipping a generated file that a shared tag excludes
+#     (the `webapp` / `frontend-shared` / `api.generated.ts` shape)
+#   * a service deliberately absent from `unittest-files` because it owns a
+#     dedicated CI job (the typesetter shape)
+#   * a shared library whose tests DO run in the shared job
+#   * `-ui` tags depending on a shared frontend tag, so a cross-cutting
+#     frontend change fans out to every e2e suite
+
+[registry]
+url = "registry.example/ns"
+
+[sha]
+exclude = ["**/README.md"]
+
+[runners]
+unittest = { cmd = "bin/test", files = "unittest-files" }
+e2e = { cmd = "bin/e2e-test" }
+eval = { cmd = "bin/evals", files = "eval-files" }
+
+# --- file-set projections -------------------------------------------------
+# Scoped to the code the shared backend job can actually execute. `renderer`
+# is absent on purpose: it owns a dedicated job with its own dependencies, and
+# routing its tests here would run them in an environment lacking them.
+[unittest-files]
+files = true
+paths = ["service/core/**/*_test.py", "service/scanner/**/*_test.py", "lib/shared/**/*_test.py"]
+
+[eval-files]
+files = true
+paths = ["service/core/**/*_eval.py", "lib/shared/**/*_eval.py"]
+
+# --- shared library -------------------------------------------------------
+[shared]
+paths = "lib/shared/**"
+exclude = ["lib/shared/**/*_test.py", "lib/shared/**/*_eval.py"]
+unittest_items = "lib/shared"
+sha = "core"
+
+# --- backend services -----------------------------------------------------
+[core]
+paths = "service/core/**"
+exclude = ["service/core/**/*_test.py", "service/core/**/*_eval.py"]
+depends = ["shared"]
+unittest_items = "service/core"
+eval_items = "service/core"
+sha = true
+touched = true
+
+[scanner]
+paths = "service/scanner/**"
+exclude = ["service/scanner/**/*_test.py"]
+depends = ["shared"]
+unittest_items = "service/scanner"
+sha = true
+touched = true
+
+# The dedicated-job service: its sources have a tag and a SHA bucket, but its
+# test files are not in [unittest-files], so they never reach the shared job.
+[renderer]
+paths = "service/renderer/**"
+exclude = ["service/renderer/**/*_test.py"]
+depends = ["shared"]
+unittest_items = "service/renderer"
+sha = true
+touched = true
+
+# --- frontend -------------------------------------------------------------
+# The generated API client is emitted from backend routes. Counting it as
+# cross-cutting frontend code expanded to EVERY `-ui` suite — a full e2e run
+# with no added signal. It must still build the webapp image.
+[frontend-shared]
+paths = "frontend/src/**"
+exclude = ["frontend/src/api/api.generated.ts"]
+depends = ["shared"]
+
+[webapp]
+paths = "frontend/**"
+sha = true
+touched = true
+
+[e2e]
+paths = "e2e/**"
+depends = ["frontend-shared"]
+e2e_items = "e2e/smoke"
+
+[accounts-ui]
+paths = "frontend/src/accounts/**"
+depends = ["frontend-shared"]
+e2e_items = "e2e/accounts"
+
+[reports-ui]
+paths = "frontend/src/reports/**"
+depends = ["frontend-shared"]
+e2e_items = "e2e/reports"

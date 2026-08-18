@@ -1,0 +1,133 @@
+# An annotated `pipeline.toml`, in the shape a real monorepo uses.
+#
+# Copy this to `pipeline.toml` at your repo root and edit. Everything except the
+# tag tables is optional: a repo that only wants selective CI needs the tags and
+# `[runners]`, and nothing else.
+
+# ---------------------------------------------------------------------------
+# Reserved sections. These names configure tangier and cannot be used as bare
+# tag names — a tag genuinely called `sha` or `k8s` is written `[tags.sha]`.
+# Reserved: tags, sha, registry, deploy, image, k8s, runners
+# ---------------------------------------------------------------------------
+
+[registry]
+url = "registry.example.com/myorg"
+
+[sha]
+# Paths excluded from every bucket's content hash, so editing them never
+# rebuilds an image. Defaults to ["**/README.md"] when absent.
+# An explicit `exclude = []` disables filtering entirely.
+exclude = ["**/README.md"]
+
+[runners]
+# Keyed by items name (the `<name>` in `<name>_items`), NOT by tag. `files`
+# names the file-set group feeding this runner's `--files` flag — it is
+# explicit because the link is not derivable: items `unittest` pairs with the
+# group `unittest-files`. Omit `files` and the runner never gets a --files arg.
+unittest = { cmd = "bin/test", files = "unittest-files" }
+e2e = { cmd = "bin/e2e-test" }
+eval = { cmd = "bin/evals", files = "eval-files" }
+
+# --- images, keyed by SHA bucket -------------------------------------------
+# A bucket with no [image.*] table is "not buildable here", but is still
+# substitutable by `tangier image compose`.
+
+[image.core]
+dockerfile = "service/core/Dockerfile"
+# context = "."         # the build context is the repo root; `code-path` in a
+#                       # workflow was a dockerfile PREFIX, not a context
+# cache = true          # registry-backed layer cache on --push
+# args = { FOO = "bar" }
+
+[image.webapp]
+dockerfile = "frontend/Dockerfile"
+# Emitted as `--secret id=x,env=X`, and ONLY when X is set in the environment.
+# The value never enters tangier — only the variable name.
+secrets = ["sentry_auth_token"]
+
+# --- deploy environments ---------------------------------------------------
+
+[deploy.uat]
+namespace = "myorg-uat"
+overlay = "k8s/overlays/uat"
+migration_timeout = 600
+# `${...}` is substituted from the version variables, so the Job name embeds
+# the version and a re-apply stays idempotent.
+migration_job = "core-migrate-${CORE_VERSION}"
+migration_version_bucket = "core"
+
+[deploy.prod]
+namespace = "myorg-prod"
+overlay = "k8s/overlays/prod"
+migration_timeout = 3600
+migration_job = "core-migrate-${CORE_VERSION}"
+migration_version_bucket = "core"
+
+[deploy.rollout]
+max_wait = 600
+poll_interval = 10
+crash_threshold = 3
+rollback_migration_timeout = 600
+
+# --- k8s workloads, keyed by bucket ----------------------------------------
+# Top-level rather than nested per environment: every environment renders from
+# the same base kustomization, so per-env placement only invites drift. This is
+# also where one bucket driving several deployments is expressed.
+
+[k8s.core]
+deployments = ["core", "core-worker"]   # defaults to [bucket]
+container = "server"                    # which container carries the image tag
+# version_var = "CORE_VERSION"          # derived from the bucket name
+
+[k8s.scanner]
+deployments = ["scanner"]
+container = "worker"
+
+# ---------------------------------------------------------------------------
+# Tags. Every non-reserved top-level table is a tag; `[tags.<name>]` is the
+# escape hatch for names that collide with a reserved section.
+# ---------------------------------------------------------------------------
+
+# File-set projections (`files = true`) are projection-only: their globs select
+# directly-changed files for a runner's `--files` flag, and they never enter the
+# tag-match map, SHA buckets, touched flags, or `ignored`. The table name IS the
+# CI output name.
+[unittest-files]
+files = true
+paths = ["service/core/**/*_test.py", "lib/shared/**/*_test.py"]
+
+[eval-files]
+files = true
+paths = ["service/core/**/*_eval.py"]
+
+[shared]
+paths = "lib/shared/**"
+exclude = ["lib/shared/**/*_test.py"]
+unittest_items = "lib/shared"
+sha = "core"                # contributes to the `core` bucket
+
+[core]
+paths = "service/core/**"
+exclude = ["service/core/**/*_test.py"]
+depends = ["shared"]        # a change to `shared` also runs `core`
+unittest_items = "service/core"
+eval_items = "service/core"
+sha = true                  # this tag IS a bucket named `core`
+touched = true              # emit `core-touched=true|false`
+
+[scanner]
+paths = "service/scanner/**"
+depends = ["shared"]
+unittest_items = "service/scanner"
+sha = true
+touched = true
+
+[webapp]
+paths = "frontend/**"
+sha = true
+touched = true
+
+# A tag named after a reserved section is declared nested.
+[tags.k8s]
+paths = "k8s/**"
+touched = true

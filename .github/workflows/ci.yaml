@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor (tomllib); 3.12 is what bare GitHub runners provide,
+        # which is the environment tangier must work in without setup-python.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run tests
+        run: bin/test
+      - name: CLI smoke check
+        run: python -m tangier --help
+
+  no-dependencies:
+    # tangier runs on bare runners with no pip install, so the dependency list
+    # must stay empty and no module may import a third-party package.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Assert dependencies == []
+        run: |
+          python - <<'EOF'
+          import tomllib, sys
+          with open("pyproject.toml", "rb") as fh:
+              deps = tomllib.load(fh)["project"]["dependencies"]
+          if deps:
+              sys.exit(f"tangier must have no dependencies, found: {deps}")
+          print("dependencies == []")
+          EOF
+      - name: Import every module in isolated mode
+        # -I ignores site-packages and PYTHONPATH, so any third-party import
+        # fails here. The checkout dir is added back explicitly — that is the
+        # only path tangier itself is allowed to come from.
+        run: |
+          python -I -c "
+          import sys; sys.path.insert(0, '.')
+          import tangier.cli, tangier.config, tangier.globs, tangier.git
+          import tangier.runner, tangier.changemap, tangier.image, tangier.deploy
+          import tangier.commands.changemap_cmds
+          import tangier.commands.image_cmds, tangier.commands.deploy_cmds
+          print('all modules import stdlib-only')
+          "
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .

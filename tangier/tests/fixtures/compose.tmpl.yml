@@ -1,0 +1,31 @@
+# A compose template in the shape askastro's uses: several services sharing one
+# bucket's image, `${VAR}` left for docker-compose, and a bucket
+# (astronort-scheduler) that has NO placeholder — its replace is a no-op.
+services:
+  server:
+    image: [[smartypants]]
+    environment:
+      - APP_URL=http://localhost:3100
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LLM_MODEL_OVERRIDE=${LLM_MODEL_OVERRIDE:-}
+    ports:
+      - "3200:80"
+
+  worker:
+    image: [[smartypants]]
+    environment:
+      - ASTRONORT_WORKER=1
+
+  typesetter:
+    image: [[astronort-typesetter]]
+
+  lector:
+    image: [[astronort-lector]]
+
+  fetcher-mcp:
+    image: [[astronort-fetcher-mcp]]
+
+  astrochat:
+    image: [[astrochat]]
+    environment:
+      - VITE_API_URL=${VITE_API_URL}
