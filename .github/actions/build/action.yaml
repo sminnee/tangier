@@ -1,0 +1,153 @@
+name: tangier build
+description: >-
+  Build and push one package's content-addressed image, skipping the build
+  entirely when that tag is already published.
+
+inputs:
+  package:
+    description: The SHA bucket to build. Must have an `[image.<bucket>]` table in pipeline.toml.
+    required: true
+  registry-password:
+    description: Password for the image registry.
+    required: true
+  registry-username:
+    description: >-
+      Username for the image registry. Defaults to `registry`, which is what
+      every repo but tangerinecms uses.
+    required: false
+    default: registry
+  extra-secrets:
+    description: >-
+      Space-separated buildx secret IDS — not values — for secrets not named in
+      the package's `[image.<bucket>] secrets`. The value is read from the
+      environment variable of the same name upper-cased, so `sentry_auth_token`
+      reads SENTRY_AUTH_TOKEN. A secret whose variable is unset is silently
+      dropped rather than passed empty, so pass values through the step's `env:`
+      block (a composite action cannot read the `secrets` context).
+    required: false
+    default: ""
+  regctl-version:
+    description: regctl release to install. Pinned, never `latest`.
+    required: false
+    default: v0.6.1
+  tangier-ref:
+    description: >-
+      The tangier ref to install the CLI from. Defaults to the ref this action
+      was called at. Required when calling the action locally (`uses: ./...`),
+      because `github.action_ref` is empty for a local path.
+    required: false
+    default: ""
+
+outputs:
+  tag:
+    description: The content-hash tag for this package, whether or not a build ran.
+    value: ${{ steps.build.outputs.tag }}
+  published:
+    description: >-
+      `true` when this run built and pushed the image, `false` when the tag was
+      already published and the build was skipped.
+    value: ${{ steps.build.outputs.built }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the tangier ref
+      id: ref
+      shell: bash
+      # `github.action_ref` is empty inside a `run:` body but correct when bound
+      # through `env:` (actions/runner#2473), so every read here goes via the
+      # environment. It is also empty for a local `uses: ./...`, which is how
+      # tangier tests its own actions — hence the input, and a hard error rather
+      # than a silent fallback to `main`.
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        INPUT_REF: ${{ inputs.tangier-ref }}
+      run: |
+        set -euo pipefail
+        REF="${INPUT_REF:-$ACTION_REF}"
+        if [ -z "$REF" ]; then
+          echo "::error::cannot determine which tangier ref to install." \
+               "Pass `tangier-ref` when calling this action by local path." >&2
+          exit 1
+        fi
+        echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+    - uses: astral-sh/setup-uv@v5
+      with:
+        version: "0.5.29"
+
+    - name: Install tangier
+      shell: bash
+      # `uv tool install`, not `uvx --from`, so `tangier` stays on PATH for any
+      # repo script that runs after this action.
+      env:
+        TANGIER_REF: ${{ steps.ref.outputs.ref }}
+      run: |
+        set -euo pipefail
+        uv tool install "git+https://github.com/sminnee/tangier@${TANGIER_REF}"
+
+    - name: Install regctl
+      shell: bash
+      # Pinned by version, never `releases/latest`: a moving binary in the hot
+      # path of every build is a silent behaviour change with no PR anywhere.
+      # `set -euo pipefail` matters here — without it a failed curl leaves a
+      # zero-byte file that fails confusingly several steps later.
+      env:
+        REGCTL_VERSION: ${{ inputs.regctl-version }}
+      run: |
+        set -euo pipefail
+        # Into $RUNNER_TEMP rather than /usr/local/bin: that directory happens to
+        # be writable on GitHub-hosted images, but not on a self-hosted runner or
+        # a container job running as non-root — and `runs-on` is already an input.
+        mkdir -p "$RUNNER_TEMP/bin"
+        curl -fsSL -o "$RUNNER_TEMP/bin/regctl" \
+          "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64"
+        chmod 755 "$RUNNER_TEMP/bin/regctl"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/bin/regctl" version
+
+    - uses: docker/setup-buildx-action@v3
+
+    - name: Registry login
+      shell: bash
+      # `[registry] url` is host + namespace, but `docker login` takes only the
+      # host: `${URL%%/*}` gives `registry.sminn.ee` from
+      # `registry.sminn.ee/tangerine`, and keeps a `:port` if one is configured.
+      # Read with tomllib rather than the CLI so this step does not depend on
+      # the install above having succeeded.
+      env:
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+      run: |
+        set -euo pipefail
+        URL="$(python3 -c '
+        import tomllib
+        with open("pipeline.toml", "rb") as fh:
+            print(tomllib.load(fh)["registry"]["url"])
+        ')"
+        HOST="${URL%%/*}"
+        echo "Logging in to $HOST"
+        printf '%s' "$REGISTRY_PASSWORD" | docker login "$HOST" \
+          --username "$REGISTRY_USERNAME" --password-stdin
+
+    - name: Build and push
+      id: build
+      shell: bash
+      # tangier probes the registry first and skips the build when the
+      # content-hash tag is already published — the idempotence that
+      # content-addressed tagging exists for. It emits `tag` and `built` to
+      # $GITHUB_OUTPUT itself, which is where this action's outputs come from.
+      #
+      # `resolve_secrets` reads os.environ and drops any secret whose variable
+      # is unset, so a caller supplies values through this step's `env:` and
+      # needs no input for the ids already in `[image.<bucket>] secrets`.
+      env:
+        PACKAGE: ${{ inputs.package }}
+        EXTRA_SECRETS: ${{ inputs.extra-secrets }}
+      run: |
+        set -euo pipefail
+        ARGS=()
+        for id in $EXTRA_SECRETS; do
+          ARGS+=(--secret "id=$id")
+        done
+        tangier image build "$PACKAGE" --push "${ARGS[@]+"${ARGS[@]}"}"

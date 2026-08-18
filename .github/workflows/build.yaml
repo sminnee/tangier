@@ -1,0 +1,87 @@
+name: Build packages
+
+# One matrixed job in place of a hand-written job per package. Feed `packages`
+# from `tangier changemap build-matrix`, which emits exactly this shape.
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: >-
+          JSON array of SHA buckets to build, e.g. '["astrochat","smartypants"]'.
+          A JSON *string* rather than a list because matrices need `fromJSON` and
+          Actions has no typed list input. `changemap build-matrix` emits it.
+        required: true
+        type: string
+      registry-username:
+        description: Registry username. Defaults to `registry`.
+        required: false
+        type: string
+        default: registry
+      extra-secrets:
+        description: Space-separated extra buildx secret IDs (not values).
+        required: false
+        type: string
+        default: ""
+      regctl-version:
+        required: false
+        type: string
+        default: v0.6.1
+      tangier-ref:
+        description: tangier ref to install the CLI from. Defaults to this workflow's ref.
+        required: false
+        type: string
+        default: ""
+      fail-fast:
+        description: >-
+          Cancel sibling legs when one fails. Defaults to false: an unrelated
+          package's failure should not discard a build that already succeeded,
+          and content-addressed tags make a partial set safe to resume.
+        required: false
+        type: boolean
+        default: false
+      runs-on:
+        required: false
+        type: string
+        default: ubuntu-latest
+    secrets:
+      registry-password:
+        required: true
+      sentry-auth-token:
+        description: >-
+          Passed to EVERY matrix leg — Actions offers no per-leg secret routing.
+          Safe because tangier fails closed: `resolve_secrets` emits `--secret`
+          only for ids the bucket's `[image.<bucket>] secrets` declares, so a
+          package that does not want it never references it.
+        required: false
+
+jobs:
+  build:
+    # An empty `strategy.matrix` is a hard error ("Matrix vector 'package' does
+    # not contain any values"), not a skip — and any docs-only PR produces one.
+    # The quoting is load-bearing: `!= []` does not evaluate false for an empty
+    # array, so the comparison is against the JSON *string*.
+    if: ${{ inputs.packages != '[]' && inputs.packages != '' }}
+    runs-on: ${{ inputs.runs-on }}
+    strategy:
+      fail-fast: ${{ inputs.fail-fast }}
+      matrix:
+        package: ${{ fromJSON(inputs.packages) }}
+    name: build ${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # tangier hashes the git tree to derive the tag, so a shallow checkout
+          # would produce a different hash from a local run.
+          fetch-depth: 0
+
+      - uses: sminnee/tangier/.github/actions/build@v0
+        with:
+          package: ${{ matrix.package }}
+          registry-username: ${{ inputs.registry-username }}
+          registry-password: ${{ secrets.registry-password }}
+          extra-secrets: ${{ inputs.extra-secrets }}
+          regctl-version: ${{ inputs.regctl-version }}
+          tangier-ref: ${{ inputs.tangier-ref }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.sentry-auth-token }}

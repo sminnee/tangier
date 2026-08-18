@@ -1,0 +1,38 @@
+name: Empty matrix guard
+
+# Two lines guarding the footgun most likely to break a consumer's PR flow: a
+# `strategy.matrix` over `[]` is a hard error in Actions, not a skip, and any
+# docs-only PR produces exactly that. The assertion is that the run SUCCEEDS
+# with the build job skipped.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  empty:
+    uses: ./.github/workflows/build.yaml
+    with:
+      packages: "[]"
+    secrets:
+      registry-password: unused
+
+  assert-skipped:
+    needs: empty
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert the build job was skipped, not failed
+        env:
+          RESULT: ${{ needs.empty.result }}
+        run: |
+          set -euo pipefail
+          # Exactly `skipped`. Accepting `success` too would let a regression
+          # that removed the `if:` guard pass whenever the matrix happened to
+          # run — which is the one thing this test exists to catch.
+          test "$RESULT" = skipped || {
+            echo "::error::expected the build job to be skipped, got result=$RESULT"
+            exit 1
+          }
+          echo "empty matrix handled: build job skipped"
