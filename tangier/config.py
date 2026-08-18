@@ -30,6 +30,7 @@ you name a tag that collides with a reserved section.
 
 from __future__ import annotations
 
+import shlex
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -38,7 +39,7 @@ from typing import Any
 # Top-level names that configure tangier rather than declaring a tag. Reserved
 # now even where the behaviour lands later: reserving a name is cheap,
 # un-reserving one after a config author used it as a tag is a breaking change.
-RESERVED_SECTIONS = frozenset({"tags", "sha", "registry", "deploy", "image", "k8s", "runners"})
+RESERVED_SECTIONS = frozenset({"tags", "sha", "registry", "deploy", "image", "k8s", "runners", "tailnet"})
 
 # Recognised tag-table fields. `_items` is matched by suffix.
 _KNOWN_FIELDS = {"paths", "exclude", "depends", "sha", "touched", "files"}
@@ -123,6 +124,44 @@ class RolloutSettings:
 
 
 @dataclass
+class AfterHook:
+    """`[deploy] after` — a command to run once a deploy has fully rolled out.
+
+    Split into argv at PARSE time with `shlex`, before any substitution, so an
+    environment name containing a space cannot inject an argument and
+    `runner.run` never needs a shell. Each token is then substituted
+    individually against the version variables.
+
+    `fatal` defaults to False: the hook is a notification (cut a release, ping a
+    channel), and a successful deploy should not be reported as failed because
+    a side errand did not land.
+    """
+
+    argv: list[str]
+    fatal: bool = False
+
+
+@dataclass
+class TailnetEnv:
+    """`[tailnet.<env>]` — the tailnet ACL tag a deploy to this env authenticates as."""
+
+    name: str
+    tag: str
+
+
+@dataclass
+class TailnetSettings:
+    """`[tailnet]` — how CI reaches the cluster over the tailnet.
+
+    `operator` is the Tailscale Kubernetes operator's hostname, which appears in
+    the kubeconfig context name. All four consuming repos use the default.
+    """
+
+    operator: str = "tailscale-operator"
+    envs: dict[str, TailnetEnv] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     paths: dict[str, list[str]] = field(default_factory=dict)
     # tag -> globs subtracted from that tag's `paths` (absent == no exclusions).
@@ -144,6 +183,8 @@ class Config:
     k8s: dict[str, K8sSpec] = field(default_factory=dict)
     deploy_envs: dict[str, DeployEnv] = field(default_factory=dict)
     rollout: RolloutSettings = field(default_factory=RolloutSettings)
+    after: AfterHook | None = None
+    tailnet: TailnetSettings = field(default_factory=TailnetSettings)
 
 
 # ---------------------------------------------------------------------------
@@ -275,10 +316,70 @@ def _parse_k8s(path: str, body: dict[str, Any]) -> dict[str, K8sSpec]:
     return out
 
 
-def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv], RolloutSettings]:
+# Shell operators. The hook runs WITHOUT a shell, so an author who writes one
+# means something the hook cannot do — it would reach the command as a literal
+# argument and fail somewhere strange, mid-deploy. Rejecting at parse time means
+# they learn about it before a deploy rather than during one.
+#
+# Matched against whole TOKENS, after splitting: `>` is an operator on its own
+# and harmless inside `--title=a>b`, which never reaches a shell to be
+# redirected. `${...}` is the hook's own substitution syntax and is not an
+# operator; `$(` and a backtick are, since neither can ever be substituted.
+_SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", "|", ";", ">", ">>", "<", "&"})
+_SHELL_SUBSTITUTIONS = ("$(", "`")
+
+
+def _parse_after(path: str, val: object) -> AfterHook:
+    """Parse `[deploy] after` — the string shorthand or the explicit table.
+
+    `after = "bin/x ${ENV}"` is sugar for a table with `fatal = false`, which is
+    the shape every current consumer wants.
+    """
+    if isinstance(val, str):
+        cmd, fatal = val, False
+    elif isinstance(val, dict):
+        _check_keys(path, "deploy.after", val, {"cmd", "fatal"})
+        if "cmd" not in val:
+            raise ConfigError(f"{path}: `[deploy.after]` requires `cmd`")
+        cmd = _as_str(path, "deploy.after", "cmd", val["cmd"])
+        fatal = val.get("fatal", False)
+        if not isinstance(fatal, bool):
+            raise ConfigError(f"{path}: `[deploy.after].fatal` must be a boolean")
+    else:
+        raise ConfigError(f"{path}: `[deploy] after` must be a string or a table, got {type(val).__name__}")
+
+    for marker in _SHELL_SUBSTITUTIONS:
+        if marker in cmd:
+            raise ConfigError(
+                f"{path}: `[deploy] after` contains `{marker}`, but the hook runs without a shell "
+                f"— put the logic in a script and call that instead"
+            )
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as e:
+        raise ConfigError(f"{path}: `[deploy] after` is not a valid command line: {e}") from e
+    if not argv:
+        raise ConfigError(f"{path}: `[deploy] after` is empty")
+    for token in argv:
+        if token in _SHELL_OPERATOR_TOKENS:
+            raise ConfigError(
+                f"{path}: `[deploy] after` contains the shell operator `{token}`, but the hook "
+                f"runs without a shell — put the logic in a script and call that instead"
+            )
+    return AfterHook(argv=argv, fatal=fatal)
+
+
+def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv], RolloutSettings, AfterHook | None]:
     envs: dict[str, DeployEnv] = {}
     rollout = RolloutSettings()
+    after: AfterHook | None = None
     for name, spec in body.items():
+        # `after` first, BEFORE `_require_table`: its string shorthand is the
+        # documented form, and `_require_table` would reject it with a message
+        # that is both wrong and unactionable.
+        if name == "after":
+            after = _parse_after(path, spec)
+            continue
         spec = _require_table(path, f"deploy.{name}", spec)
         if name == "rollout":
             _check_keys(
@@ -319,7 +420,33 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv]
             migration_job=migration_job,
             migration_version_bucket=bucket,
         )
-    return envs, rollout
+    return envs, rollout, after
+
+
+def _parse_tailnet(path: str, body: dict[str, Any]) -> TailnetSettings:
+    """Parse `[tailnet]` — a scalar `operator` plus one table per environment.
+
+    Split by TYPE, not by name: a scalar is a setting on `[tailnet]` itself, a
+    table is an environment. `[deploy.rollout]` special-cases a reserved *name*,
+    which does not apply here — an environment may legitimately be called
+    anything, and the two kinds are never ambiguous.
+    """
+    settings = TailnetSettings()
+    for key, value in body.items():
+        if isinstance(value, dict):
+            _check_keys(path, f"tailnet.{key}", value, {"tag"})
+            if "tag" not in value:
+                # A `[tailnet.<env>]` with nothing in it is a typo, not a way to
+                # say "this env needs no tag" — there is no such thing.
+                raise ConfigError(f"{path}: `[tailnet.{key}]` requires `tag`")
+            settings.envs[key] = TailnetEnv(name=key, tag=_as_str(path, f"tailnet.{key}", "tag", value["tag"]))
+        elif key == "operator":
+            settings.operator = _as_str(path, "tailnet", "operator", value)
+        else:
+            raise ConfigError(
+                f"{path}: unknown field `{key}` on `[tailnet]` (allowed: operator, or a `[tailnet.<env>]` table)"
+            )
+    return settings
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +544,25 @@ def _warn_tags_without_output(cfg: Config, path: str) -> None:
         if not has_output:
             print(
                 f"{path}: warning: `[{tag}]` has no sha, touched, *_items, and nothing depends on it — no CI signal",
+                file=sys.stderr,
+            )
+
+
+def _warn_tailnet_envs_without_deploy(cfg: Config, path: str) -> None:
+    """Warn when a `[tailnet.<env>]` names no `[deploy.<env>]`.
+
+    A warning, not an error, and only when there is something to compare
+    against: k8s-cluster declares zero deploy environments and still wants the
+    tailnet action, so an empty `[deploy]` means "not a deploying repo" rather
+    than "every tailnet env is a typo".
+    """
+    if not cfg.deploy_envs:
+        return
+    for name in sorted(cfg.tailnet.envs):
+        if name not in cfg.deploy_envs:
+            known = ", ".join(sorted(cfg.deploy_envs))
+            print(
+                f"{path}: warning: `[tailnet.{name}]` names no deploy environment (known: {known})",
                 file=sys.stderr,
             )
 
@@ -544,7 +690,9 @@ def read_config(path: str) -> Config:
         elif key == "k8s":
             cfg.k8s = _parse_k8s(path, table)
         elif key == "deploy":
-            cfg.deploy_envs, cfg.rollout = _parse_deploy(path, table)
+            cfg.deploy_envs, cfg.rollout, cfg.after = _parse_deploy(path, table)
+        elif key == "tailnet":
+            cfg.tailnet = _parse_tailnet(path, table)
 
     # --- B. Merge and validate tags ---------------------------------------
     merged: dict[str, Any] = dict(bare_tags)
@@ -569,4 +717,5 @@ def read_config(path: str) -> Config:
     _derive(cfg, path)
     _warn_tags_without_input(cfg, path)
     _warn_tags_without_output(cfg, path)
+    _warn_tailnet_envs_without_deploy(cfg, path)
     return cfg

@@ -52,8 +52,10 @@ jobs:
           import sys; sys.path.insert(0, '.')
           import tangier.cli, tangier.config, tangier.globs, tangier.git
           import tangier.runner, tangier.changemap, tangier.image, tangier.deploy
+          import tangier.github, tangier.tailnet
           import tangier.commands.changemap_cmds
           import tangier.commands.image_cmds, tangier.commands.deploy_cmds
+          import tangier.commands.tailnet_cmds
           print('all modules import stdlib-only')
           "
 

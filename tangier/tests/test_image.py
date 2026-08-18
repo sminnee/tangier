@@ -7,7 +7,10 @@ never executed. No test touches a registry.
 import argparse
 import contextlib
 import io
+import os
+import tempfile
 import unittest
+import unittest.mock
 
 from tangier.commands import image_cmds
 from tangier.config import ImageSpec
@@ -244,6 +247,75 @@ class TestExistsAndSkip(unittest.TestCase):
 
         with self.assertRaises(ImageError):
             _ = tag_for(self._cfg(), "nope")
+
+
+class TestBuildOutputs(unittest.TestCase):
+    """`tag` and `built`, which the build action reads from $GITHUB_OUTPUT."""
+
+    def _cfg(self):
+        return make_config(
+            **{
+                "registry": {"url": "registry.example/ns"},
+                "image.svc": {"dockerfile": "svc/Dockerfile"},
+                "svc": {"paths": ["svc/**"], "sha": True},
+            }
+        )
+
+    def _args(self, runner, **kw) -> argparse.Namespace:
+        base = dict(
+            bucket="svc",
+            tag="abc1234567",
+            head="HEAD",
+            runner=runner,
+            push=True,
+            load=False,
+            force=False,
+            secret=[],
+            print=False,
+        )
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def _run(self, runner, **kw) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self._rc = image_cmds.cmd_build(self._cfg(), self._args(runner, **kw))
+        return buf.getvalue()
+
+    def test_successful_build_emits_the_tag_and_built_true(self) -> None:
+        out = self._run(RecordingRunner({("regctl",): Result(1)}))
+        self.assertEqual(self._rc, 0)
+        self.assertIn("tag=abc1234567", out)
+        self.assertIn("built=true", out)
+
+    def test_skipped_build_emits_the_tag_and_built_false(self) -> None:
+        # The tag is still the answer to "what should I deploy?" — a skip means
+        # it is already there, not that there is nothing to name.
+        out = self._run(RecordingRunner({("regctl",): Result(0)}))
+        self.assertEqual(self._rc, 0)
+        self.assertIn("tag=abc1234567", out)
+        self.assertIn("built=false", out)
+
+    def test_failed_build_emits_built_false_and_keeps_the_returncode(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(1), ("docker",): Result(7)})
+        out = self._run(runner)
+        self.assertEqual(self._rc, 7)
+        self.assertIn("built=false", out)
+
+    def test_print_emits_nothing(self) -> None:
+        # --print returns before any registry probe, so it knows nothing about
+        # whether a build would happen.
+        out = self._run(RecordingRunner(), print=True)
+        self.assertNotIn("built=", out)
+        self.assertNotIn("tag=", out)
+
+    def test_outputs_reach_the_github_output_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "out.txt")
+            with unittest.mock.patch.dict(os.environ, {"GITHUB_OUTPUT": path}):
+                _ = self._run(RecordingRunner({("regctl",): Result(1)}))
+            with open(path) as fh:
+                self.assertEqual(fh.read().splitlines(), ["tag=abc1234567", "built=true"])
 
 
 class TestCompose(unittest.TestCase):

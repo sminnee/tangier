@@ -7,7 +7,7 @@
 # ---------------------------------------------------------------------------
 # Reserved sections. These names configure tangier and cannot be used as bare
 # tag names — a tag genuinely called `sha` or `k8s` is written `[tags.sha]`.
-# Reserved: tags, sha, registry, deploy, image, k8s, runners
+# Reserved: tags, sha, registry, deploy, image, k8s, runners, tailnet
 # ---------------------------------------------------------------------------
 
 [registry]
@@ -46,6 +46,22 @@ dockerfile = "frontend/Dockerfile"
 secrets = ["sentry_auth_token"]
 
 # --- deploy environments ---------------------------------------------------
+# `after` and `rollout` are reserved names under `[deploy]`: an environment
+# cannot be called either.
+
+[deploy]
+# Runs once a deploy has fully rolled out — never after a rollback, since
+# cutting a release for a version that was just reverted is worse than not
+# cutting one. The string form is sugar for `{ cmd = ..., fatal = false }`.
+#
+# The command is split into arguments at parse time and run WITHOUT a shell, so
+# `&&`, `|` and friends are rejected — put that logic in a script. `${ENV}` and
+# every version variable are substituted per argument.
+after = "bin/sentry-release ${ENV}"
+# [deploy.after]      # the explicit form, when you want `fatal`
+# cmd = "bin/sentry-release ${ENV}"
+# fatal = false       # default: a failed hook does not fail a good deploy
+
 
 [deploy.uat]
 namespace = "myorg-uat"
@@ -68,6 +84,20 @@ max_wait = 600
 poll_interval = 10
 crash_threshold = 3
 rollback_migration_timeout = 600
+
+# --- tailnet, how CI reaches the cluster -----------------------------------
+# Each environment states its tailnet ACL tag EXPLICITLY. It is not derived from
+# the environment name: the GitHub `environment:` and the tag segment are
+# independent, and across four repos they agree in only half the cases.
+
+[tailnet]
+operator = "tailscale-operator"   # optional; this is the default
+
+[tailnet.uat]
+tag = "tag:myorg-uat-deploy"
+
+[tailnet.prod]
+tag = "tag:myorg-prod-deploy"
 
 # --- k8s workloads, keyed by bucket ----------------------------------------
 # Top-level rather than nested per environment: every environment renders from

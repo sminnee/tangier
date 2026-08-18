@@ -33,9 +33,9 @@ One config (`pipeline.toml`). Each non-reserved top-level table is one tag. Tags
 ## Reserved sections
 
 Some top-level names configure tangier rather than declaring a tag: `tags`, `sha`, `registry`,
-`deploy`, `image`, `k8s`, `runners`. Reserving a name is cheap; un-reserving one after a config
-author has used it as a tag is a breaking change, so all seven are reserved from the start even
-where the behaviour they configure lands later.
+`deploy`, `image`, `k8s`, `runners`, `tailnet`. Reserving a name is cheap; un-reserving one after a
+config author has used it as a tag is a breaking change, so all eight are reserved from the start
+even where the behaviour they configure lands later.
 
 A tag whose natural name collides with one of these is declared under `[tags.*]`. Bare and nested
 tag tables are merged into one flat set before validation, so the two forms are interchangeable and

@@ -7,6 +7,7 @@ formats, not just values.
 import argparse
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -22,6 +23,88 @@ def _capture(fn, *args) -> str:
     with contextlib.redirect_stdout(buf):
         _ = fn(*args)
     return buf.getvalue()
+
+
+class TestBuildMatrix(unittest.TestCase):
+    """The JSON array feeding `strategy.matrix`, plus its empty guard."""
+
+    def _cfg(self):
+        return make_config(
+            **{
+                "registry": {"url": "r/ns"},
+                "image.astrochat": {"dockerfile": "chat/Dockerfile"},
+                "image.smartypants": {"dockerfile": "sp/Dockerfile"},
+                "astrochat": {"paths": ["chat/**"], "sha": True},
+                "smartypants": {"paths": ["sp/**"], "sha": True},
+                # Feeds smartypants' bucket without being a bucket itself —
+                # many-to-one, which is why the set is deduped by bucket.
+                "warehouse": {"paths": ["wh/**"], "sha": "smartypants"},
+                # A bucket with no `[image.*]`: hashed, but not buildable.
+                "infra": {"paths": ["infra/**"], "sha": True},
+                # Rebuilt only via depends.
+                "shared": {"paths": ["shared/**"]},
+            }
+        )
+
+    def _run(self, changed: list[str], no_expand: bool = False) -> dict[str, str]:
+        args = argparse.Namespace(base="base", head="head", no_expand=no_expand)
+        with unittest.mock.patch.object(git, "changed_files", return_value=changed):
+            out = _capture(changemap_cmds.cmd_build_matrix, self._cfg(), args)
+        return dict(line.split("=", 1) for line in out.splitlines())
+
+    def test_touched_buckets_render_as_a_json_array(self) -> None:
+        result = self._run(["chat/app.py"])
+        self.assertEqual(result["build-packages"], '["astrochat"]')
+        self.assertEqual(result["build-packages-empty"], "false")
+
+    def test_several_tags_feeding_one_bucket_build_it_once(self) -> None:
+        # `sha_bucket` is many-to-one: a tag-level intersection would try to
+        # build smartypants twice.
+        result = self._run(["sp/a.py", "wh/b.py"])
+        self.assertEqual(result["build-packages"], '["smartypants"]')
+
+    def test_a_bucket_without_an_image_table_is_excluded(self) -> None:
+        result = self._run(["infra/main.tf"])
+        self.assertEqual(result["build-packages"], "[]")
+        self.assertEqual(result["build-packages-empty"], "true")
+
+    def test_no_matching_files_yields_the_empty_guard(self) -> None:
+        # The hot path: any docs-only PR. An empty `strategy.matrix` is a hard
+        # error in Actions, not a skip.
+        result = self._run(["README.md"])
+        self.assertEqual(result["build-packages"], "[]")
+        self.assertEqual(result["build-packages-empty"], "true")
+
+    def test_the_array_is_sorted_and_valid_json(self) -> None:
+        result = self._run(["sp/a.py", "chat/b.py"])
+        self.assertEqual(json.loads(result["build-packages"]), ["astrochat", "smartypants"])
+
+    def test_a_bucket_reached_only_through_depends_still_builds(self) -> None:
+        # Its content hash has moved, so the image must be rebuilt — the whole
+        # premise of content-addressed tagging.
+        cfg = make_config(
+            **{
+                "registry": {"url": "r/ns"},
+                "image.astrochat": {"dockerfile": "chat/Dockerfile"},
+                "astrochat": {"paths": ["chat/**"], "sha": True, "depends": "shared"},
+                "shared": {"paths": ["shared/**"]},
+            }
+        )
+        args = argparse.Namespace(base="base", head="head", no_expand=False)
+        with unittest.mock.patch.object(git, "changed_files", return_value=["shared/lib.py"]):
+            out = _capture(changemap_cmds.cmd_build_matrix, cfg, args)
+        self.assertIn('build-packages=["astrochat"]', out)
+
+    def test_outputs_reach_the_github_output_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "out.txt")
+            with unittest.mock.patch.dict(os.environ, {"GITHUB_OUTPUT": path}):
+                _ = self._run(["chat/app.py"])
+            with open(path) as fh:
+                self.assertEqual(
+                    fh.read().splitlines(),
+                    ['build-packages=["astrochat"]', "build-packages-empty=false"],
+                )
 
 
 class TestGithubOutputs(unittest.TestCase):

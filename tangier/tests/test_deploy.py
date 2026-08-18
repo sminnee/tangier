@@ -8,6 +8,8 @@ import argparse
 import contextlib
 import io
 import json
+import os
+import tempfile
 import unittest
 import unittest.mock
 
@@ -54,7 +56,7 @@ def _cfg(**overrides):
 
 
 def _args(runner, env="uat", **kw) -> argparse.Namespace:
-    base = dict(env=env, head="HEAD", runner=runner, render=None, versions=None, compare_env=None)
+    base = dict(env=env, head="HEAD", runner=runner, render=None, versions=None, compare_env=None, summary=False)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -238,6 +240,64 @@ class TestDeploySequence(unittest.TestCase):
         with self.assertRaises(DeployError):
             _ = _run(_cfg(), runner)
         self.assertEqual(runner.calls, [])
+
+
+class TestAfterHookExecution(unittest.TestCase):
+    """`[deploy] after` — runs on rollout success only, without a shell."""
+
+    HOOK = {"deploy": {"after": "bin/sentry-release ${ENV} ${CORE_VERSION}"}}
+
+    def _hook_calls(self, runner) -> list[list[str]]:
+        return [c for c in runner.calls if c and c[0] == "bin/sentry-release"]
+
+    def test_runs_on_success_with_env_and_versions_substituted(self) -> None:
+        runner = RecordingRunner(OK_RESPONSES)
+        rc, _out = _run(_cfg(**self.HOOK), runner)
+        self.assertEqual(rc, 0)
+        # Substituted per token, after splitting — so ENV is one argument
+        # whatever it contains.
+        self.assertEqual(self._hook_calls(runner), [["bin/sentry-release", "uat", "v2"]])
+
+    def test_does_not_run_when_the_rollout_fails(self) -> None:
+        # Cutting a release for a version that was just rolled back is worse
+        # than not cutting one.
+        runner = RecordingRunner({**OK_RESPONSES, ("kubectl", "rollout", "status"): Result(1)})
+        rc, _out = _run(_cfg(**self.HOOK), runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self._hook_calls(runner), [])
+
+    def test_does_not_run_when_the_migration_fails(self) -> None:
+        runner = RecordingRunner({**OK_RESPONSES, ("kubectl", "wait"): Result(1)})
+        rc, _out = _run(_cfg(**self.HOOK), runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self._hook_calls(runner), [])
+
+    def test_non_fatal_failure_keeps_the_deploy_green(self) -> None:
+        # Preserves askastro's `|| echo "(non-fatal)"`, so migrating that repo
+        # is a config move with no behaviour change.
+        runner = RecordingRunner({**OK_RESPONSES, ("bin/sentry-release",): Result(3)})
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc, _out = _run(_cfg(**self.HOOK), runner)
+        self.assertEqual(rc, 0)
+
+    def test_fatal_failure_fails_the_deploy(self) -> None:
+        cfg = _cfg(**{"deploy.after": {"cmd": "bin/sentry-release", "fatal": True}})
+        runner = RecordingRunner({**OK_RESPONSES, ("bin/sentry-release",): Result(3)})
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc, _out = _run(cfg, runner)
+        self.assertEqual(rc, 3)
+
+    def test_no_hook_configured_is_a_no_op(self) -> None:
+        runner = RecordingRunner(OK_RESPONSES)
+        rc, _out = _run(_cfg(), runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._hook_calls(runner), [])
+
+    def test_runs_after_the_rollout_completes(self) -> None:
+        runner = RecordingRunner(OK_RESPONSES)
+        _rc, _out = _run(_cfg(**self.HOOK), runner)
+        seq = [" ".join(c[:3]) for c in runner.calls]
+        self.assertLess(seq.index("kubectl rollout status"), seq.index("bin/sentry-release uat v2"))
 
 
 class TestRolloutAndRollback(unittest.TestCase):
@@ -430,6 +490,95 @@ class TestReadOnlyModes(unittest.TestCase):
 
 if __name__ == "__main__":
     _ = unittest.main()
+
+
+class TestDeploySummary(unittest.TestCase):
+    """`--summary` — the build table, emitted before anything is applied."""
+
+    # A real `kubectl get deployment -o json` payload: core is on the old tag,
+    # scanner is already on the computed one.
+    DEPLOYED = {
+        ("kubectl", "get", "deployment"): Result(
+            0,
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "metadata": {"name": "core"},
+                            "spec": {
+                                "template": {"spec": {"containers": [{"name": "server", "image": "r/ns/core:v1"}]}}
+                            },
+                        },
+                        {
+                            "metadata": {"name": "scanner"},
+                            "spec": {
+                                "template": {"spec": {"containers": [{"name": "worker", "image": "r/ns/scanner:v2"}]}}
+                            },
+                        },
+                    ]
+                }
+            ),
+        )
+    }
+
+    def _summarised(self, runner, **kw):
+        """Run a deploy with the bucket hashes pinned, as the compare-env test does."""
+        with unittest.mock.patch("tangier.changemap.sha_for_bucket", return_value="v2"):
+            return _run(_cfg(), runner, **kw)
+
+    def test_writes_to_the_step_summary_file_when_set(self) -> None:
+        runner = RecordingRunner({**OK_RESPONSES, **self.DEPLOYED})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "summary.md")
+            with unittest.mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": path}):
+                rc, out = self._summarised(runner, summary=True)
+            self.assertEqual(rc, 0)
+            with open(path) as fh:
+                written = fh.read()
+        self.assertIn("## Package builds", written)
+        # Written to the file, not duplicated onto stdout.
+        self.assertNotIn("## Package builds", out)
+
+    def test_falls_back_to_stdout_when_unset(self) -> None:
+        # The whole point: askastro's unguarded `>> $GITHUB_STEP_SUMMARY` breaks
+        # outside Actions. One invocation, one cluster read, works in both.
+        runner = RecordingRunner({**OK_RESPONSES, **self.DEPLOYED})
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            rc, out = self._summarised(runner, summary=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("## Package builds", out)
+
+    def test_the_table_is_read_before_any_apply(self) -> None:
+        # Pass 1 overwrites exactly the tags the table compares against.
+        runner = RecordingRunner({**OK_RESPONSES, **self.DEPLOYED})
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            _rc, _out = self._summarised(runner, summary=True)
+        seq = [" ".join(c[:3]) for c in runner.calls]
+        self.assertLess(seq.index("kubectl get deployment"), seq.index("kubectl apply -f"))
+
+    def test_shows_the_changed_marker_for_a_moved_bucket(self) -> None:
+        # The deployed tag is `v1`; the computed one is whatever this tree
+        # hashes to, so the assertion is on the marker, not on a literal hash.
+        runner = RecordingRunner({**OK_RESPONSES, **self.DEPLOYED})
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            _rc, out = self._summarised(runner, summary=True)
+        # core moved; scanner is already on the computed tag, so renders bare.
+        self.assertIn("| core | v1 -> **v2** |", out)
+        self.assertIn("| scanner | v2 |", out)
+
+    def test_no_summary_flag_reads_no_table(self) -> None:
+        runner = RecordingRunner({**OK_RESPONSES, **self.DEPLOYED})
+        _rc, out = self._summarised(runner)
+        self.assertNotIn("## Package builds", out)
+
+    def test_rejects_combination_with_read_only_modes(self) -> None:
+        for mode in ("render", "versions", "compare_env"):
+            with self.subTest(mode=mode):
+                args = _args(RecordingRunner(), env=None, summary=True, **{mode: "uat"})
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    rc = deploy_cmds._dispatch(_cfg(), args)
+                self.assertEqual(rc, 2)
+                self.assertIn("--summary", err.getvalue())
 
 
 class TestRenderGuards(unittest.TestCase):

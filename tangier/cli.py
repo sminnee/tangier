@@ -6,10 +6,11 @@ import argparse
 import os
 import sys
 
-from tangier.commands import changemap_cmds, deploy_cmds, image_cmds
-from tangier.config import ConfigError, read_config
+from tangier.commands import changemap_cmds, deploy_cmds, image_cmds, tailnet_cmds
+from tangier.config import Config, ConfigError, read_config
 from tangier.deploy import DeployError
 from tangier.image import ImageError
+from tangier.tailnet import TailnetError
 
 # The config lives in the repo tangier runs from — each project carries its own
 # pipeline.toml at its root. TANGIER_CONFIG lets the parity harness point both
@@ -34,14 +35,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {e}", file=sys.stderr)
         return 2
     except FileNotFoundError as e:
-        print(f"config error: {e}", file=sys.stderr)
-        return 2
+        # A repo with no images and no deploy environments still wants the
+        # tailnet preflight — k8s-cluster is helm and kubectl, and a config
+        # file there would describe nothing. Every other command needs the
+        # config to mean anything, so only this one degrades.
+        if not getattr(args, "config_optional", False):
+            print(f"config error: {e}", file=sys.stderr)
+            return 2
+        config = Config()
     try:
         return args.func(config, args) or 0
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
-    except (ImageError, DeployError) as e:
+    except (ImageError, DeployError, TailnetError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
@@ -74,6 +81,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_changemap_parser(sub)
     image_cmds.add_parsers(sub)
     deploy_cmds.add_parsers(sub)
+    tailnet_cmds.add_parsers(sub)
     return p
 
 
@@ -119,6 +127,14 @@ def _add_changemap_parser(sub: argparse._SubParsersAction) -> None:
         help="csv of changed files for a file-set group, forwarded into that runner's --files arg (repeatable)",
     )
     ep.set_defaults(func=_explain_with_files)
+
+    bm = cmsub.add_parser(
+        "build-matrix",
+        help="emit the buildable buckets this diff touches, as a JSON array for a build matrix",
+    )
+    _add_diff_args(bm)
+    _add_no_expand(bm)
+    bm.set_defaults(func=changemap_cmds.cmd_build_matrix)
 
     gp = cmsub.add_parser(
         "github-outputs",

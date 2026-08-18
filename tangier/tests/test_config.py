@@ -369,6 +369,121 @@ class TestShaGlobWarning(unittest.TestCase):
         self.assertNotIn("contributes nothing", stderr)
 
 
+class TestAfterHook(unittest.TestCase):
+    def test_string_shorthand_splits_and_defaults_to_non_fatal(self) -> None:
+        cfg = parse_toml('[deploy]\nafter = "bin/sentry-release ${ENV}"\n')
+        self.assertEqual(cfg.after.argv, ["bin/sentry-release", "${ENV}"])
+        self.assertFalse(cfg.after.fatal)
+
+    def test_explicit_table_form(self) -> None:
+        cfg = parse_toml('[deploy.after]\ncmd = "bin/x"\nfatal = true\n')
+        self.assertEqual(cfg.after.argv, ["bin/x"])
+        self.assertTrue(cfg.after.fatal)
+
+    def test_absent_means_no_hook(self) -> None:
+        self.assertIsNone(parse_toml('[a]\npaths = "a/**"\n').after)
+
+    def test_quoted_argument_survives_splitting(self) -> None:
+        cfg = parse_toml("[deploy]\nafter = \"bin/notify 'a b'\"\n")
+        self.assertEqual(cfg.after.argv, ["bin/notify", "a b"])
+
+    def test_the_string_form_is_not_reported_as_a_malformed_table(self) -> None:
+        # `_require_table` would say "`[deploy.after]` ... must be a table, got
+        # str", which is both wrong and unactionable. Parsing `after` first is
+        # what prevents that.
+        cfg = parse_toml('[deploy]\nafter = "bin/x"\n')
+        self.assertEqual(cfg.after.argv, ["bin/x"])
+
+    def test_shell_operator_is_rejected_at_parse_time(self) -> None:
+        for op in ("&&", "||", "|", ";", ">", "&"):
+            with self.subTest(op=op):
+                with self.assertRaises(ConfigError) as ctx:
+                    _ = parse_toml(f'[deploy]\nafter = "bin/x {op} bin/y"\n')
+                message = str(ctx.exception)
+                self.assertIn("without a shell", message)
+                self.assertIn("script", message)
+
+    def test_command_substitution_is_rejected(self) -> None:
+        # Neither form can ever be substituted, so both mean "run a shell".
+        for marker in ("$(whoami)", "`whoami`"):
+            with self.subTest(marker=marker), self.assertRaises(ConfigError):
+                _ = parse_toml(f'[deploy]\nafter = "bin/x {marker}"\n')
+
+    def test_an_operator_inside_an_argument_is_not_a_shell_operator(self) -> None:
+        # `&` here is a character in a value, not a backgrounding operator. No
+        # shell ever sees it, so rejecting it would refuse a legitimate hook.
+        cfg = parse_toml('[deploy]\nafter = "bin/notify --to=a&b"\n')
+        self.assertEqual(cfg.after.argv, ["bin/notify", "--to=a&b"])
+
+    def test_the_substitution_syntax_is_not_an_operator(self) -> None:
+        cfg = parse_toml('[deploy]\nafter = "bin/x ${ENV}"\n')
+        self.assertEqual(cfg.after.argv, ["bin/x", "${ENV}"])
+
+    def test_empty_command_is_rejected(self) -> None:
+        with self.assertRaises(ConfigError):
+            _ = parse_toml('[deploy]\nafter = ""\n')
+
+    def test_table_without_cmd_is_rejected(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            _ = parse_toml("[deploy.after]\nfatal = true\n")
+        self.assertIn("requires `cmd`", str(ctx.exception))
+
+    def test_after_does_not_become_a_deploy_environment(self) -> None:
+        cfg = parse_toml('[deploy]\nafter = "bin/x"\n[deploy.uat]\nnamespace = "ns"\noverlay = "k8s/uat"\n')
+        self.assertEqual(sorted(cfg.deploy_envs), ["uat"])
+
+
+class TestTailnet(unittest.TestCase):
+    def test_env_tables_and_the_default_operator(self) -> None:
+        cfg = parse_toml('[tailnet.uat]\ntag = "tag:astronort-uat-deploy"\n')
+        self.assertEqual(cfg.tailnet.operator, "tailscale-operator")
+        self.assertEqual(cfg.tailnet.envs["uat"].tag, "tag:astronort-uat-deploy")
+        self.assertEqual(cfg.tailnet.envs["uat"].name, "uat")
+
+    def test_operator_is_overridable(self) -> None:
+        cfg = parse_toml('[tailnet]\noperator = "ts-op"\n\n[tailnet.uat]\ntag = "tag:x"\n')
+        self.assertEqual(cfg.tailnet.operator, "ts-op")
+
+    def test_absent_section_gives_the_default(self) -> None:
+        cfg = parse_toml('[a]\npaths = "a/**"\nsha = true\n')
+        self.assertEqual(cfg.tailnet.operator, "tailscale-operator")
+        self.assertEqual(cfg.tailnet.envs, {})
+
+    def test_env_without_a_tag_raises(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            _ = parse_toml("[tailnet.uat]\n")
+        self.assertIn("`[tailnet.uat]` requires `tag`", str(ctx.exception))
+
+    def test_unknown_scalar_field_raises(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            _ = parse_toml('[tailnet]\noperater = "typo"\n')
+        self.assertIn("operater", str(ctx.exception))
+
+    def test_unknown_field_on_an_env_raises(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            _ = parse_toml('[tailnet.uat]\ntag = "tag:x"\naudience = "y"\n')
+        self.assertIn("audience", str(ctx.exception))
+
+    def test_tailnet_is_reserved_so_a_bare_tag_of_that_name_must_nest(self) -> None:
+        # The escape hatch, which is what makes reserving the name non-breaking.
+        cfg = parse_toml('[tags.tailnet]\npaths = "net/**"\nsha = true\n')
+        self.assertIn("tailnet", cfg.paths)
+        self.assertEqual(cfg.tailnet.envs, {})
+
+    def test_warns_when_an_env_names_no_deploy_environment(self) -> None:
+        stderr = parse_toml_stderr(
+            '[a]\npaths = "a/**"\nsha = true\n'
+            '[deploy.uat]\nnamespace = "ns"\noverlay = "k8s/uat"\n'
+            '[tailnet.staging]\ntag = "tag:x"\n'
+        )
+        self.assertIn("`[tailnet.staging]` names no deploy environment", stderr)
+
+    def test_no_warning_when_the_repo_declares_no_deploy_environments(self) -> None:
+        # k8s-cluster: helm and kubectl, no images, no deploy envs, tailnet only.
+        stderr = parse_toml_stderr('[tailnet.prod]\ntag = "tag:k8s-cluster-deploy"\n')
+        self.assertNotIn("names no deploy environment", stderr)
+
+
 class TestErrorMessageQuality(unittest.TestCase):
     def test_nested_reserved_section_error_omits_the_tags_advice(self) -> None:
         # `[tags.deploy.uat]` is not a valid tag declaration, so suggesting it
