@@ -69,3 +69,55 @@ jobs:
       - run: pip install ruff
       - run: ruff check .
       - run: ruff format --check .
+
+  lint-actions:
+    # `action-validator` covers `actions/*/action.yaml`, the file type nothing
+    # in this estate lints today. `actionlint` shellchecks every `run:` body,
+    # which is the higher-value of the two given these actions are mostly shell.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: action-validator
+        # One file per invocation — the CLI takes a single path.
+        run: |
+          set -euo pipefail
+          for f in .github/workflows/*.yaml .github/actions/*/action.yaml; do
+            echo "validating $f"
+            npx --yes @action-validator/cli@0.6.0 "$f"
+          done
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
+      - name: shellcheck composite action run bodies
+        # actionlint shellchecks `run:` bodies in WORKFLOWS but does not read
+        # `actions/*/action.yaml`, so these scripts are otherwise unlinted — and
+        # they are mostly shell. Extract each body and check it directly.
+        run: |
+          set -euo pipefail
+          # Cleared, not just created: stale extracts from an earlier run would
+          # otherwise be checked against code no longer in the tree.
+          rm -rf "$RUNNER_TEMP/sc"
+          mkdir -p "$RUNNER_TEMP/sc"
+          python3 - <<'PY'
+          import os, re
+          out = os.path.join(os.environ["RUNNER_TEMP"], "sc")
+          for name in sorted(os.listdir(".github/actions")):
+              path = f".github/actions/{name}/action.yaml"
+              if not os.path.exists(path):
+                  continue
+              text = open(path).read()
+              for i, block in enumerate(re.findall(r"      run: \|\n((?:        .*\n|\n)+)", text)):
+                  body = "\n".join(line[8:] for line in block.splitlines())
+                  with open(os.path.join(out, f"{name}_{i}.sh"), "w") as fh:
+                      fh.write("#!/bin/bash\n" + body + "\n")
+          PY
+          count=$(find "$RUNNER_TEMP/sc" -name '*.sh' | wc -l)
+          test "$count" -gt 0 || { echo "::error::extracted no run bodies — the regex has drifted"; exit 1; }
+          echo "shellchecking $count run bodies, plus bin/"
+          find "$RUNNER_TEMP/sc" -name '*.sh' -print0 | xargs -0 shellcheck
+          # bin/ is otherwise ungated, and it holds the release script that
+          # force-moves the alias every consumer pins. `parity-check` is not in
+          # the list: it has a pre-existing SC2015 that predates this gate, and
+          # cleaning it belongs in its own change rather than here.
+          shellcheck bin/release bin/test
