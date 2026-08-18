@@ -1,0 +1,119 @@
+name: tangier tailnet
+description: >-
+  Connect the runner to the tailnet as this environment's deploy identity and
+  point kubectl at the Tailscale Kubernetes operator.
+
+# READ docs/actions/tailnet.md BEFORE changing a call site. The separation
+# between uat and prod is enforced by the `environment:` line on the calling
+# job, and it is no longer visible from here.
+
+inputs:
+  client-id:
+    description: >-
+      OAuth client ID for this environment's deploy identity. Pass
+      `${{ vars.TS_DEPLOY_CLIENT_ID }}` — a composite action cannot read the
+      `vars` context at all (actions/runner#2551), so it must be forwarded.
+      The value differs per environment; the NAME is deliberately the same.
+    required: true
+  audience:
+    description: >-
+      OIDC audience for this environment. Pass `${{ vars.TS_DEPLOY_AUDIENCE }}`.
+      Same reasoning, and the same deliberate name-sharing, as `client-id`.
+    required: true
+  env:
+    description: >-
+      Environment name, used to look up `[tailnet.<env>] tag` in pipeline.toml.
+      Omit when passing `tag` directly.
+    required: false
+    default: ""
+  tag:
+    description: >-
+      Tailnet ACL tag, overriding config. For a repo with no pipeline.toml —
+      k8s-cluster is helm and kubectl with no images, and a config describing
+      no tags, buckets or images would misrepresent it and trip
+      `_warn_tags_without_input`.
+    required: false
+    default: ""
+  operator:
+    description: >-
+      Tailscale Kubernetes operator hostname, overriding `[tailnet] operator`.
+      Defaults to `tailscale-operator` when there is no config to read.
+    required: false
+    default: ""
+  version:
+    description: Tailscale release to install. Pinned, never `latest`.
+    required: false
+    default: "1.78.1"
+
+outputs:
+  tag:
+    description: The tailnet tag this runner authenticated as.
+    value: ${{ steps.resolve.outputs.tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the tag and operator
+      id: resolve
+      shell: bash
+      # Read with inline tomllib rather than through the CLI: four of the eight
+      # call sites want the tailnet connect ALONE, and making them install uv
+      # and tangier to read one string would defeat the point of the action.
+      env:
+        INPUT_TAG: ${{ inputs.tag }}
+        INPUT_ENV: ${{ inputs.env }}
+        INPUT_OPERATOR: ${{ inputs.operator }}
+      run: |
+        set -euo pipefail
+        # Precedence: explicit input, then config. An explicit `tag` also means
+        # `pipeline.toml` need not exist at all — which is how a repo with no
+        # images (k8s-cluster is helm and kubectl) uses this action without a
+        # config file that would misrepresent it.
+        TAG="$INPUT_TAG"
+        OPERATOR="$INPUT_OPERATOR"
+
+        if [ -f pipeline.toml ]; then
+          # Two lines out, so an absent value stays distinguishable from an
+          # empty one without quoting games.
+          CFG="$(INPUT_ENV="$INPUT_ENV" python3 -c '
+        import os, tomllib
+        with open("pipeline.toml", "rb") as fh:
+            cfg = tomllib.load(fh).get("tailnet", {})
+        env = os.environ.get("INPUT_ENV", "")
+        print((cfg.get(env) or {}).get("tag", "") if env else "")
+        print(cfg.get("operator", "tailscale-operator"))
+        ')"
+          CFG_TAG="$(printf '%s' "$CFG" | sed -n 1p)"
+          CFG_OPERATOR="$(printf '%s' "$CFG" | sed -n 2p)"
+          TAG="${TAG:-$CFG_TAG}"
+          OPERATOR="${OPERATOR:-$CFG_OPERATOR}"
+        fi
+        OPERATOR="${OPERATOR:-tailscale-operator}"
+
+        if [ -z "$TAG" ]; then
+          echo "::error::no tailnet tag for env [${INPUT_ENV:-<unset>}]. Add a [tailnet.<env>] table to pipeline.toml, or pass the tag input." >&2
+          exit 1
+        fi
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "operator=$OPERATOR" >> "$GITHUB_OUTPUT"
+        echo "Connecting as $TAG via $OPERATOR"
+
+    - name: Connect to the tailnet
+      uses: tailscale/github-action@v3
+      with:
+        oauth-client-id: ${{ inputs.client-id }}
+        tags: ${{ steps.resolve.outputs.tag }}
+        version: ${{ inputs.version }}
+        use-cache: "true"
+        args: --advertise-tags=${{ steps.resolve.outputs.tag }}
+      env:
+        TS_EXPERIMENT_OAUTH_AUDIENCE: ${{ inputs.audience }}
+
+    - name: Point kubectl at the operator
+      shell: bash
+      env:
+        OPERATOR: ${{ steps.resolve.outputs.operator }}
+      run: |
+        set -euo pipefail
+        tailscale configure kubeconfig "$OPERATOR"
+        kubectl config current-context

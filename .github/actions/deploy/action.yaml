@@ -1,0 +1,93 @@
+name: tangier deploy
+description: >-
+  Connect to the tailnet, then render and apply this environment's manifests
+  with the current content-addressed image tags.
+
+# READ docs/actions/tailnet.md BEFORE changing a call site. The separation
+# between uat and prod is enforced by the `environment:` line on the calling
+# job, and it is no longer visible from here.
+
+inputs:
+  env:
+    description: Environment name. Must have a `[deploy.<env>]` table in pipeline.toml.
+    required: true
+  client-id:
+    description: >-
+      OAuth client ID for this environment's deploy identity. Pass
+      `${{ vars.TS_DEPLOY_CLIENT_ID }}` — a composite action cannot read the
+      `vars` context (actions/runner#2551).
+    required: true
+  audience:
+    description: OIDC audience for this environment. Pass `${{ vars.TS_DEPLOY_AUDIENCE }}`.
+    required: true
+  tailscale-version:
+    description: Tailscale release to install. Pinned, never `latest`.
+    required: false
+    default: "1.78.1"
+  tangier-ref:
+    description: >-
+      The tangier ref to install the CLI from. Defaults to the ref this action
+      was called at. Required when calling the action locally (`uses: ./...`),
+      because `github.action_ref` is empty for a local path.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the tangier ref
+      id: ref
+      shell: bash
+      # Resolved at THIS action's top level and passed down, rather than left to
+      # the nested action: `github.action_ref` is only correct for the action it
+      # is evaluated in, and binding it through `env:` is required because it is
+      # empty inside a `run:` body (actions/runner#2473).
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        INPUT_REF: ${{ inputs.tangier-ref }}
+      run: |
+        set -euo pipefail
+        REF="${INPUT_REF:-$ACTION_REF}"
+        if [ -z "$REF" ]; then
+          echo "::error::cannot determine which tangier ref to install. Pass the tangier-ref input when calling this action by local path." >&2
+          exit 1
+        fi
+        echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+    - uses: sminnee/tangier/.github/actions/tailnet@v0
+      with:
+        client-id: ${{ inputs.client-id }}
+        audience: ${{ inputs.audience }}
+        env: ${{ inputs.env }}
+        version: ${{ inputs.tailscale-version }}
+
+    - uses: astral-sh/setup-uv@v5
+      with:
+        version: "0.5.29"
+
+    - name: Install tangier
+      shell: bash
+      # `uv tool install`, not `uvx --from`: `tangier` must stay on PATH for any
+      # repo script that runs after this action.
+      env:
+        TANGIER_REF: ${{ steps.ref.outputs.ref }}
+      run: |
+        set -euo pipefail
+        uv tool install "git+https://github.com/sminnee/tangier@${TANGIER_REF}"
+
+    - name: Deploy
+      shell: bash
+      # `--summary` writes the build table to $GITHUB_STEP_SUMMARY before
+      # anything is applied — pass 1 overwrites the deployed tags it reads, and
+      # the table is most wanted when the deploy then fails.
+      #
+      # `set -euo pipefail` is a behaviour change from the bash this replaces,
+      # which had no `set -e` and fell through a failing summary into the real
+      # deploy. If it proves annoying, the relief valve is
+      # `continue-on-error: true` on a separate summary step — not dropping
+      # `set -e`.
+      env:
+        DEPLOY_ENV: ${{ inputs.env }}
+      run: |
+        set -euo pipefail
+        tangier deploy "$DEPLOY_ENV" --summary
