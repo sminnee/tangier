@@ -182,8 +182,10 @@ runs the tests before tagging.
 ## Development
 
 ```sh
-bin/test          # stdlib unittest, no dependencies
-ruff check .
+bin/test                  # stdlib unittest, no dependencies; one Python, any tree
+tangier gate run test     # the suite on 3.11, 3.12 and 3.13; needs uv and a clean tree
+tangier gate run lint     # ruff check and ruff format --check
+tangier gate push         # before the PR push, so CI reuses both passes
 ```
 
 Releases are a maintainer step, not part of the everyday loop: `bin/release v0.1.0` tags a version
