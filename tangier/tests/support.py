@@ -107,6 +107,24 @@ def make_git_repo(testcase: Any, files: dict[str, str]) -> str:
     return root
 
 
+def make_origin(testcase: Any, repo: str) -> str:
+    """Give `repo` a bare `origin` holding its HEAD as `main`, returning the origin's path.
+
+    The path is a valid clone URL, so a test can make a second clone of it and
+    observe what the first one pushed.
+    """
+    tmp = tempfile.TemporaryDirectory()
+    testcase.addCleanup(tmp.cleanup)
+    origin = tmp.name
+    for cmd in (
+        ["init", "-q", "--bare", "--initial-branch=main", origin],
+        ["-C", repo, "remote", "add", "origin", origin],
+        ["-C", repo, "push", "-q", "origin", "HEAD:refs/heads/main"],
+    ):
+        _ = subprocess.run(["git", *cmd], capture_output=True, check=True)
+    return origin
+
+
 class RecordingRunner:
     """A Runner that records calls and replays canned responses.
 
@@ -123,6 +141,7 @@ class RecordingRunner:
         self.calls: list[list[str]] = []
         self.pipes: list[list[list[str]]] = []
         self.stdins: list[str | None] = []
+        self.envs: list[dict[str, str] | None] = []
         self.slept: list[float] = []
         self.responses = dict(responses or {})
         self.missing: set[str] = set()
@@ -153,6 +172,7 @@ class RecordingRunner:
     ) -> Result:
         self.calls.append(list(argv))
         self.stdins.append(input)
+        self.envs.append(env)
         return self._lookup(argv)
 
     def pipe(self, stages: list[list[str]], *, input: str | None = None, env: dict[str, str] | None = None) -> Result:
