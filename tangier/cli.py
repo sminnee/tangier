@@ -6,10 +6,13 @@ import argparse
 import os
 import sys
 
-from tangier.commands import changemap_cmds, deploy_cmds, image_cmds, tailnet_cmds
+from tangier.commands import changemap_cmds, deploy_cmds, gate_cmds, image_cmds, tailnet_cmds
 from tangier.config import Config, ConfigError, read_config
 from tangier.deploy import DeployError
+from tangier.gate import GateError
+from tangier.git import GitError
 from tangier.image import ImageError
+from tangier.runner import Runner
 from tangier.tailnet import TailnetError
 
 # The config lives in the repo tangier runs from — each project carries its own
@@ -23,9 +26,12 @@ def cli_main() -> None:
     raise SystemExit(main())
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, runner: Runner | None = None) -> int:
+    """Run one command. `runner` replaces the subprocess seam, for tests."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if runner is not None:
+        args.runner = runner
     if not getattr(args, "func", None):
         parser.print_help()
         return 1
@@ -48,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
-    except (ImageError, DeployError, TailnetError) as e:
+    except (ImageError, DeployError, TailnetError, GateError, GitError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
@@ -82,6 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
     image_cmds.add_parsers(sub)
     deploy_cmds.add_parsers(sub)
     tailnet_cmds.add_parsers(sub)
+    gate_cmds.add_parsers(sub)
     return p
 
 
