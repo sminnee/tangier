@@ -1,0 +1,23 @@
+# tangier's own gates. `tangier gate run <name>` runs one and records the pass;
+# CI runs the same command. See `docs/specs/gate.md`.
+
+# One command for each supported Python: 3.11 is the floor (tomllib), and 3.12
+# is what a bare GitHub runner provides. The key has no matrix dimension, so
+# the versions are commands of one gate, not legs of a CI matrix.
+#
+# `python`, not `bin/test`: `uv run` resolves `python` to the requested version,
+# but `bin/test` calls `python3`, which another interpreter on PATH can shadow.
+[gate.test]
+cmd = [
+  "uv run --no-project --python 3.11 python -m unittest discover -s tangier -p test_*.py -t .",
+  "uv run --no-project --python 3.12 python -m unittest discover -s tangier -p test_*.py -t .",
+  "uv run --no-project --python 3.13 python -m unittest discover -s tangier -p test_*.py -t .",
+]
+scope = ["gate-inputs"]
+
+[gate.lint]
+cmd = ["ruff check .", "ruff format --check ."]
+scope = ["gate-inputs"]
+
+[gate-inputs]
+paths = ["tangier/**", "pyproject.toml", "pipeline.toml"]
