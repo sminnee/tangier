@@ -7,7 +7,7 @@
 # ---------------------------------------------------------------------------
 # Reserved sections. These names configure tangier and cannot be used as bare
 # tag names — a tag genuinely called `sha` or `k8s` is written `[tags.sha]`.
-# Reserved: tags, sha, registry, deploy, image, k8s, runners, tailnet
+# Reserved: tags, sha, registry, deploy, image, k8s, runners, tailnet, gate
 # ---------------------------------------------------------------------------
 
 [registry]
@@ -27,6 +27,22 @@ exclude = ["**/README.md"]
 unittest = { cmd = "bin/test", files = "unittest-files" }
 e2e = { cmd = "bin/e2e-test" }
 eval = { cmd = "bin/evals", files = "eval-files" }
+
+# --- gates, whose local pass CI can reuse -----------------------------------
+# `tangier gate run test-backend` records a pass on a clean tree. See
+# `docs/specs/gate.md` for the key and the store.
+#
+# Commands run WITHOUT a shell, as `[deploy] after` does. A `{...}` placeholder
+# is a whole argument: `{<name>-items}` or the name of a `files = true` table.
+#
+# `scope` lists packages: a SHA bucket, or a tag with `paths`. A file the gate
+# depends on that no package covers gives a false pass, so list the test
+# script, the lockfile and this config too (see `backend-gate-inputs` below).
+
+[gate.test-backend]
+cmd = "bin/test --dirs {unittest-items} --files {unittest-files}"
+env = { TEST_DB_REQUIRED = "1" }
+scope = ["core", "scanner", "backend-gate-inputs"]
 
 # --- images, keyed by SHA bucket -------------------------------------------
 # A bucket with no [image.*] table is "not buildable here", but is still
@@ -156,6 +172,11 @@ touched = true
 paths = "frontend/**"
 sha = true
 touched = true
+
+# A custom package: gate inputs that no SHA bucket covers. It has no `sha`
+# field, so it is not a bucket and never builds or deploys.
+[backend-gate-inputs]
+paths = ["uv.lock", "pyproject.toml", "bin/test", "pipeline.toml"]
 
 # A tag named after a reserved section is declared nested.
 [tags.k8s]

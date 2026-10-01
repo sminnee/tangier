@@ -7,7 +7,7 @@ SHA parity depends on. The reserved-section cases are new.
 
 import unittest
 
-from tangier.config import DEFAULT_SHA_EXCLUDE, ConfigError, read_config
+from tangier.config import DEFAULT_SHA_EXCLUDE, ConfigError, read_config, scope_tags
 from tangier.tests.support import parse_toml, parse_toml_stderr
 
 
@@ -498,3 +498,138 @@ class TestErrorMessageQuality(unittest.TestCase):
             _ = parse_toml('[tags]\npaths = "a/**"\n')
         self.assertIn("[tags.paths]", str(ctx.exception))
         self.assertIn("tag names", str(ctx.exception))
+
+
+_GATE_TAGS = (
+    '[svc]\npaths = "svc/**"\nsha = true\nunittest_items = "svc"\n'
+    '[lib]\npaths = "lib/**"\nsha = "svc"\n'
+    '[inputs]\npaths = ["uv.lock", "bin/test"]\n'
+    '[unittest-files]\nfiles = true\npaths = "svc/**/*_test.py"\n'
+)
+
+
+def _gate(body: str, tags: str = _GATE_TAGS) -> str:
+    return f"{tags}[gate.backend]\n{body}"
+
+
+class TestGate(unittest.TestCase):
+    # SPEC: gate#config-table
+    def test_parses_commands_env_and_scope(self) -> None:
+        cfg = parse_toml(
+            _gate(
+                'cmd = ["bin/test --dirs {unittest-items} --files {unittest-files}", "bin/lint \'a b\'"]\n'
+                'env = { TEST_DB_REQUIRED = "1" }\n'
+                'scope = ["svc", "inputs"]\n'
+            )
+        )
+        gate = cfg.gates["backend"]
+        self.assertEqual(
+            gate.commands,
+            [["bin/test", "--dirs", "{unittest-items}", "--files", "{unittest-files}"], ["bin/lint", "a b"]],
+        )
+        self.assertEqual(gate.env, {"TEST_DB_REQUIRED": "1"})
+        self.assertEqual(gate.scope, ["svc", "inputs"])
+
+    # SPEC: gate#config-table
+    def test_single_command_and_single_scope_are_string_shorthand(self) -> None:
+        gate = parse_toml(_gate('cmd = "bin/test"\nscope = "svc"\n')).gates["backend"]
+        self.assertEqual(gate.commands, [["bin/test"]])
+        self.assertEqual(gate.env, {})
+        self.assertEqual(gate.scope, ["svc"])
+
+    def test_absent_section_means_no_gates(self) -> None:
+        self.assertEqual(parse_toml(_GATE_TAGS).gates, {})
+
+    # SPEC: gate#scope-packages
+    def test_a_bucket_resolves_to_its_member_tags_and_a_custom_package_to_itself(self) -> None:
+        cfg = parse_toml(_gate('cmd = "bin/test"\nscope = ["svc", "inputs"]\n'))
+        self.assertEqual(scope_tags(cfg, cfg.gates["backend"]), ["inputs", "lib", "svc"])
+
+    # SPEC: gate#custom-package-not-a-bucket
+    def test_a_custom_package_stays_out_of_the_sha_buckets(self) -> None:
+        cfg = parse_toml(_gate('cmd = "bin/test"\nscope = ["svc", "inputs"]\n'))
+        self.assertEqual(cfg.sha_bucket, {"svc": "svc", "lib": "svc"})
+
+    def test_gate_is_reserved_so_a_bare_tag_of_that_name_must_nest(self) -> None:
+        cfg = parse_toml('[tags.gate]\npaths = "gate/**"\nsha = true\n')
+        self.assertIn("gate", cfg.paths)
+        self.assertEqual(cfg.gates, {})
+
+    # SPEC: gate#config-table
+    def test_malformed_tables_raise(self) -> None:
+        cases = {
+            "missing cmd": ('scope = "svc"\n', "requires `cmd`"),
+            "missing scope": ('cmd = "bin/test"\n', "requires `scope`"),
+            "empty cmd list": ('cmd = []\nscope = "svc"\n', "`cmd` is empty"),
+            "empty command": ('cmd = ""\nscope = "svc"\n', "is empty"),
+            "empty scope": ('cmd = "bin/test"\nscope = []\n', "`scope` is empty"),
+            "unknown key": ('cmd = "bin/test"\nscope = "svc"\npaths = "x"\n', "unknown field `paths`"),
+            "env not a table": ('cmd = "bin/test"\nscope = "svc"\nenv = "X=1"\n', "table of strings"),
+            "env value not a string": ('cmd = "bin/test"\nscope = "svc"\nenv = { X = 1 }\n', "table of strings"),
+        }
+        for label, (body, expected) in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(ConfigError) as ctx:
+                    _ = parse_toml(_gate(body))
+                self.assertIn(expected, str(ctx.exception))
+
+    # SPEC: gate#config-table
+    def test_a_gate_name_must_be_usable_in_a_ref(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            _ = parse_toml(_GATE_TAGS + '[gate."a b"]\ncmd = "bin/test"\nscope = "svc"\n')
+        self.assertIn("gate name", str(ctx.exception))
+
+    # SPEC: gate#cmd-no-shell
+    def test_shell_syntax_is_rejected_at_parse_time(self) -> None:
+        for cmd in ("bin/test && bin/lint", "bin/test | tee log", "bin/test $(whoami)"):
+            with self.subTest(cmd=cmd):
+                with self.assertRaises(ConfigError) as ctx:
+                    _ = parse_toml(_gate(f'cmd = "{cmd}"\nscope = "svc"\n'))
+                self.assertIn("without a shell", str(ctx.exception))
+                self.assertIn("[gate.backend]", str(ctx.exception))
+
+    # SPEC: gate#scope-packages
+    def test_scope_entry_must_be_a_bucket_or_a_tag_with_paths(self) -> None:
+        tags = _GATE_TAGS + '[agg]\ndepends = "lib"\ntouched = true\n'
+        cases = {
+            "nope": "names no bucket or tag",
+            "unittest-files": "`files = true`",
+            "agg": "has no `paths`",
+        }
+        for entry, expected in cases.items():
+            with self.subTest(entry=entry):
+                with self.assertRaises(ConfigError) as ctx:
+                    _ = parse_toml(_gate(f'cmd = "bin/test"\nscope = "{entry}"\n', tags))
+                self.assertIn(expected, str(ctx.exception))
+
+    # SPEC: gate#placeholder-whole-token
+    def test_placeholder_must_name_an_items_list_or_a_file_set(self) -> None:
+        cases = {
+            "bin/test {gherkin-items}": "names no `*_items` list",
+            "bin/test {eval-files}": "names no `files = true` table",
+            "bin/test --dirs={unittest-items}": "must be a whole argument",
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd):
+                with self.assertRaises(ConfigError) as ctx:
+                    _ = parse_toml(_gate(f'cmd = "{cmd}"\nscope = "svc"\n'))
+                self.assertIn(expected, str(ctx.exception))
+
+    # SPEC: gate#scope-is-ci-signal
+    def test_a_gate_scope_counts_as_a_ci_signal(self) -> None:
+        stderr = parse_toml_stderr(_gate('cmd = "bin/test"\nscope = ["svc", "inputs"]\n'))
+        self.assertNotIn("no CI signal", stderr)
+
+    # SPEC: gate#unhashable-scope-glob-raises
+    def test_a_star_glob_in_a_tag_that_feeds_a_scope_raises(self) -> None:
+        # Directly in the scope, and through `depends`. For an image the cost of
+        # such a glob is a stale tag; for a gate it is a false pass.
+        cases = {
+            "direct": ('[globby]\npaths = "src/*.py"\n', "globby"),
+            "dependency": ('[globby]\npaths = "src/*.py"\n[top]\npaths = "top/**"\ndepends = "globby"\n', "top"),
+        }
+        for label, (extra, entry) in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(ConfigError) as ctx:
+                    _ = parse_toml(_gate(f'cmd = "bin/test"\nscope = "{entry}"\n', _GATE_TAGS + extra))
+                self.assertIn("`[globby].paths` glob `src/*.py`", str(ctx.exception))

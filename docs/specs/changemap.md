@@ -27,15 +27,16 @@ One config (`pipeline.toml`). Each non-reserved top-level table is one tag. Tags
   `[str-or-list-shorthand]`
 - Warn at parse time when a tag has neither `paths` nor `depends` (can never trigger).
   `[warn-tag-without-input]`
-- Warn at parse time when a tag has no `sha`/`touched`/`*_items` and no dependents (no CI signal).
+- Warn at parse time when a tag has no `sha`/`touched`/`*_items`, no dependents and no gate scope
+  (no CI signal).
   `[warn-tag-without-output]`
 
 ## Reserved sections
 
 Some top-level names configure tangier rather than declaring a tag: `tags`, `sha`, `registry`,
-`deploy`, `image`, `k8s`, `runners`, `tailnet`. Reserving a name is cheap; un-reserving one after a
-config author has used it as a tag is a breaking change, so all eight are reserved from the start
-even where the behaviour they configure lands later.
+`deploy`, `image`, `k8s`, `runners`, `tailnet`, `gate`. Reserving a name is cheap. Un-reserving a name
+after a config author has used it as a tag is a breaking change. All nine are reserved, even where
+the behaviour they configure lands later.
 
 A tag whose natural name collides with one of these is declared under `[tags.*]`. Bare and nested
 tag tables are merged into one flat set before validation, so the two forms are interchangeable and
