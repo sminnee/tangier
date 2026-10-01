@@ -30,19 +30,25 @@ you name a tag that collides with a reserved section.
 
 from __future__ import annotations
 
+import re
 import shlex
 import sys
 import tomllib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 # Top-level names that configure tangier rather than declaring a tag. Reserved
 # now even where the behaviour lands later: reserving a name is cheap,
 # un-reserving one after a config author used it as a tag is a breaking change.
-RESERVED_SECTIONS = frozenset({"tags", "sha", "registry", "deploy", "image", "k8s", "runners", "tailnet"})
+RESERVED_SECTIONS = frozenset({"tags", "sha", "registry", "deploy", "image", "k8s", "runners", "tailnet", "gate"})
 
 # Recognised tag-table fields. `_items` is matched by suffix.
 _KNOWN_FIELDS = {"paths", "exclude", "depends", "sha", "touched", "files"}
+
+# `{<name>-items}` in a gate command is the items list `<name>`, the same name
+# `changemap github-outputs` emits. Any other `{<group>}` is a file-set group.
+ITEMS_PLACEHOLDER_SUFFIX = "-items"
 
 # Excluded from every bucket SHA unless `[sha] exclude` overrides it. Documentation
 # changes must not rebuild images.
@@ -162,6 +168,23 @@ class TailnetSettings:
 
 
 @dataclass
+class GateSpec:
+    """`[gate.<name>]` — a set of commands whose pass on a clean tree is recorded.
+
+    `commands` are split into argv at PARSE time, as `AfterHook` is, so
+    `runner.run` never needs a shell. A `{...}` placeholder is a whole token and
+    is replaced at run time by a comma-joined list from the answer set.
+
+    `scope` names packages: a SHA bucket, or a tag that lists `paths`. The gate
+    has no path list of its own.
+    """
+
+    commands: list[list[str]]
+    env: dict[str, str]
+    scope: list[str]
+
+
+@dataclass
 class Config:
     paths: dict[str, list[str]] = field(default_factory=dict)
     # tag -> globs subtracted from that tag's `paths` (absent == no exclusions).
@@ -185,6 +208,7 @@ class Config:
     rollout: RolloutSettings = field(default_factory=RolloutSettings)
     after: AfterHook | None = None
     tailnet: TailnetSettings = field(default_factory=TailnetSettings)
+    gates: dict[str, GateSpec] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +353,29 @@ _SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", "|", ";", ">", ">>", "<", "&"})
 _SHELL_SUBSTITUTIONS = ("$(", "`")
 
 
+def _split_command(path: str, label: str, cmd: str) -> list[str]:
+    """Split a shell-free command line into argv, or raise naming `label`."""
+    for marker in _SHELL_SUBSTITUTIONS:
+        if marker in cmd:
+            raise ConfigError(
+                f"{path}: {label} contains `{marker}`, but the command runs without a shell "
+                f"— put the logic in a script and call that instead"
+            )
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as e:
+        raise ConfigError(f"{path}: {label} is not a valid command line: {e}") from e
+    if not argv:
+        raise ConfigError(f"{path}: {label} is empty")
+    for token in argv:
+        if token in _SHELL_OPERATOR_TOKENS:
+            raise ConfigError(
+                f"{path}: {label} contains the shell operator `{token}`, but the command "
+                f"runs without a shell — put the logic in a script and call that instead"
+            )
+    return argv
+
+
 def _parse_after(path: str, val: object) -> AfterHook:
     """Parse `[deploy] after` — the string shorthand or the explicit table.
 
@@ -348,25 +395,7 @@ def _parse_after(path: str, val: object) -> AfterHook:
     else:
         raise ConfigError(f"{path}: `[deploy] after` must be a string or a table, got {type(val).__name__}")
 
-    for marker in _SHELL_SUBSTITUTIONS:
-        if marker in cmd:
-            raise ConfigError(
-                f"{path}: `[deploy] after` contains `{marker}`, but the hook runs without a shell "
-                f"— put the logic in a script and call that instead"
-            )
-    try:
-        argv = shlex.split(cmd)
-    except ValueError as e:
-        raise ConfigError(f"{path}: `[deploy] after` is not a valid command line: {e}") from e
-    if not argv:
-        raise ConfigError(f"{path}: `[deploy] after` is empty")
-    for token in argv:
-        if token in _SHELL_OPERATOR_TOKENS:
-            raise ConfigError(
-                f"{path}: `[deploy] after` contains the shell operator `{token}`, but the hook "
-                f"runs without a shell — put the logic in a script and call that instead"
-            )
-    return AfterHook(argv=argv, fatal=fatal)
+    return AfterHook(argv=_split_command(path, "`[deploy] after`", cmd), fatal=fatal)
 
 
 def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv], RolloutSettings, AfterHook | None]:
@@ -421,6 +450,40 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv]
             migration_version_bucket=bucket,
         )
     return envs, rollout, after
+
+
+# A gate name becomes a ref component (`refs/tangier/gates/<name>/<key>`) and
+# an output name (`<name>-verified`), so it must be valid as both.
+_GATE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+
+
+def _parse_gates(path: str, body: dict[str, Any]) -> dict[str, GateSpec]:
+    out: dict[str, GateSpec] = {}
+    for name, spec in body.items():
+        section = f"gate.{name}"
+        if not _GATE_NAME.fullmatch(name):
+            raise ConfigError(
+                f"{path}: `[{section}]` is not a valid gate name (letters, digits, `-` and `_`, not starting with `-`)"
+            )
+        spec = _require_table(path, section, spec)
+        _check_keys(path, section, spec, {"cmd", "env", "scope"})
+        for required in ("cmd", "scope"):
+            if required not in spec:
+                raise ConfigError(f"{path}: `[{section}]` requires `{required}`")
+        cmds = _coerce_str_or_list(path, section, "cmd", spec["cmd"])
+        scope = _coerce_str_or_list(path, section, "scope", spec["scope"])
+        for key, val in (("cmd", cmds), ("scope", scope)):
+            if not val:
+                raise ConfigError(f"{path}: `[{section}]` `{key}` is empty")
+        env = spec.get("env", {})
+        if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+            raise ConfigError(f"{path}: `[{section}].env` must be a table of strings")
+        out[name] = GateSpec(
+            commands=[_split_command(path, f"`[{section}] cmd`", cmd) for cmd in cmds],
+            env=dict(env),
+            scope=scope,
+        )
+    return out
 
 
 def _parse_tailnet(path: str, body: dict[str, Any]) -> TailnetSettings:
@@ -539,11 +602,15 @@ def _warn_tags_without_output(cfg: Config, path: str) -> None:
     # Tags something else depends ON count as having output: their presence in
     # the graph propagates expansion to dependents that DO have output.
     depended_upon = {dep for deps in cfg.depends.values() for dep in deps}
+    gated = {tag for gate in cfg.gates.values() for tag in scope_tags(cfg, gate)}
     for tag in cfg.paths:
-        has_output = tag in cfg.sha_bucket or tag in cfg.touched or tag in items_tags or tag in depended_upon
+        has_output = (
+            tag in cfg.sha_bucket or tag in cfg.touched or tag in items_tags or tag in depended_upon or tag in gated
+        )
         if not has_output:
             print(
-                f"{path}: warning: `[{tag}]` has no sha, touched, *_items, and nothing depends on it — no CI signal",
+                f"{path}: warning: `[{tag}]` has no sha, touched, *_items, gate scope, "
+                "and nothing depends on it — no CI signal",
                 file=sys.stderr,
             )
 
@@ -595,7 +662,72 @@ def _derive(cfg: Config, path: str) -> None:
                 f"{path}: `[runners.{name}].files` names no `files = true` table: "
                 f"{runner.files} (known file sets: {known})"
             )
+    for name, gate in cfg.gates.items():
+        _check_gate(cfg, path, name, gate)
     _warn_unhashable_sha_globs(cfg, path)
+
+
+def _check_gate(cfg: Config, path: str, name: str, gate: GateSpec) -> None:
+    """Reject a scope entry or a placeholder that names nothing.
+
+    Both are otherwise silent: an unknown scope entry hashes no content, and an
+    unknown placeholder reaches the command as a literal argument.
+    """
+    known_buckets = set(cfg.sha_bucket.values())
+    for entry in gate.scope:
+        if entry in known_buckets:
+            continue
+        if entry in cfg.file_sets:
+            raise ConfigError(
+                f"{path}: `[gate.{name}].scope` entry `{entry}` is a `files = true` table, "
+                "which is a projection and has no content hash"
+            )
+        if entry not in cfg.paths:
+            raise ConfigError(f"{path}: `[gate.{name}].scope` entry `{entry}` names no bucket or tag")
+        if not cfg.paths[entry]:
+            raise ConfigError(f"{path}: `[gate.{name}].scope` entry `{entry}` is a tag that has no `paths`")
+    # An error here, where a SHA bucket only warns: for an image the cost is a
+    # stale tag, for a gate it is a false pass.
+    for tag, glob in _unhashable_globs(cfg, scope_tags(cfg, gate)):
+        raise ConfigError(
+            f"{path}: `[{tag}].paths` glob `{glob}` is not a literal path or `dir/**`, so it contributes "
+            f"nothing to the key of `[gate.{name}]`, whose scope it feeds"
+        )
+    for argv in gate.commands:
+        for token in argv:
+            if "{" not in token and "}" not in token:
+                continue
+            inner = token[1:-1]
+            if not (token.startswith("{") and token.endswith("}")) or "{" in inner or "}" in inner:
+                raise ConfigError(
+                    f"{path}: `[gate.{name}] cmd` argument `{token}`: a `{{...}}` placeholder must be a whole argument"
+                )
+            if inner.endswith(ITEMS_PLACEHOLDER_SUFFIX):
+                if inner[: -len(ITEMS_PLACEHOLDER_SUFFIX)] not in cfg.items:
+                    known = ", ".join(sorted(cfg.items)) or "(none)"
+                    raise ConfigError(
+                        f"{path}: `[gate.{name}] cmd` placeholder `{token}` names no `*_items` list (known: {known})"
+                    )
+            elif inner not in cfg.file_sets:
+                known = ", ".join(sorted(cfg.file_sets)) or "(none)"
+                raise ConfigError(
+                    f"{path}: `[gate.{name}] cmd` placeholder `{token}` names no `files = true` table (known: {known})"
+                )
+
+
+def scope_tags(cfg: Config, gate: GateSpec) -> list[str]:
+    """The tags a gate's scope resolves to: a bucket's members, or the tag itself.
+
+    A bucket name wins over a tag of the same name, so `sha = true` on a tag
+    brings in every tag that contributes to that bucket.
+    """
+    return sorted({tag for entry in gate.scope for tag in entry_tags(cfg, entry)})
+
+
+def entry_tags(cfg: Config, entry: str) -> list[str]:
+    """The tags one scope entry resolves to."""
+    members = [tag for tag, bucket in cfg.sha_bucket.items() if bucket == entry]
+    return sorted(members) or [entry]
 
 
 def _warn_unhashable_sha_globs(cfg: Config, path: str) -> None:
@@ -607,20 +739,27 @@ def _warn_unhashable_sha_globs(cfg: Config, path: str) -> None:
     source changes, and the image silently stops rebuilding. Only a literal path
     or a `dir/**` prefix survives the reduction.
     """
+    for tag, glob in _unhashable_globs(cfg, cfg.sha_bucket):
+        print(
+            f"{path}: warning: `[{tag}].paths` glob `{glob}` is not a literal path or `dir/**`, "
+            "so it contributes nothing to the SHA bucket it feeds",
+            file=sys.stderr,
+        )
+
+
+def _unhashable_globs(cfg: Config, tags: Iterable[str]) -> list[tuple[str, str]]:
+    """(tag, glob) for each glob `git ls-tree` cannot walk, in `tags` and their transitive deps."""
     contributing: set[str] = set()
-    for tag, bucket in cfg.sha_bucket.items():
-        del bucket
+    for tag in tags:
         contributing.add(tag)
         contributing |= _forward_deps(tag, cfg.depends)
+    out: list[tuple[str, str]] = []
     for tag in sorted(contributing):
         for glob in cfg.paths.get(tag, []):
             stripped = glob[: -len("/**")] if glob.endswith("/**") else glob
             if any(ch in stripped for ch in "*?["):
-                print(
-                    f"{path}: warning: `[{tag}].paths` glob `{glob}` is not a literal path or `dir/**`, "
-                    "so it contributes nothing to the SHA bucket it feeds",
-                    file=sys.stderr,
-                )
+                out.append((tag, glob))
+    return out
 
 
 def _forward_deps(tag: str, depends: dict[str, list[str]]) -> set[str]:
@@ -693,6 +832,8 @@ def read_config(path: str) -> Config:
             cfg.deploy_envs, cfg.rollout, cfg.after = _parse_deploy(path, table)
         elif key == "tailnet":
             cfg.tailnet = _parse_tailnet(path, table)
+        elif key == "gate":
+            cfg.gates = _parse_gates(path, table)
 
     # --- B. Merge and validate tags ---------------------------------------
     merged: dict[str, Any] = dict(bare_tags)
