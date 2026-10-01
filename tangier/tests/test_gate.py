@@ -154,6 +154,12 @@ class TestKey(GateCase):
             _ = self.key(base="origin/main")
         self.assertIn("origin/main", str(ctx.exception))
 
+    # SPEC: gate#key-no-placeholder-no-diff
+    def test_a_gate_with_no_placeholder_needs_no_base(self) -> None:
+        # A shallow CI checkout holds no `origin/main`.
+        body = CONFIG.replace("bin/test --dirs {unittest-items} --files {svc-files}", "bin/test")
+        self.assertEqual(self.key(body, base="origin/main"), self.key(body, base="HEAD"))
+
     # SPEC: gate#key-fails-closed
     def test_a_scope_entry_that_matches_no_tracked_file_raises(self) -> None:
         # `svc` still matches, so the scope as a whole is not empty.

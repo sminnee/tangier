@@ -698,7 +698,7 @@ def _check_gate(cfg: Config, path: str, name: str, gate: GateSpec) -> None:
             if "{" not in token and "}" not in token:
                 continue
             inner = token[1:-1]
-            if not (token.startswith("{") and token.endswith("}")) or "{" in inner or "}" in inner:
+            if not is_placeholder(token) or "{" in inner or "}" in inner:
                 raise ConfigError(
                     f"{path}: `[gate.{name}] cmd` argument `{token}`: a `{{...}}` placeholder must be a whole argument"
                 )
@@ -713,6 +713,11 @@ def _check_gate(cfg: Config, path: str, name: str, gate: GateSpec) -> None:
                 raise ConfigError(
                     f"{path}: `[gate.{name}] cmd` placeholder `{token}` names no `files = true` table (known: {known})"
                 )
+
+
+def is_placeholder(token: str) -> bool:
+    """Whether a command argument is a `{...}` placeholder."""
+    return token.startswith("{") and token.endswith("}")
 
 
 def scope_tags(cfg: Config, gate: GateSpec) -> list[str]:
