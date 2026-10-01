@@ -2,7 +2,7 @@
 
 A CI/deploy pipeline toolkit for monorepos, driven by one `pipeline.toml`.
 
-It answers three questions that repos usually answer with a pile of copy-pasted shell scripts:
+It answers the questions that repos usually answer with a pile of copy-pasted shell scripts:
 
 | | |
 |---|---|
@@ -10,6 +10,7 @@ It answers three questions that repos usually answer with a pile of copy-pasted 
 | `tangier image` | What is this component's content hash, and does that image already exist? |
 | `tangier deploy` | Render and apply the k8s manifests for those image tags. |
 | `tangier tailnet` | Can this machine actually reach the cluster, and as what identity? |
+| `tangier gate` | Has this content already passed its gate? Lets CI reuse a local pass. |
 
 The organising idea is the **content-addressed tag**: a component's image is tagged with a hash of
 its own source tree plus everything it depends on. Rebuild only what changed, skip what is already
@@ -51,6 +52,8 @@ tangier image build core --push            # build, unless already published
 tangier deploy --render uat                # the manifests a deploy would apply
 tangier deploy uat                         # migrate, apply, wait, roll back on failure
 tangier tailnet check uat                  # why can't I reach the cluster?
+tangier gate run test-backend              # run the gate, and record a pass
+tangier gate push                          # let CI find the record
 ```
 
 `--config` defaults to `pipeline.toml`, overridable with `$TANGIER_CONFIG`.
@@ -105,6 +108,47 @@ table form to change that:
 cmd = "bin/sentry-release ${ENV}"
 fatal = true
 ```
+
+## Gate
+
+`tangier gate run <name>` runs a gate's commands and records a pass. CI finds the record and skips
+the matching job.
+
+```toml
+[gate.test-backend]
+cmd = "bin/test --dirs {unittest-items} --files {unittest-files}"
+env = { TEST_DB_REQUIRED = "1" }
+scope = ["core", "backend-gate-inputs"]
+
+[backend-gate-inputs]            # a custom package: inputs no SHA bucket covers
+paths = ["uv.lock", "pyproject.toml", "bin/test", "pipeline.toml"]
+```
+
+The record sits under a **gate key**: a hash of the resolved commands, the `env` table, and the
+content of the `scope` packages. The key ignores commit SHA and history. A rebase or a re-cut that
+leaves the scope unchanged keeps the record valid.
+
+```sh
+tangier gate run test-backend        # locally, before the push
+tangier gate push
+
+tangier gate github-outputs          # in CI
+# test-backend-verified=true
+# test-backend-key=812f61d775681885026b167c33efd2155f04c861
+```
+
+`gate run` refuses a dirty tree, because the key describes `HEAD`. If the commands leave the tree
+dirty, `gate run` writes no record and exits 1. `--no-record` runs the commands on any tree and
+records nothing.
+
+Records are git refs under `refs/tangier/gates/`. A local record needs no network. Reading records
+in CI needs `contents: read` only. `gate prune --older-than 30` deletes old records.
+
+The key needs the diff between `--base` and `HEAD`, so CI must fetch `origin/main` with enough
+history to reach the merge base. Without it, `gate` commands fail instead of giving a key.
+
+A verified gate carries the same confidence as a diff-based PR build, not more. Keep a nightly full
+build that does not consult gate records. See `docs/specs/gate.md` for the risks and the rules.
 
 ## Actions
 
