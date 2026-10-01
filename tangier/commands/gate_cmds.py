@@ -26,28 +26,32 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
 
     The tree must be clean before and after the run, and HEAD must not move:
     the key describes HEAD, so the commands must test exactly HEAD.
-    `--no-record` drops the rule and the record together.
+    `--read-only` writes no record, so it drops the rule. `--force` reads no
+    record. A dirty tree reads no record either: no key describes it.
     """
     name = args.name
     spec = gate.spec_for(config, name)
-    runner = _runner(args)
-    if args.no_record:
-        return _run_commands(runner, spec, gate.commands_for(config, name, args.base, "HEAD"))
-
-    if not gate.is_clean():
-        raise gate.GateError(
-            f"gate `{name}`: the tree is dirty, so a pass cannot be recorded. "
-            "Commit the changes, or use `--no-record` to run without a record"
-        )
+    clean = gate.is_clean()
+    if not clean:
+        if not args.read_only:
+            raise gate.GateError(
+                f"gate `{name}`: the tree is dirty, so a pass cannot be recorded. "
+                "Commit the changes, or use `--read-only` to run without a record"
+            )
+        print(f"gate `{name}`: the tree is dirty, so no record applies", file=sys.stderr)
     resolved = gate.resolve(config, name, args.base, "HEAD")
-    where = gate.verified(name, resolved.key)
-    if where:
-        print(f"gate `{name}`: verified ({where} record {resolved.key}), nothing to run")
-        return 0
+    if clean and not args.force:
+        where = gate.verified(name, resolved.key)
+        if where:
+            print(f"gate `{name}`: verified ({where} record {resolved.key}), nothing to run")
+            return 0
 
-    code = _run_commands(runner, spec, resolved.commands)
+    code = _run_commands(_runner(args), spec, resolved.commands)
     if code != 0:
         return code
+    if args.read_only:
+        print(f"gate `{name}`: passed, no record written (--read-only)")
+        return 0
     changed = "left the tree dirty" if not gate.is_clean() else "moved HEAD" if gate.head() != resolved.head else ""
     if changed:
         print(f"gate `{name}`: passed, but the commands {changed}, so no record was written", file=sys.stderr)
@@ -138,10 +142,11 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     # head a record can describe is HEAD.
     _add_diff_args(rp, head=False)
     _ = rp.add_argument(
-        "--no-record",
+        "--read-only",
         action="store_true",
-        help="always run, on any tree, and write no record; item lists still come from commits, not the dirty tree",
+        help="write no record, and so accept a dirty tree; item lists still come from commits, not the dirty tree",
     )
+    _ = rp.add_argument("--force", action="store_true", help="run the commands even when a record exists")
     rp.set_defaults(func=cmd_run)
 
     vp = gsub.add_parser("verified", help="has this gate passed? prints verified/unverified, exits 0/1")
