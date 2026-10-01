@@ -71,6 +71,31 @@ class TestShaBucketExclude(unittest.TestCase):
         with contextlib.chdir(root):
             return changemap.sha_for_bucket(cfg, bucket, "HEAD")
 
+    # SPEC: changemap#glob-hash-inputs
+    def test_bucket_shas_for_a_fixed_tree_are_pinned(self) -> None:
+        # Literals, computed once from the code before `scope_lines` was split
+        # out. A change here moves every image tag in every consuming repo.
+        cfg = make_config(
+            lib={"paths": "lib/**"},
+            svc={"paths": ["svc/**", "Makefile"], "exclude": "svc/gen.py", "depends": "lib", "sha": True},
+            extra={"paths": "extra/**", "sha": "svc"},
+            plain={"paths": "plain/**", "sha": True},
+        )
+        root = make_git_repo(
+            self,
+            {
+                "lib/util.py": "util = 1\n",
+                "svc/main.py": "main = 1\n",
+                "svc/gen.py": "generated\n",
+                "svc/README.md": "docs\n",
+                "Makefile": "all:\n",
+                "extra/data.txt": "data\n",
+                "plain/a.txt": "a\n",
+            },
+        )
+        self.assertEqual(self._sha(cfg, "svc", root), "85fea43edd")
+        self.assertEqual(self._sha(cfg, "plain", root), "620ebd768d")
+
     # SPEC: changemap#exclude-applies-to-sha
     def test_exclude_applies_to_bucket_contents(self) -> None:
         cfg = make_config(svc={"paths": ["f/**"], "exclude": ["f/gen.ts"], "sha": True})

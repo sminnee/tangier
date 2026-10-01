@@ -62,11 +62,17 @@ def sha_of_paths(paths: list[str], head: str, keep: Callable[[str], bool] | None
     Policy-free by design — the caller composes `keep`, so `[sha] exclude` and
     per-tag `exclude` meet in one place rather than two.
     """
-    h = hashlib.sha1()
+    return _sha_of_lines(tree_lines(paths, head, keep))
+
+
+def tree_lines(paths: list[str], head: str, keep: Callable[[str], bool] | None = None) -> list[str]:
+    """The `git ls-tree -r` lines for `paths`, optionally filtered by `keep`."""
     lines = git.ls_tree(head, paths)
-    filtered = [line for line in lines if keep is None or keep(git.ls_tree_path(line))]
-    h.update("\n".join(filtered).encode())
-    return h.hexdigest()[:10]
+    return [line for line in lines if keep is None or keep(git.ls_tree_path(line))]
+
+
+def _sha_of_lines(lines: list[str]) -> str:
+    return hashlib.sha1("\n".join(lines).encode()).hexdigest()[:10]
 
 
 def transitive_deps(tag: str, depends: dict[str, list[str]]) -> set[str]:
@@ -91,9 +97,17 @@ def buckets(cfg: Config) -> dict[str, list[str]]:
 
 
 def sha_for_bucket(cfg: Config, bucket: str, head: str = "HEAD") -> str:
-    """SHA of the union of a bucket's members' paths + their transitive deps' paths.
+    """SHA of the union of a bucket's members' paths + their transitive deps' paths."""
+    return _sha_of_lines(scope_lines(cfg, buckets(cfg).get(bucket, []), head))
 
-    Contributing tags' `exclude` globs are honoured so a bucket's contents match
+
+def scope_lines(cfg: Config, tags: Iterable[str], head: str = "HEAD") -> list[str]:
+    """The `ls-tree` lines for `tags`' paths plus their transitive deps' paths.
+
+    A SHA bucket and a gate scope both hash these lines, so a package means
+    the same thing to an image and to a gate.
+
+    Contributing tags' `exclude` globs are honoured so the lines match
     the tags' match sets. `git ls-tree` cannot express negation, so the file list
     it returns is filtered afterwards. Exclusion is a property of the individual
     tag, not the union: a path one contributing tag excludes still counts if
@@ -103,12 +117,11 @@ def sha_for_bucket(cfg: Config, bucket: str, head: str = "HEAD") -> str:
       - `[sha] exclude` applies unconditionally (docs never rebuild an image).
       - the per-tag `claimed_by` filter applies only when some contributing tag
         actually declares `exclude`.
-    Conflating them would change the hash of every bucket that has no exclusions.
+    Conflating them would change the hash of every bucket and scope that has no exclusions.
     """
-    members = buckets(cfg).get(bucket, [])
     bucket_globs: list[str] = []
     contributing: set[str] = set()
-    for m in members:
+    for m in tags:
         # Set iteration, so the order of `bucket_globs` — and hence of the path
         # arguments to `git ls-tree` — is not stable across runs. That is safe
         # only because `git ls-tree -r` sorts and dedups its output regardless
@@ -131,7 +144,7 @@ def sha_for_bucket(cfg: Config, bucket: str, head: str = "HEAD") -> str:
 
     # Neither filter applies -> walk everything unfiltered, the byte-stable fast path.
     keep: Callable[[str], bool] | None = _keep if (sha_exclude or needs_claim_filter) else None
-    return sha_of_paths(globs.globs_to_ls_tree_paths(bucket_globs), head, keep)
+    return tree_lines(globs.globs_to_ls_tree_paths(bucket_globs), head, keep)
 
 
 # ---------------------------------------------------------------------------
