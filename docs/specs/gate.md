@@ -68,12 +68,18 @@ sorted keys.
   moves it. `[key-content-only]`
 - The resolved commands are inputs. The item and file lists come from the diff between `--base` and
   `--head`, so a different selection gives a different key. `[key-commands]`
+- A gate with no placeholder takes nothing from the diff. Its key does not read `--base`, so the
+  gate works in a shallow checkout. `[key-no-placeholder-no-diff]`
 - The `env` table is an input. `[key-env]`
 - The key fails closed. Each of these is an error, because each would give one stable key that
-  many trees share: a `--head` that names no commit; a `--base` that names no commit or has no
-  merge base with the head; a scope entry that matches no tracked file. `[key-fails-closed]`
+  many trees share: `[key-fails-closed]`
+  - a `--head` that names no commit;
+  - for a gate with a placeholder, a `--base` that names no commit or has no merge base with the
+    head;
+  - a scope entry that matches no tracked file.
 
-A CI checkout must therefore hold `origin/main` and enough history to reach the merge base.
+For a gate with a placeholder, a CI checkout must therefore hold `origin/main` and enough history
+to reach the merge base.
 
 CI computes the key on the PR merge commit. The key matches only when the merged in-scope content
 equals what the local run tested. A moved `main` gives a miss, never a false hit.

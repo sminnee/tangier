@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 from tangier import __version__, git
 from tangier.changemap import AnswerSet, compute_answer_set, scope_lines
-from tangier.config import ITEMS_PLACEHOLDER_SUFFIX, Config, GateSpec, entry_tags, scope_tags
+from tangier.config import ITEMS_PLACEHOLDER_SUFFIX, Config, GateSpec, entry_tags, is_placeholder, scope_tags
 
 REF_PREFIX = "refs/tangier/gates"
 # Where `prune` mirrors origin's gate refs, apart from this clone's own records.
@@ -64,7 +64,7 @@ def resolve_commands(gate: GateSpec, answers: AnswerSet) -> list[list[str]]:
     """
 
     def substitute(token: str) -> str:
-        if not (token.startswith("{") and token.endswith("}")):
+        if not is_placeholder(token):
             return token
         name = token[1:-1]
         if name.endswith(ITEMS_PLACEHOLDER_SUFFIX):
@@ -74,10 +74,22 @@ def resolve_commands(gate: GateSpec, answers: AnswerSet) -> list[list[str]]:
     return [[substitute(token) for token in argv] for argv in gate.commands]
 
 
-def commands_for(cfg: Config, name: str, base: str, head: str) -> list[list[str]]:
-    """The gate's commands for this diff, with item and file lists filled in."""
-    answers = compute_answer_set(cfg, base, head, compute_shas=False)
-    return resolve_commands(spec_for(cfg, name), answers)
+def _commands_for(cfg: Config, name: str, spec: GateSpec, base: str, head: str) -> list[list[str]]:
+    """The gate's commands for this diff, with item and file lists filled in.
+
+    A gate with no placeholder takes nothing from the diff, so `base` is not
+    read: such a gate works in a shallow checkout.
+    """
+    if not any(is_placeholder(token) for argv in spec.commands for token in argv):
+        return [list(argv) for argv in spec.commands]
+    try:
+        _ = git.merge_base(base, head)
+    except git.GitError as e:
+        raise GateError(
+            f"gate `{name}`: cannot diff `{base}` against `{head}`, so the commands cannot be resolved. "
+            f"Fetch `{base}` with enough history to reach the merge base, or pass `--base` ({e})"
+        ) from e
+    return resolve_commands(spec, compute_answer_set(cfg, base, head, compute_shas=False))
 
 
 def resolve(cfg: Config, name: str, base: str, head: str) -> Resolved:
@@ -87,7 +99,7 @@ def resolve(cfg: Config, name: str, base: str, head: str) -> Resolved:
     stable key that many trees share:
       - a bad `head` walks as an empty tree;
       - a bad `base`, or one with no merge base, diffs as "nothing changed", so
-        every item list is empty;
+        every item list is empty (a gate with no placeholder reads no `base`);
       - a scope entry that matches no file hashes no content.
     """
     spec = spec_for(cfg, name)
@@ -95,14 +107,7 @@ def resolve(cfg: Config, name: str, base: str, head: str) -> Resolved:
         commit = git.rev_parse(head)
     except git.GitError as e:
         raise GateError(f"gate `{name}`: `{head}` does not name a commit ({e})") from e
-    try:
-        _ = git.merge_base(base, head)
-    except git.GitError as e:
-        raise GateError(
-            f"gate `{name}`: cannot diff `{base}` against `{head}`, so the commands cannot be resolved. "
-            f"Fetch `{base}` with enough history to reach the merge base, or pass `--base` ({e})"
-        ) from e
-    commands = commands_for(cfg, name, base, head)
+    commands = _commands_for(cfg, name, spec, base, head)
     for entry in spec.scope:
         if not scope_lines(cfg, entry_tags(cfg, entry), head):
             raise GateError(f"gate `{name}`: the scope entry `{entry}` matches no tracked file at `{head}`")
