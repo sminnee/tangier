@@ -111,8 +111,8 @@ fatal = true
 
 ## Gate
 
-`tangier gate run <name>` runs a gate's commands and records a pass. CI finds the record and skips
-the matching job.
+`tangier gate run <name>` runs a gate's commands and records a pass. CI finds the record and does
+not run the commands again.
 
 ```toml
 [gate.test-backend]
@@ -138,17 +138,76 @@ tangier gate github-outputs          # in CI
 ```
 
 `gate run` refuses a dirty tree, because the key describes `HEAD`. If the commands leave the tree
-dirty, `gate run` writes no record and exits 1. `--no-record` runs the commands on any tree and
-records nothing.
+dirty, `gate run` writes no record and exits 1. Two flags change that:
+
+| Flag | Effect |
+| --- | --- |
+| `--read-only` | Reuse a record, but write none. A dirty tree runs, and reads no record. |
+| `--force` | Run the commands even when a record exists. |
 
 Records are git refs under `refs/tangier/gates/`. A local record needs no network. Reading records
 in CI needs `contents: read` only. `gate prune --older-than 30` deletes old records.
 
-The key needs the diff between `--base` and `HEAD`, so CI must fetch `origin/main` with enough
-history to reach the merge base. Without it, `gate` commands fail instead of giving a key.
+A gate with a `{...}` placeholder needs the diff between `--base` and `HEAD`, so its checkout must
+hold `origin/main` and the merge base. Without them, its `gate` commands fail instead of giving a
+key. A gate with no placeholder does not read `--base`.
 
 A verified gate carries the same confidence as a diff-based PR build, not more. Keep a nightly full
 build that does not consult gate records. See `docs/specs/gate.md` for the risks and the rules.
+
+### Adopt gate in CI
+
+Move each command from the workflow into `pipeline.toml`, and call the gate from the job. Before:
+
+```yaml
+test:
+  strategy: { matrix: { python-version: ["3.11", "3.12", "3.13"] } }
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with: { python-version: "${{ matrix.python-version }}" }
+    - run: bin/test
+```
+
+After:
+
+```toml
+[gate.test]
+cmd = [
+  "uv run --no-project --python 3.11 python -m unittest discover -s tangier -p test_*.py -t .",
+  "uv run --no-project --python 3.12 python -m unittest discover -s tangier -p test_*.py -t .",
+  "uv run --no-project --python 3.13 python -m unittest discover -s tangier -p test_*.py -t .",
+]
+scope = ["gate-inputs"]
+```
+
+```yaml
+test:
+  steps:
+    - uses: actions/checkout@v4       # shallow: this gate has no placeholder
+    - uses: astral-sh/setup-uv@v6
+      with: { enable-cache: false }   # a verified gate never calls uv
+    - env: { EVENT: "${{ github.event_name }}" }
+      run: |
+        flags=(--read-only)
+        if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+        tangier gate run test "${flags[@]}"
+```
+
+| Rule | Reason |
+| --- | --- |
+| The command moves from the workflow to `[gate.<name>]`. The step becomes `tangier gate run <name>`. | One definition serves the developer and CI. |
+| The job and its check name stay. | A required status check still reports. A verified gate passes in seconds. |
+| On a pull request, pass `--read-only`. | CI reuses a record and runs on a miss. CI does not push records, and a run can leave report files in the tree. |
+| On a push to `main` and on a nightly run, pass `--read-only --force`. | This is the full build that does not consult records. |
+| A gate with no placeholder needs the default shallow checkout only. | Its key covers the commands and the scope at `HEAD`. |
+| A gate with a `{...}` placeholder needs the merge base. Use `fetch-depth: 0` with `filter: blob:none`. | The item lists come from the diff. `fetch-depth: 0` alone fetches every blob of every branch. The blobless filter fetches commits and trees only. |
+| A matrix dimension moves into the gate's commands, or becomes one gate for each leg. | The key has no matrix dimension, so one record satisfies every leg. |
+| Setup steps still run. To skip them, add `tangier gate verified <name>` as an early step and put `if:` on the setup steps. | `gate run` saves the command time only. |
+| Leave the pull request job on the merge commit, which is the checkout default. | The key then covers the merged content. A moved `main` gives a miss, never a false hit. |
+
+tangier's own `pipeline.toml` and `.github/workflows/ci.yaml` follow these rules. tangier has no
+nightly run.
 
 ## Actions
 

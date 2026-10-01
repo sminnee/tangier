@@ -2,7 +2,7 @@
 
 > `tangier gate` records a local gate pass and lets CI reuse it. A gate is a set of commands from
 > `pipeline.toml`. A pass on a clean tree leaves a record under a key made from content. CI
-> computes the same key, finds the record, and skips the matching job.
+> computes the same key, finds the record, and does not run the commands again.
 
 ## Confidence
 
