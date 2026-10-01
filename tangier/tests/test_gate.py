@@ -198,9 +198,9 @@ class TestRun(GateCase):
         return self.tangier("gate", "run", "backend", "--base", "HEAD", *extra, runner=runner)
 
     # SPEC: gate#run-refuses-dirty-tree
-    def assert_refused(self) -> None:
+    def assert_refused(self, *extra: str) -> None:
         runner = RecordingRunner()
-        code, _, err = self.run_gate(runner=runner)
+        code, _, err = self.run_gate(*extra, runner=runner)
         self.assertEqual(code, 2)
         self.assertIn("dirty", err)
         self.assertEqual(runner.calls, [])
@@ -298,20 +298,74 @@ class TestRun(GateCase):
         self.assertEqual(runner.calls, [])
         self.assertIn("verified", out)
 
-    # SPEC: gate#run-no-record
-    def test_no_record_runs_on_a_dirty_tree_and_writes_nothing(self) -> None:
+    # SPEC: gate#run-read-only
+    def test_read_only_reuses_a_record_on_a_clean_tree(self) -> None:
+        _ = self.run_gate()
+        runner = RecordingRunner()
+        code, out, _ = self.run_gate("--read-only", runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, [])
+        self.assertIn("verified", out)
+
+    # SPEC: gate#run-read-only
+    def test_read_only_on_a_dirty_tree_runs_and_does_not_read_a_record(self) -> None:
+        _ = self.run_gate()
         _write(self.repo, "scratch.txt", "dirty\n")
         runner = RecordingRunner()
-        code, _, _ = self.run_gate("--no-record", runner=runner)
+        code, _, err = self.run_gate("--read-only", runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, NOTHING_SELECTED)
+        self.assertIn("dirty", err)
+
+    # SPEC: gate#run-read-only
+    def test_read_only_runs_on_a_miss_and_writes_no_record(self) -> None:
+        runner = RecordingRunner()
+        code, _, _ = self.run_gate("--read-only", runner=runner)
         self.assertEqual(code, 0)
         self.assertEqual(runner.calls, NOTHING_SELECTED)
         self.assertEqual(_gate_refs(self.repo), [])
 
-    # SPEC: gate#run-no-record
-    def test_no_record_ignores_an_existing_record(self) -> None:
+    # SPEC: gate#run-read-only
+    def test_read_only_passes_when_the_run_dirties_the_tree(self) -> None:
+        code, _, _ = self.run_gate("--read-only", runner=DirtyingRunner(self.repo))
+        self.assertEqual(code, 0)
+
+    # SPEC: gate#run-force
+    def test_force_runs_a_verified_gate_and_writes_the_record(self) -> None:
+        ref = f"refs/tangier/gates/backend/{self.key()}"
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
+            _ = self.run_gate()
+        first = _git(self.repo, "rev-parse", ref)
+        runner = RecordingRunner()
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
+            code, _, _ = self.run_gate("--force", runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, NOTHING_SELECTED)
+        # A new record, with the later time, replaces the first.
+        self.assertNotEqual(_git(self.repo, "rev-parse", ref), first)
+
+    # SPEC: gate#run-refuses-dirty-tree
+    # SPEC: gate#run-force
+    def test_force_refuses_a_dirty_tree(self) -> None:
+        _write(self.repo, "scratch.txt", "dirty\n")
+        self.assert_refused("--force")
+
+    # SPEC: gate#run-read-only
+    # SPEC: gate#run-force
+    def test_read_only_with_force_runs_on_a_dirty_tree_and_writes_nothing(self) -> None:
+        _write(self.repo, "scratch.txt", "dirty\n")
+        runner = RecordingRunner()
+        code, _, _ = self.run_gate("--read-only", "--force", runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, NOTHING_SELECTED)
+        self.assertEqual(_gate_refs(self.repo), [])
+
+    # SPEC: gate#run-read-only
+    # SPEC: gate#run-force
+    def test_read_only_with_force_ignores_an_existing_record(self) -> None:
         _ = self.run_gate()
         runner = RecordingRunner()
-        _ = self.run_gate("--no-record", runner=runner)
+        _ = self.run_gate("--read-only", "--force", runner=runner)
         self.assertEqual(runner.calls, NOTHING_SELECTED)
 
     # SPEC: gate#unknown-gate

@@ -119,7 +119,7 @@ A ref outside `refs/heads` and `refs/tags` triggers no workflow and no branch ru
 | Command | Behaviour |
 | --- | --- |
 | `gate key <name>` | Print the key. |
-| `gate run <name>` | Run the gate at `HEAD`, or reuse a record. Takes `--base` and `--no-record`. |
+| `gate run <name>` | Run the gate at `HEAD`, or reuse a record. Takes `--base`, `--read-only` and `--force`. |
 | `gate verified <name>` | Print `verified` or `unverified`, and exit 0 or 1. |
 | `gate push` | Push local gate records to `origin`. |
 | `gate github-outputs` | Emit `<gate>-verified` and `<gate>-key` for every gate. |
@@ -129,7 +129,7 @@ A ref outside `refs/heads` and `refs/tags` triggers no workflow and no branch ru
 record can describe.
 
 - A gate name that the config does not hold is an error, exit 2. `[unknown-gate]`
-- `gate run` refuses a dirty tree with exit 2 and runs nothing. A tracked change and an untracked
+- Without `--read-only`, `gate run` refuses a dirty tree with exit 2 and runs nothing. A tracked change and an untracked
   file both make the tree dirty, whatever `status.showUntrackedFiles` says. Ignored files do not.
   `[run-refuses-dirty-tree]`
 - When the gate is verified, `gate run` says where the record is, runs nothing, and exits 0.
@@ -141,9 +141,21 @@ record can describe.
 - On success, `gate run` writes no record and exits 1 when the commands left the tree dirty or
   moved `HEAD`. The commands tested content that the keyed commit does not hold.
   `[run-dirty-after]`
-- `--no-record` always runs the commands, on any tree, and writes no record. It does not look for
-  an existing record. The item and file lists still come from the commits between `--base` and
-  `HEAD`, not from uncommitted changes. `[run-no-record]`
+- `--read-only` writes no record. The clean-tree and `HEAD` rules protect the record, so they do not
+  apply. A dirty tree runs, with a note on stderr. A pass exits 0 whatever the commands left
+  behind. A clean tree still reuses a record. A dirty tree reads no record, because the key
+  describes `HEAD`. The item and file lists still come from the commits between `--base` and
+  `HEAD`, not from uncommitted changes. `[run-read-only]`
+- `--force` does not look for a record. It always runs the commands, and it writes the record by
+  the usual rules. `[run-force]`
+- The two flags combine:
+
+  | Flags | Dirty tree at start | Reads a record | Writes a record |
+  | --- | --- | --- | --- |
+  | none | Exit 2 | Yes | Yes |
+  | `--read-only` | Runs | On a clean tree only | No |
+  | `--force` | Exit 2 | No | Yes |
+  | `--read-only --force` | Runs | No | No |
 - `gate github-outputs` emits `<gate>-verified=true|false` and `<gate>-key=<key>` for each gate, in
   name order. It echoes to stdout and appends to `$GITHUB_OUTPUT` when set. It reads `origin` once
   for all gates. `[github-outputs]`
