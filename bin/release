@@ -44,6 +44,17 @@ if [ -n "$(git status --porcelain)" ]; then
   git status --short >&2
   exit 1
 fi
+# The release workflow rejects a tag that differs from pyproject.toml. Catch it
+# here, before the tag exists.
+PROJECT_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+MODULE_VERSION="$(python3 -c 'import tangier; print(tangier.__version__)')"
+if [ "$VERSION" != "v$PROJECT_VERSION" ] || [ "$VERSION" != "v$MODULE_VERSION" ]; then
+  echo "error: $VERSION does not match the package version" >&2
+  echo "  pyproject.toml:      $PROJECT_VERSION" >&2
+  echo "  tangier.__version__: $MODULE_VERSION" >&2
+  echo "  bump both in a PR, merge it, then release" >&2
+  exit 1
+fi
 if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
   echo "error: tag $VERSION already exists" >&2
   exit 1
@@ -61,8 +72,9 @@ cat <<EOF
 
 Tagged $VERSION and moved $ALIAS.
 
-Nothing is pushed yet. Moving $ALIAS ships to every consumer at once, so push
-deliberately:
+Nothing is pushed yet. Pushing $VERSION publishes it to PyPI, through
+.github/workflows/release.yaml. Moving $ALIAS ships to every consumer at once.
+Push deliberately:
 
   git push origin $VERSION
   git push origin -f $ALIAS

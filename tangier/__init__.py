@@ -12,4 +12,4 @@ Pure stdlib. See `docs/specs/changemap.md` and `docs/specs/gate.md`.
 """
 
 # Kept equal to `pyproject.toml` by a test. Gate records carry it.
-__version__ = "0.1.0"
+__version__ = "0.2.0"

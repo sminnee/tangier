@@ -19,8 +19,11 @@ published, and deploy exactly what was built.
 ## Install
 
 ```sh
-uv tool install /path/to/tangier      # or: pip install /path/to/tangier
+uvx tangier@0.2.0 --help              # run a pinned release from PyPI
+uv tool install tangier==0.2.0        # or put it on PATH
 ```
+
+Without uv, `python3 -m tangier` runs it from a checkout.
 
 Requires Python 3.11+ and **has no dependencies** — deliberately. tangier runs on CI runners that
 have no `setup-python` step and no package installer available, so it must work against the system
@@ -241,7 +244,7 @@ test:
       run: |
         flags=(--read-only)
         if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
-        tangier gate run test.py311 "${flags[@]}"
+        uvx tangier@<version> gate run test.py311 "${flags[@]}"
     - name: Run test.py312
       # ...the same, for test.py312
 ```
@@ -257,7 +260,7 @@ gates:
     - uses: actions/checkout@v4
       with: { fetch-depth: 0, filter: "blob:none" }
     - id: gates
-      run: tangier gate github-outputs
+      run: uvx tangier@<version> gate github-outputs
 
 test-backend:
   needs: gates
@@ -265,7 +268,7 @@ test-backend:
   steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 0, filter: "blob:none" }
-    - run: tangier gate run test-backend --read-only
+    - run: uvx tangier@<version> gate run test-backend --read-only
 ```
 
 A group is one job with one step for each member. The job runs when any member needs a run. Each
@@ -283,9 +286,9 @@ python:
   steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 0, filter: "blob:none" }
-    - run: tangier gate run python.pyright --read-only
-    - run: tangier gate run python.ruff --read-only
-    - run: tangier gate run python.unittest --read-only
+    - run: uvx tangier@<version> gate run python.pyright --read-only
+    - run: uvx tangier@<version> gate run python.ruff --read-only
+    - run: uvx tangier@<version> gate run python.unittest --read-only
 ```
 
 Add `if: "!cancelled()"` to the later steps to see every member's result when one fails.
@@ -293,6 +296,7 @@ Add `if: "!cancelled()"` to the later steps to see every member's result when on
 | Rule | Reason |
 | --- | --- |
 | The command moves from the workflow to `[gate.<name>]`. The step becomes `tangier gate run <name>`. | One definition serves the developer and CI. |
+| Run tangier as `uvx tangier@<version>`, after `astral-sh/setup-uv`. | A pinned release from PyPI. An unpinned `git+https` install runs whatever `main` holds, in a job that may have write access. |
 | The job and its check name stay. | A required status check still reports. A verified gate passes in seconds. |
 | On a pull request, pass `--read-only`. | CI reuses a record and runs on a miss. CI does not push records, and a run can leave report files in the tree. |
 | On a push to `main` and on a nightly run, pass `--read-only --force`. | This is the full build that does not consult records. |
@@ -333,8 +337,7 @@ uat and prod rests entirely on the `environment:` line of the calling job, and t
 visible from the call site.
 
 `@v0` is a moving alias: moving it ships to every consumer at once. Pin an exact version
-(`@v0.1.0`) for reproducibility. `bin/release v0.1.0` refuses a dirty tree or a non-`main` HEAD and
-runs the tests before tagging.
+(`@v0.2.0`) for reproducibility. § Development describes how a release is cut.
 
 ## Development
 
@@ -345,9 +348,17 @@ tangier gate run lint     # lint.check and lint.format
 tangier gate push         # before the PR push, so CI reuses both passes
 ```
 
-Releases are a maintainer step, not part of the everyday loop: `bin/release v0.1.0` tags a version
-and moves the `@v0` alias that every consumer pins. It refuses a dirty tree and any HEAD that is not
-`origin/main`, runs the tests, and stops short of pushing.
+Releases are a maintainer step, not part of the everyday loop. `bin/release v0.2.0` tags a version
+and moves the `@v0` alias that the Actions pin. It:
+
+- refuses a dirty tree, a HEAD that is not `origin/main`, and a tag that differs from the
+  `pyproject.toml` version;
+- runs the tests;
+- pushes nothing.
+
+Pushing the version tag publishes it to PyPI through `.github/workflows/release.yaml`. The workflow
+uses trusted publishing, so the repo holds no PyPI token. Register the publisher once on pypi.org:
+project `tangier`, repository `sminnee/tangier`, workflow `release.yaml`, environment `pypi`.
 
 `bin/parity-check <path-to-repo>` diffs `tangier changemap` against a repo's pre-extraction
 `bin/changemap` across many refs, in throwaway worktrees, and is the gate for migrating a repo onto
