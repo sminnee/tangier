@@ -305,7 +305,7 @@ Add `if: "!cancelled()"` to the later steps to see every member's result when on
 | Leave the pull request job on the merge commit, which is the checkout default. | The key then covers the merged content. A moved `main` gives a miss, never a false hit. |
 
 tangier's own `pipeline.toml` and `.github/workflows/ci.yaml` follow these rules. Its gates have no
-placeholder, so it keeps one job per gate and no `gates` job. tangier has no nightly run.
+placeholder, so it keeps one job per group, one step per member, and no `gates` job. tangier has no nightly run.
 
 ## Actions
 
@@ -340,8 +340,8 @@ runs the tests before tagging.
 
 ```sh
 bin/test                  # stdlib unittest, no dependencies; one Python, any tree
-tangier gate run test     # the suite on 3.11, 3.12 and 3.13; needs uv
-tangier gate run lint     # ruff check and ruff format --check
+tangier gate run test     # the suite on 3.11, 3.12 and 3.13, one member each; needs uv
+tangier gate run lint     # lint.check and lint.format
 tangier gate push         # before the PR push, so CI reuses both passes
 ```
 
