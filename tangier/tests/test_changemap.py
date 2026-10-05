@@ -161,6 +161,38 @@ class TestShaBucketExclude(unittest.TestCase):
         self.assertEqual(before, after)
 
 
+class TestScopeTouched(unittest.TestCase):
+    # SPEC: gate#need-key-inputs-only
+    def test_agrees_with_scope_lines_membership(self) -> None:
+        # Each file is touched exactly when `scope_lines` walks it: `[sha]
+        # exclude` and per-tag `exclude` drop it, a sibling's claim and a
+        # `depends` tag keep it.
+        cfg = make_config(
+            lib={"paths": "lib/**"},
+            svc={"paths": ["svc/**", "Makefile"], "exclude": "svc/gen.py", "depends": "lib"},
+            gen={"paths": "svc/gen.py", "exclude": "svc/gen.py"},
+            claim={"paths": "both/**"},
+            other={"paths": ["both/**", "other/**"], "exclude": "both/**"},
+        )
+        files = {
+            "lib/util.py": "1",
+            "svc/main.py": "1",
+            "svc/gen.py": "1",
+            "svc/README.md": "1",
+            "Makefile": "1",
+            "both/x.py": "1",
+            "other/y.py": "1",
+            "docs/z.md": "1",
+        }
+        root = make_git_repo(self, files)
+        for tags in (["svc"], ["gen"], ["claim", "other"], ["other"]):
+            with contextlib.chdir(root):
+                walked = {git.ls_tree_path(line) for line in changemap.scope_lines(cfg, tags)}
+            for f in files:
+                with self.subTest(tags=tags, file=f):
+                    self.assertEqual(changemap.scope_touched(cfg, tags, [f]), f in walked)
+
+
 class TestAnswerSet(unittest.TestCase):
     def _answers(self, cfg: Any, files: list[str], expand: bool = True) -> Any:
         with unittest.mock.patch.object(git, "changed_files", return_value=files):

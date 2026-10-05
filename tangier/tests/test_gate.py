@@ -57,6 +57,8 @@ FILES = {
 
 # The gate's commands when the diff selects nothing: each list is an empty argument.
 NOTHING_SELECTED = [["bin/test", "--dirs", "", "--files", ""], ["bin/lint"]]
+# The gate's commands for `GateCase`'s diff, which changes `svc/a.py`.
+SELECTED = [["bin/test", "--dirs", "svc", "--files", "svc/a.py"], ["bin/lint"]]
 
 
 def _git(root: str, *args: str) -> str:
@@ -90,6 +92,9 @@ class GateCase(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = make_git_repo(self, FILES)
         _ = _git(self.repo, "config", "user.email", "dev@example.com")
+        # The diff from `self.base` to HEAD touches the scope and selects `svc`, so the gate is needed.
+        self.base = _git(self.repo, "rev-parse", "HEAD")
+        _ = _commit(self.repo, "svc/a.py", "a = 2\n")
         # A runner's `$GITHUB_OUTPUT` must not receive the test's output lines.
         patcher = mock.patch.dict(os.environ)
         _ = patcher.start()
@@ -131,7 +136,7 @@ class TestKey(GateCase):
     # SPEC: gate#key-commands
     def test_a_different_item_list_moves_the_key(self) -> None:
         first = _git(self.repo, "rev-parse", "HEAD")
-        _ = _commit(self.repo, "svc/a.py", "a = 2\n")
+        _ = _commit(self.repo, "svc/a.py", "a = 3\n")
         # Same head, so the same tree. Against `first` the diff selects `svc`;
         # against HEAD it selects nothing.
         self.assertNotEqual(self.key(base=first), self.key(base="HEAD"))
@@ -195,7 +200,7 @@ class CommittingRunner(RecordingRunner):
 
 class TestRun(GateCase):
     def run_gate(self, *extra: str, runner: Any = None) -> tuple[int, str, str]:
-        return self.tangier("gate", "run", "backend", "--base", "HEAD", *extra, runner=runner)
+        return self.tangier("gate", "run", "backend", "--base", self.base, *extra, runner=runner)
 
     # SPEC: gate#run-refuses-dirty-tree
     def assert_refused(self, *extra: str) -> None:
@@ -233,7 +238,7 @@ class TestRun(GateCase):
         runner = RecordingRunner({("bin/test",): Result(3)})
         code, _, _ = self.run_gate(runner=runner)
         self.assertEqual(code, 3)
-        self.assertEqual(runner.calls, NOTHING_SELECTED[:1])
+        self.assertEqual(runner.calls, SELECTED[:1])
         self.assertEqual(_gate_refs(self.repo), [])
 
     # SPEC: gate#run-dirty-after
@@ -252,10 +257,8 @@ class TestRun(GateCase):
 
     # SPEC: gate#placeholder-whole-token
     def test_placeholders_become_the_selected_lists(self) -> None:
-        first = _git(self.repo, "rev-parse", "HEAD")
-        _ = _commit(self.repo, "svc/a.py", "a = 2\n")
         runner = RecordingRunner()
-        code, _, _ = self.tangier("gate", "run", "backend", "--base", first, runner=runner)
+        code, _, _ = self.run_gate(runner=runner)
         self.assertEqual(code, 0)
         self.assertEqual(runner.calls, [["bin/test", "--dirs", "svc", "--files", "svc/a.py"], ["bin/lint"]])
 
@@ -266,12 +269,12 @@ class TestRun(GateCase):
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)):
             code, _, _ = self.run_gate(runner=runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.calls, NOTHING_SELECTED)
+        self.assertEqual(runner.calls, SELECTED)
         self.assertEqual([env["TEST_DB"] for env in runner.envs], ["1", "1"])
         # The gate's env is added to the caller's, not a replacement for it.
         self.assertIn("PATH", runner.envs[0])
 
-        key = self.key()
+        key = self.key(base=self.base)
         self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{key}"])
         record = json.loads(_git(self.repo, "cat-file", "blob", f"refs/tangier/gates/backend/{key}"))
         self.assertEqual(
@@ -283,7 +286,7 @@ class TestRun(GateCase):
                 "user": "dev@example.com",
                 "time": "2026-03-01T12:00:00+00:00",
                 "tangier": tangier.__version__,
-                "commands": NOTHING_SELECTED,
+                "commands": SELECTED,
             },
         )
 
@@ -314,7 +317,7 @@ class TestRun(GateCase):
         runner = RecordingRunner()
         code, _, err = self.run_gate("--read-only", runner=runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.calls, NOTHING_SELECTED)
+        self.assertEqual(runner.calls, SELECTED)
         self.assertIn("dirty", err)
 
     # SPEC: gate#run-read-only
@@ -322,7 +325,7 @@ class TestRun(GateCase):
         runner = RecordingRunner()
         code, _, _ = self.run_gate("--read-only", runner=runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.calls, NOTHING_SELECTED)
+        self.assertEqual(runner.calls, SELECTED)
         self.assertEqual(_gate_refs(self.repo), [])
 
     # SPEC: gate#run-read-only
@@ -332,7 +335,7 @@ class TestRun(GateCase):
 
     # SPEC: gate#run-force
     def test_force_runs_a_verified_gate_and_writes_the_record(self) -> None:
-        ref = f"refs/tangier/gates/backend/{self.key()}"
+        ref = f"refs/tangier/gates/backend/{self.key(base=self.base)}"
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
             _ = self.run_gate()
         first = _git(self.repo, "rev-parse", ref)
@@ -340,7 +343,7 @@ class TestRun(GateCase):
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
             code, _, _ = self.run_gate("--force", runner=runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.calls, NOTHING_SELECTED)
+        self.assertEqual(runner.calls, SELECTED)
         # A new record, with the later time, replaces the first.
         self.assertNotEqual(_git(self.repo, "rev-parse", ref), first)
 
@@ -357,7 +360,7 @@ class TestRun(GateCase):
         runner = RecordingRunner()
         code, _, _ = self.run_gate("--read-only", "--force", runner=runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.calls, NOTHING_SELECTED)
+        self.assertEqual(runner.calls, SELECTED)
         self.assertEqual(_gate_refs(self.repo), [])
 
     # SPEC: gate#run-read-only
@@ -366,13 +369,113 @@ class TestRun(GateCase):
         _ = self.run_gate()
         runner = RecordingRunner()
         _ = self.run_gate("--read-only", "--force", runner=runner)
-        self.assertEqual(runner.calls, NOTHING_SELECTED)
+        self.assertEqual(runner.calls, SELECTED)
 
     # SPEC: gate#unknown-gate
     def test_an_unknown_gate_is_an_error(self) -> None:
         code, _, err = self.tangier("gate", "key", "nope")
         self.assertEqual(code, 2)
         self.assertIn("backend", err)
+
+
+class TestNeed(GateCase):
+    """`gate run` against a diff that starts at `self.start`, after the test's commits."""
+
+    NO_PLACEHOLDER = CONFIG.replace("bin/test --dirs {unittest-items} --files {svc-files}", "bin/test")
+
+    def use_config(self, body: str) -> None:
+        """Commit `body` as the config, and start the diff after it."""
+        if body != CONFIG:
+            _ = _commit(self.repo, "pipeline.toml", body)
+        self.start = _git(self.repo, "rev-parse", "HEAD")
+
+    def run_gate(self, *extra: str, base: str | None = None) -> tuple[int, str, str, RecordingRunner]:
+        runner = RecordingRunner()
+        code, out, err = self.tangier("gate", "run", "backend", "--base", base or self.start, *extra, runner=runner)
+        return code, out, err, runner
+
+    def assert_not_needed(self, *extra: str) -> None:
+        code, out, _, runner = self.run_gate(*extra)
+        self.assertEqual(code, 0)
+        self.assertIn("gate `backend`: not-needed for this diff", out)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(_gate_refs(self.repo), [])
+
+    # SPEC: gate#need-scope-touched
+    # SPEC: gate#run-not-needed
+    def test_a_change_outside_the_scope_is_not_needed(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        _ = _commit(self.repo, "docs/notes.md", "more notes\n")
+        self.assert_not_needed()
+
+    # SPEC: gate#need-scope-touched
+    def test_a_change_inside_the_scope_runs(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        _ = _commit(self.repo, "bin/test", "#!/bin/sh\nexit 0\n")
+        self.assertEqual(self.run_gate()[3].calls, [["bin/test"], ["bin/lint"]])
+
+    # SPEC: gate#need-scope-touched
+    def test_a_change_in_a_depends_tag_runs(self) -> None:
+        body = self.NO_PLACEHOLDER.replace('unittest_items = "svc"', 'unittest_items = "svc"\ndepends = ["lib"]')
+        self.use_config(body + '[lib]\npaths = "lib/**"\n')
+        os.mkdir(os.path.join(self.repo, "lib"))
+        _ = _commit(self.repo, "lib/util.py", "util = 1\n")
+        self.assertEqual(self.run_gate()[3].calls, [["bin/test"], ["bin/lint"]])
+
+    # SPEC: gate#need-key-inputs-only
+    def test_a_change_only_sha_exclude_matches_is_not_needed(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        _ = _commit(self.repo, "svc/README.md", "docs\n")
+        self.assert_not_needed()
+
+    # SPEC: gate#need-scope-touched
+    def test_a_deleted_file_in_the_scope_runs(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        _ = _git(self.repo, "rm", "-q", "bin/test")
+        _ = _git(self.repo, "commit", "-qm", "drop bin/test")
+        self.assertEqual(self.run_gate()[3].calls, [["bin/test"], ["bin/lint"]])
+
+    # SPEC: gate#need-empty-placeholders
+    def test_a_placeholder_gate_with_every_list_empty_is_not_needed(self) -> None:
+        # `bin/test` is in the scope, but in no items tag and no file set.
+        self.use_config(CONFIG)
+        _ = _commit(self.repo, "bin/test", "#!/bin/sh\nexit 0\n")
+        self.assert_not_needed()
+
+    # SPEC: gate#need-empty-placeholders
+    def test_a_placeholder_gate_with_one_list_selected_runs(self) -> None:
+        # A non-Python file selects the `svc` items, but no `svc-files`.
+        self.use_config(CONFIG)
+        _ = _commit(self.repo, "svc/data.txt", "data\n")
+        self.assertEqual(self.run_gate()[3].calls, [["bin/test", "--dirs", "svc", "--files", ""], ["bin/lint"]])
+
+    # SPEC: gate#run-force
+    def test_force_runs_a_gate_that_is_not_needed(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        _ = _commit(self.repo, "docs/notes.md", "more notes\n")
+        code, _, _, runner = self.run_gate("--force")
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, [["bin/test"], ["bin/lint"]])
+        self.assertEqual(len(_gate_refs(self.repo)), 1)
+
+    # SPEC: gate#run-refuses-dirty-tree
+    def test_a_dirty_tree_is_refused_before_the_need_test(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        _write(self.repo, "scratch.txt", "dirty\n")
+        code, _, err, runner = self.run_gate()
+        self.assertEqual(code, 2)
+        self.assertIn("dirty", err)
+        self.assertEqual(runner.calls, [])
+
+    # SPEC: gate#need-unreadable-base-runs
+    def test_an_unreadable_base_warns_and_runs(self) -> None:
+        # A shallow CI checkout holds no `origin/main`.
+        self.use_config(self.NO_PLACEHOLDER)
+        code, _, err, runner = self.run_gate(base="origin/main")
+        self.assertEqual(code, 0)
+        self.assertIn("warning", err)
+        self.assertIn("needed", err)
+        self.assertEqual(runner.calls, [["bin/test"], ["bin/lint"]])
 
 
 class TestStore(GateCase):
@@ -392,19 +495,19 @@ class TestStore(GateCase):
     def record_and_push(self, when: datetime) -> str:
         """Record a pass at `when`, push it, and return its key."""
         with mock.patch.object(gate, "now", return_value=when):
-            code, _, err = self.tangier("gate", "run", "backend", "--base", "HEAD")
+            code, _, err = self.tangier("gate", "run", "backend", "--base", self.base)
         self.assertEqual(code, 0, err)
         self.assertEqual(self.tangier("gate", "push")[0], 0)
-        return self.key()
+        return self.key(base=self.base)
 
     # SPEC: gate#verified-local-then-origin
     # SPEC: gate#push
     def test_a_pushed_record_is_verified_from_a_second_clone(self) -> None:
         other = self.clone()
-        args = ("gate", "verified", "backend", "--base", "HEAD")
+        args = ("gate", "verified", "backend", "--base", self.base)
         self.assertEqual(self.tangier(*args, cwd=other)[:2], (1, "unverified\n"))
 
-        _ = self.tangier("gate", "run", "backend", "--base", "HEAD")
+        _ = self.tangier("gate", "run", "backend", "--base", self.base)
         # Local only: the record has not left the first clone.
         self.assertEqual(self.tangier(*args)[:2], (0, "verified\n"))
         self.assertEqual(self.tangier(*args, cwd=other)[:2], (1, "unverified\n"))
@@ -416,7 +519,7 @@ class TestStore(GateCase):
     def test_run_reuses_a_record_found_on_origin(self) -> None:
         _ = self.record_and_push(datetime.now(UTC))
         runner = RecordingRunner()
-        code, out, _ = self.tangier("gate", "run", "backend", "--base", "HEAD", runner=runner, cwd=self.clone())
+        code, out, _ = self.tangier("gate", "run", "backend", "--base", self.base, runner=runner, cwd=self.clone())
         self.assertEqual(code, 0)
         self.assertEqual(runner.calls, [])
         self.assertIn("origin", out)
@@ -427,27 +530,41 @@ class TestStore(GateCase):
         self.assertEqual(self.origin_refs(), [])
 
     # SPEC: gate#github-outputs
+    # SPEC: gate#status-values
     def test_github_outputs_names_each_gate(self) -> None:
         other = self.clone()
-        args = ("gate", "github-outputs", "--base", "HEAD")
-        key = self.key()
-        self.assertEqual(self.tangier(*args, cwd=other)[1], f"backend-verified=false\nbackend-key={key}\n")
+        args = ("gate", "github-outputs", "--base", self.base)
+        key = self.key(base=self.base)
+        self.assertEqual(
+            self.tangier(*args, cwd=other)[1], f"backend-status=required\nbackend-verified=false\nbackend-key={key}\n"
+        )
         _ = self.record_and_push(datetime.now(UTC))
-        self.assertEqual(self.tangier(*args, cwd=other)[1], f"backend-verified=true\nbackend-key={key}\n")
+        self.assertEqual(
+            self.tangier(*args, cwd=other)[1], f"backend-status=verified\nbackend-verified=true\nbackend-key={key}\n"
+        )
+
+    # SPEC: gate#github-outputs
+    # SPEC: gate#status-values
+    def test_github_outputs_still_keys_a_gate_that_is_not_needed(self) -> None:
+        # An empty diff needs no gate. `not-needed` comes before `verified`.
+        self.assertEqual(self.tangier("gate", "run", "backend", "--base", "HEAD", "--force")[0], 0)
+        key = self.key()
+        _, out, _ = self.tangier("gate", "github-outputs", "--base", "HEAD")
+        self.assertEqual(out, f"backend-status=not-needed\nbackend-verified=true\nbackend-key={key}\n")
 
     # SPEC: gate#github-outputs
     def test_github_outputs_reads_origin_once_for_all_gates(self) -> None:
         second = CONFIG + '[gate.lint]\ncmd = "bin/lint"\nscope = "svc"\n'
         _ = _commit(self.repo, "pipeline.toml", second)
         with mock.patch.object(git, "ls_remote", wraps=git.ls_remote) as ls_remote:
-            _, out, _ = self.tangier("gate", "github-outputs", "--base", "HEAD")
+            _, out, _ = self.tangier("gate", "github-outputs", "--base", self.base)
         self.assertEqual(ls_remote.call_count, 1)
-        self.assertEqual([line.split("=")[0] for line in out.splitlines()][::2], ["backend-verified", "lint-verified"])
+        self.assertEqual([line.split("=")[0] for line in out.splitlines()][::3], ["backend-status", "lint-status"])
 
     # SPEC: gate#origin-unreachable
     def test_an_unreachable_origin_is_not_verified(self) -> None:
         _ = _git(self.repo, "remote", "set-url", "origin", os.path.join(self.origin, "gone"))
-        code, out, err = self.tangier("gate", "verified", "backend", "--base", "HEAD")
+        code, out, err = self.tangier("gate", "verified", "backend", "--base", self.base)
         self.assertEqual((code, out), (1, "unverified\n"))
         self.assertIn("warning", err)
 
@@ -455,7 +572,7 @@ class TestStore(GateCase):
     # SPEC: gate#prune-skips-unreadable
     def test_prune_deletes_old_records_on_origin_by_their_time(self) -> None:
         old = self.record_and_push(datetime(2026, 1, 1, tzinfo=UTC))
-        _ = _commit(self.repo, "svc/a.py", "a = 2\n")
+        _ = _commit(self.repo, "svc/a.py", "a = 3\n")
         new = self.record_and_push(datetime(2026, 2, 20, tzinfo=UTC))
         # Not records: a blob that is not JSON, and a JSON object with no `time`.
         for name, content in (("junk", "not json"), ("timeless", "{}")):
@@ -504,6 +621,6 @@ class TestCustomPackageIsNotABucket(GateCase):
         first = _git(self.repo, "rev-parse", "HEAD")
         # Both packages change; only the bucket is a build package.
         _ = _commit(self.repo, "bin/test", "#!/bin/sh\nexit 0\n")
-        _ = _commit(self.repo, "svc/a.py", "a = 2\n")
+        _ = _commit(self.repo, "svc/a.py", "a = 3\n")
         _, out, _ = self.tangier("changemap", "build-matrix", "--base", first)
         self.assertEqual(out, 'build-packages=["svc"]\nbuild-packages-empty=false\n')

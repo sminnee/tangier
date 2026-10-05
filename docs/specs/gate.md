@@ -84,6 +84,27 @@ to reach the merge base.
 CI computes the key on the PR merge commit. The key matches only when the merged in-scope content
 equals what the local run tested. A moved `main` gives a miss, never a false hit.
 
+## Need
+
+A gate is needed when the diff between `--base` and `HEAD` can change its result. `gate run` does
+nothing for a gate the diff does not need, and `gate github-outputs` says so. The scope is the
+whole rule: there is no separate config.
+
+- A gate is needed only when a changed file touches its scope. A file touches the scope when it
+  matches a scope tag or one of its transitive `depends` tags. A deleted file counts.
+  `[need-scope-touched]`
+- Only key inputs count. A file that `[sha] exclude` or a tag's own `exclude` removes from the key
+  does not touch the scope, because it cannot move the key. With the default `[sha] exclude`, a
+  README-only change does not need the gate. `[need-key-inputs-only]`
+- A gate with placeholders is not needed when every placeholder resolves to an empty list. One
+  non-empty list makes it needed. `[need-empty-placeholders]`
+- A `--base` with no merge base with `HEAD`, as in a shallow checkout, cannot be diffed. The gate
+  is then needed, with a warning on stderr. Running the gate is the safe direction.
+  `[need-unreadable-base-runs]`
+
+On a push to `main`, `origin/main` is `HEAD`, so the diff is empty and no gate is needed. A full
+build uses `--force`.
+
 ## Store
 
 A record is a JSON blob. The ref `refs/tangier/gates/<gate>/<key>` points at it.
@@ -122,7 +143,7 @@ A ref outside `refs/heads` and `refs/tags` triggers no workflow and no branch ru
 | `gate run <name>` | Run the gate at `HEAD`, or reuse a record. Takes `--base`, `--read-only` and `--force`. |
 | `gate verified <name>` | Print `verified` or `unverified`, and exit 0 or 1. |
 | `gate push` | Push local gate records to `origin`. |
-| `gate github-outputs` | Emit `<gate>-verified` and `<gate>-key` for every gate. |
+| `gate github-outputs` | Emit `<gate>-status`, `<gate>-verified` and `<gate>-key` for every gate. |
 | `gate prune --older-than <days>` | Delete old gate records, on `origin` and in this clone. |
 
 `gate run` has no `--head`. The commands test the checked-out tree, so `HEAD` is the only commit a
@@ -132,6 +153,9 @@ record can describe.
 - Without `--read-only`, `gate run` refuses a dirty tree with exit 2 and runs nothing. A tracked change and an untracked
   file both make the tree dirty, whatever `status.showUntrackedFiles` says. Ignored files do not.
   `[run-refuses-dirty-tree]`
+- When the diff does not need the gate, `gate run` prints ``gate `<name>`: not-needed for this
+  diff``, runs nothing, writes no record, and exits 0. The dirty-tree check comes first, because the
+  need test reads commits only. `[run-not-needed]`
 - When the gate is verified, `gate run` says where the record is, runs nothing, and exits 0.
   `[run-reuses-record]`
 - Otherwise `gate run` runs each command with the gate's `env` added to the caller's environment.
@@ -146,19 +170,23 @@ record can describe.
   behind. A clean tree still reuses a record. A dirty tree reads no record, because the key
   describes `HEAD`. The item and file lists still come from the commits between `--base` and
   `HEAD`, not from uncommitted changes. `[run-read-only]`
-- `--force` does not look for a record. It always runs the commands, and it writes the record by
-  the usual rules. `[run-force]`
+- `--force` skips the need test and does not look for a record. It always runs the commands, and
+  it writes the record by the usual rules. `[run-force]`
 - The two flags combine:
 
-  | Flags | Dirty tree at start | Reads a record | Writes a record |
-  | --- | --- | --- | --- |
-  | none | Exit 2 | Yes | Yes |
-  | `--read-only` | Runs | On a clean tree only | No |
-  | `--force` | Exit 2 | No | Yes |
-  | `--read-only --force` | Runs | No | No |
-- `gate github-outputs` emits `<gate>-verified=true|false` and `<gate>-key=<key>` for each gate, in
-  name order. It echoes to stdout and appends to `$GITHUB_OUTPUT` when set. It reads `origin` once
-  for all gates. `[github-outputs]`
+  | Flags | Dirty tree at start | Tests need | Reads a record | Writes a record |
+  | --- | --- | --- | --- | --- |
+  | none | Exit 2 | Yes | Yes | Yes |
+  | `--read-only` | Runs | Yes | On a clean tree only | No |
+  | `--force` | Exit 2 | No | No | Yes |
+  | `--read-only --force` | Runs | No | No | No |
+- `gate github-outputs` emits `<gate>-status=<status>`, `<gate>-verified=true|false` and
+  `<gate>-key=<key>` for each gate, in name order. A gate the diff does not need still gets its
+  `-verified` and `-key`. It echoes to stdout and appends to `$GITHUB_OUTPUT` when set. It reads
+  `origin` once for all gates. `[github-outputs]`
+- The status is one word, checked in this order: `not-needed` when the diff does not need the gate,
+  `verified` when a record exists, and `required` otherwise. A CI job runs the gate when the status
+  is `required`. `[status-values]`
 - `gate prune` fetches the gate refs on `origin` into `refs/tangier/origin-gates/*`, reads the
   `time` of each record, and deletes the refs older than the limit on `origin`. It deletes this
   clone's local records by the same rule, because `gate push` would put them back. The limit is

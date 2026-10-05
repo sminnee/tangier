@@ -128,13 +128,29 @@ The record sits under a **gate key**: a hash of the resolved commands, the `env`
 content of the `scope` packages. The key ignores commit SHA and history. A rebase or a re-cut that
 leaves the scope unchanged keeps the record valid.
 
+tangier decides whether a diff needs a gate. A gate is needed when a changed file is one of its
+scope's key inputs and, for a gate with placeholders, at least one list is non-empty. A gate the
+diff does not need does no work. So a pre-push hook runs every gate, then pushes the records:
+
 ```sh
-tangier gate run test-backend        # locally, before the push
+for g in test-backend lint-backend test-frontend; do
+  tangier gate run "$g" || exit 1     # "not-needed for this diff", "verified", or a run
+done
 tangier gate push
 
 tangier gate github-outputs          # in CI
-# test-backend-verified=true
+# test-backend-status=required
+# test-backend-verified=false
 # test-backend-key=812f61d775681885026b167c33efd2155f04c861
+```
+
+`-status` is `not-needed`, `verified` or `required`. A CI job runs the gate only when it is
+`required`, so the workflow holds no copy of the scope rules:
+
+```yaml
+test-backend:
+  needs: gates
+  if: needs.gates.outputs.test-backend-status == 'required'
 ```
 
 `gate run` refuses a dirty tree, because the key describes `HEAD`. If the commands leave the tree
@@ -143,14 +159,16 @@ dirty, `gate run` writes no record and exits 1. Two flags change that:
 | Flag | Effect |
 | --- | --- |
 | `--read-only` | Reuse a record, but write none. A dirty tree runs, and reads no record. |
-| `--force` | Run the commands even when a record exists. |
+| `--force` | Run the commands even when the gate is not needed or a record exists. |
 
 Records are git refs under `refs/tangier/gates/`. A local record needs no network. Reading records
 in CI needs `contents: read` only. `gate prune --older-than 30` deletes old records.
 
 A gate with a `{...}` placeholder needs the diff between `--base` and `HEAD`, so its checkout must
 hold `origin/main` and the merge base. Without them, its `gate` commands fail instead of giving a
-key. A gate with no placeholder does not read `--base`.
+key. A gate with no placeholder needs no `--base` for its key. Without a merge base, it counts as
+needed and runs, with a warning. On a push to `main` the diff is empty and no gate is needed, so a
+full build passes `--force`.
 
 A verified gate carries the same confidence as a diff-based PR build, not more. Keep a nightly full
 build that does not consult gate records. See `docs/specs/gate.md` for the risks and the rules.

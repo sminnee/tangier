@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from tangier import __version__, git
-from tangier.changemap import AnswerSet, compute_answer_set, scope_lines
+from tangier.changemap import AnswerSet, compute_answer_set, scope_lines, scope_touched
 from tangier.config import ITEMS_PLACEHOLDER_SUFFIX, Config, GateSpec, entry_tags, is_placeholder, scope_tags
 
 REF_PREFIX = "refs/tangier/gates"
@@ -74,13 +74,46 @@ def resolve_commands(gate: GateSpec, answers: AnswerSet) -> list[list[str]]:
     return [[substitute(token) for token in argv] for argv in gate.commands]
 
 
+def has_placeholder(spec: GateSpec) -> bool:
+    return any(is_placeholder(token) for argv in spec.commands for token in argv)
+
+
+def needed(cfg: Config, name: str, base: str, head: str) -> bool:
+    """Whether the diff from `base` to `head` needs this gate. See `docs/specs/gate.md#need`.
+
+    It does when a changed file is one of the scope's key inputs and, for a
+    gate with placeholders, at least one placeholder list is non-empty. A
+    `base` with no merge base cannot be diffed, so the gate is needed: running
+    it is the safe direction.
+    """
+    spec = spec_for(cfg, name)
+    try:
+        _ = git.merge_base(base, head)
+    except git.GitError as e:
+        print(
+            f"warning: gate `{name}`: cannot diff `{base}` against `{head}`, so it counts as needed: {e}",
+            file=sys.stderr,
+        )
+        return True
+    if not scope_touched(cfg, scope_tags(cfg, spec), git.changed_files(base, head)):
+        return False
+    if not has_placeholder(spec):
+        return True
+    resolved = resolve_commands(spec, compute_answer_set(cfg, base, head, compute_shas=False))
+    return any(
+        is_placeholder(token) and arg
+        for argv, resolved_argv in zip(spec.commands, resolved, strict=True)
+        for token, arg in zip(argv, resolved_argv, strict=True)
+    )
+
+
 def _commands_for(cfg: Config, name: str, spec: GateSpec, base: str, head: str) -> list[list[str]]:
     """The gate's commands for this diff, with item and file lists filled in.
 
     A gate with no placeholder takes nothing from the diff, so `base` is not
     read: such a gate works in a shallow checkout.
     """
-    if not any(is_placeholder(token) for argv in spec.commands for token in argv):
+    if not has_placeholder(spec):
         return [list(argv) for argv in spec.commands]
     try:
         _ = git.merge_base(base, head)
@@ -193,6 +226,16 @@ def verified(name: str, key: str, origin: set[str] | None = None) -> str | None:
     if ref in (origin_records(ref) if origin is None else origin):
         return "origin"
     return None
+
+
+def status(is_needed: bool, where: str | None) -> str:
+    """The one word CI reads for a gate: `not-needed`, `verified` or `required`, checked in that order.
+
+    `where` is `verified()`'s answer. Only `required` means the commands must run.
+    """
+    if not is_needed:
+        return "not-needed"
+    return "verified" if where else "required"
 
 
 def push() -> int:

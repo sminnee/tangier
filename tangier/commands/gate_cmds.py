@@ -22,9 +22,10 @@ def cmd_key(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_run(config: Config, args: argparse.Namespace) -> int:
-    """Run a gate at HEAD, unless a record shows it has already passed.
+    """Run a gate at HEAD, unless the diff does not need it or a record shows it has already passed.
 
-    The tree must be clean before and after the run, and HEAD must not move:
+    The need test reads commits only, so it comes after the dirty-tree check.
+    `--force` skips it as well as the record. The tree must be clean before and after the run, and HEAD must not move:
     the key describes HEAD, so the commands must test exactly HEAD.
     `--read-only` writes no record, so it drops the rule. `--force` reads no
     record. A dirty tree reads no record either: no key describes it.
@@ -39,6 +40,9 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
                 "Commit the changes, or use `--read-only` to run without a record"
             )
         print(f"gate `{name}`: the tree is dirty, so no record applies", file=sys.stderr)
+    if not args.force and not gate.needed(config, name, args.base, "HEAD"):
+        print(f"gate `{name}`: not-needed for this diff")
+        return 0
     resolved = gate.resolve(config, name, args.base, "HEAD")
     if clean and not args.force:
         where = gate.verified(name, resolved.key)
@@ -88,13 +92,19 @@ def cmd_push(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
-    """Emit `<gate>-verified` and `<gate>-key` for every gate."""
+    """Emit `<gate>-status`, `<gate>-verified` and `<gate>-key` for every gate.
+
+    A gate the diff does not need still gets its key and `-verified`, so
+    callers that read only those two see no change.
+    """
     # One read of origin for all gates, not one per gate.
     origin = gate.origin_records()
     pairs: dict[str, str] = {}
     for name in sorted(config.gates):
         key = gate.key(config, name, args.base, args.head)
-        pairs[f"{name}-verified"] = "true" if gate.verified(name, key, origin) else "false"
+        where = gate.verified(name, key, origin)
+        pairs[f"{name}-status"] = gate.status(gate.needed(config, name, args.base, args.head), where)
+        pairs[f"{name}-verified"] = "true" if where else "false"
         pairs[f"{name}-key"] = key
     emit_outputs(pairs)
     return 0
@@ -136,7 +146,9 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _add_diff_args(kp)
     kp.set_defaults(func=cmd_key)
 
-    rp = gsub.add_parser("run", help="run a gate at HEAD, unless a record shows it has passed")
+    rp = gsub.add_parser(
+        "run", help="run a gate at HEAD, unless the diff does not need it or a record shows it has passed"
+    )
     _ = rp.add_argument("name")
     # No `--head`: the commands run against the checked-out tree, so the only
     # head a record can describe is HEAD.
@@ -146,7 +158,9 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="write no record, and so accept a dirty tree; item lists still come from commits, not the dirty tree",
     )
-    _ = rp.add_argument("--force", action="store_true", help="run the commands even when a record exists")
+    _ = rp.add_argument(
+        "--force", action="store_true", help="run the commands even when the gate is not needed or a record exists"
+    )
     rp.set_defaults(func=cmd_run)
 
     vp = gsub.add_parser("verified", help="has this gate passed? prints verified/unverified, exits 0/1")
@@ -157,7 +171,9 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     pp = gsub.add_parser("push", help="push local gate records to origin")
     pp.set_defaults(func=cmd_push)
 
-    op = gsub.add_parser("github-outputs", help="emit <gate>-verified and <gate>-key as $GITHUB_OUTPUT lines")
+    op = gsub.add_parser(
+        "github-outputs", help="emit <gate>-status, <gate>-verified and <gate>-key as $GITHUB_OUTPUT lines"
+    )
     _add_diff_args(op)
     op.set_defaults(func=cmd_github_outputs)
 
