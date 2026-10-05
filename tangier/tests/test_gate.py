@@ -108,9 +108,9 @@ class GateCase(unittest.TestCase):
             code = cli.main(list(argv), runner=runner or RecordingRunner())
         return code, out.getvalue(), err.getvalue()
 
-    def key(self, body: str = CONFIG, *, base: str = "HEAD", head: str = "HEAD") -> str:
+    def key(self, body: str = CONFIG, *, head: str = "HEAD") -> str:
         with contextlib.chdir(self.repo):
-            return gate.key(parse_toml(body), "backend", base, head)
+            return gate.key(parse_toml(body), "backend", head)
 
 
 class TestKey(GateCase):
@@ -134,12 +134,20 @@ class TestKey(GateCase):
         self.assertNotEqual(self.key(), before)
 
     # SPEC: gate#key-commands
-    def test_a_different_item_list_moves_the_key(self) -> None:
+    def test_the_key_does_not_depend_on_the_base(self) -> None:
         first = _git(self.repo, "rev-parse", "HEAD")
         _ = _commit(self.repo, "svc/a.py", "a = 3\n")
         # Same head, so the same tree. Against `first` the diff selects `svc`;
-        # against HEAD it selects nothing.
-        self.assertNotEqual(self.key(base=first), self.key(base="HEAD"))
+        # against HEAD it selects nothing. The key hashes the raw commands.
+        with contextlib.chdir(self.repo), contextlib.redirect_stderr(io.StringIO()):
+            cfg = parse_toml(CONFIG)
+            plans = [gate.plan(cfg, "backend", base, records=False) for base in (first, "HEAD")]
+        self.assertNotEqual(plans[0].commands, plans[1].commands)
+        self.assertEqual(plans[0].key, plans[1].key)
+
+    # SPEC: gate#key-commands
+    def test_a_different_raw_command_moves_the_key(self) -> None:
+        self.assertNotEqual(self.key(CONFIG.replace('"bin/lint"', '"bin/lint --strict"')), self.key())
 
     # SPEC: gate#key-env
     def test_a_different_env_moves_the_key(self) -> None:
@@ -152,18 +160,13 @@ class TestKey(GateCase):
         self.assertIn("no-such-ref", str(ctx.exception))
 
     # SPEC: gate#key-fails-closed
-    def test_an_unresolvable_base_raises(self) -> None:
-        # The lenient diff would read this as "nothing changed" and give the
-        # same key as a run that selected nothing.
-        with self.assertRaises(gate.GateError) as ctx:
-            _ = self.key(base="origin/main")
-        self.assertIn("origin/main", str(ctx.exception))
-
-    # SPEC: gate#key-no-placeholder-no-diff
-    def test_a_gate_with_no_placeholder_needs_no_base(self) -> None:
-        # A shallow CI checkout holds no `origin/main`.
-        body = CONFIG.replace("bin/test --dirs {unittest-items} --files {svc-files}", "bin/test")
-        self.assertEqual(self.key(body, base="origin/main"), self.key(body, base="HEAD"))
+    def test_an_unresolvable_base_fails_a_placeholder_gate_with_no_record(self) -> None:
+        # The lenient diff would read this as "nothing changed" and run the
+        # gate with every list empty.
+        code, _, err = self.tangier("gate", "run", "backend", "--base", "origin/main")
+        self.assertEqual(code, 2)
+        self.assertIn("origin/main", err)
+        self.assertEqual(_gate_refs(self.repo), [])
 
     # SPEC: gate#key-fails-closed
     def test_a_scope_entry_that_matches_no_tracked_file_raises(self) -> None:
@@ -274,7 +277,7 @@ class TestRun(GateCase):
         # The gate's env is added to the caller's, not a replacement for it.
         self.assertIn("PATH", runner.envs[0])
 
-        key = self.key(base=self.base)
+        key = self.key()
         self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{key}"])
         record = json.loads(_git(self.repo, "cat-file", "blob", f"refs/tangier/gates/backend/{key}"))
         self.assertEqual(
@@ -283,6 +286,7 @@ class TestRun(GateCase):
                 "gate": "backend",
                 "key": key,
                 "head": _git(self.repo, "rev-parse", "HEAD"),
+                "base": self.base,
                 "user": "dev@example.com",
                 "time": "2026-03-01T12:00:00+00:00",
                 "tangier": tangier.__version__,
@@ -335,7 +339,7 @@ class TestRun(GateCase):
 
     # SPEC: gate#run-force
     def test_force_runs_a_verified_gate_and_writes_the_record(self) -> None:
-        ref = f"refs/tangier/gates/backend/{self.key(base=self.base)}"
+        ref = f"refs/tangier/gates/backend/{self.key()}"
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
             _ = self.run_gate()
         first = _git(self.repo, "rev-parse", ref)
@@ -478,6 +482,212 @@ class TestNeed(GateCase):
         self.assertEqual(runner.calls, [["bin/test"], ["bin/lint"]])
 
 
+# `CONFIG` with a second item, `other`, in the scope.
+TWO_ITEMS = CONFIG.replace('scope = ["svc", "inputs"]', 'scope = ["svc", "other", "inputs"]') + (
+    '[other]\npaths = "other/**"\nunittest_items = "other"\n'
+)
+# The gate's commands when the diff selects only `other`.
+OTHER_ONLY = [["bin/test", "--dirs", "other", "--files", ""], ["bin/lint"]]
+# The gate's commands for the whole branch, from `self.base`.
+BOTH = [["bin/test", "--dirs", "other,svc", "--files", "svc/a.py"], ["bin/lint"]]
+
+
+class TestComparator(GateCase):
+    """A branch off `self.base` that changes `svc`, then adds `other` to the config."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.mkdir(os.path.join(self.repo, "other"))
+        _write(self.repo, "other/b.py", "b = 1\n")
+        _ = _commit(self.repo, "pipeline.toml", TWO_ITEMS)
+
+    def run_gate(
+        self, *extra: str, base: str | None = None, cwd: str | None = None
+    ) -> tuple[int, str, RecordingRunner]:
+        runner = RecordingRunner()
+        code, out, err = self.tangier(
+            "gate", "run", "backend", "--base", base or self.base, *extra, runner=runner, cwd=cwd
+        )
+        self.assertIn(code, (0, 2), err)
+        return code, out + err, runner
+
+    def record(self) -> dict[str, Any]:
+        """HEAD's record."""
+        return json.loads(_git(self.repo, "cat-file", "blob", f"refs/tangier/gates/backend/{self.key(TWO_ITEMS)}"))
+
+    def rebase_onto_a_main_that_changes(self, rel: str, content: str) -> str:
+        """Commit `rel` on a main that forks at `self.base`, rebase the branch onto it, and return main."""
+        branch = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
+        _ = _git(self.repo, "checkout", "-q", "-b", "main-tip", self.base)
+        main = _commit(self.repo, rel, content)
+        _ = _git(self.repo, "checkout", "-q", branch)
+        _ = _git(self.repo, "rebase", "-q", "main-tip")
+        return main
+
+    # SPEC: gate#comparator-falls-back-to-merge-base
+    def test_with_no_record_the_gate_diffs_from_the_merge_base(self) -> None:
+        _, _, runner = self.run_gate()
+        self.assertEqual(runner.calls, BOTH)
+        self.assertEqual(self.record()["base"], self.base)
+
+    # SPEC: gate#comparator-newest-record
+    def test_a_run_diffs_from_the_newest_record(self) -> None:
+        _ = self.run_gate()
+        recorded = _git(self.repo, "rev-parse", "HEAD")
+        _ = _commit(self.repo, "other/b.py", "b = 2\n")
+        _, _, runner = self.run_gate()
+        self.assertEqual(runner.calls, OTHER_ONLY)
+        self.assertEqual(self.record()["base"], recorded)
+
+    # SPEC: gate#comparator-newest-record
+    def test_a_record_at_head_runs_nothing(self) -> None:
+        _ = self.run_gate()
+        code, out, runner = self.run_gate()
+        self.assertEqual((code, runner.calls), (0, []))
+        self.assertIn("verified", out)
+
+    # SPEC: gate#comparator-newest-record
+    def test_a_record_on_a_commit_that_is_not_an_ancestor_is_ignored(self) -> None:
+        branch = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
+        _ = _git(self.repo, "checkout", "-q", "-b", "side")
+        _ = _commit(self.repo, "other/b.py", "b = side\n")
+        _ = self.run_gate()
+        _ = _git(self.repo, "checkout", "-q", branch)
+        _ = _commit(self.repo, "svc/a.py", "a = 3\n")
+        _, _, runner = self.run_gate()
+        self.assertEqual(runner.calls, BOTH)
+
+    # SPEC: gate#comparator-first-parent
+    def test_a_record_on_a_merged_branch_is_not_walked(self) -> None:
+        # The side branch's record is reachable only through the merge's second parent.
+        branch = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
+        _ = _git(self.repo, "checkout", "-q", "-b", "side")
+        _ = _commit(self.repo, "other/b.py", "b = side\n")
+        _ = self.run_gate()
+        _ = _git(self.repo, "checkout", "-q", branch)
+        # In the scope, so the merge's content differs from the side commit's.
+        _ = _commit(self.repo, "svc/a.py", "a = 3\n")
+        _ = _git(self.repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        with mock.patch.object(git, "rev_list_first_parent", wraps=git.rev_list_first_parent) as walk:
+            code, out, runner = self.run_gate()
+        self.assertEqual(code, 0, out)
+        walk.assert_called_once()
+        self.assertEqual(runner.calls, BOTH)
+
+    # SPEC: gate#comparator-newest-record
+    def test_a_rebase_onto_a_main_that_leaves_the_scope_keeps_the_record(self) -> None:
+        _ = self.run_gate()
+        main = self.rebase_onto_a_main_that_changes("docs/notes.md", "main notes\n")
+        rebased = _git(self.repo, "rev-parse", "HEAD")
+        _ = _commit(self.repo, "other/b.py", "b = 2\n")
+        _, _, runner = self.run_gate(base=main)
+        self.assertEqual(runner.calls, OTHER_ONLY)
+        self.assertEqual(self.record()["base"], rebased)
+
+    # SPEC: gate#comparator-falls-back-to-merge-base
+    def test_a_rebase_onto_a_main_that_changes_the_scope_falls_back_to_the_merge_base(self) -> None:
+        _ = self.run_gate()
+        main = self.rebase_onto_a_main_that_changes("bin/test", "#!/bin/sh\nexit 0\n")
+        _, _, runner = self.run_gate(base=main)
+        self.assertEqual(runner.calls, BOTH)
+        self.assertEqual(self.record()["base"], main)
+
+    # SPEC: gate#comparator-no-placeholder
+    # SPEC: gate#key-no-placeholder-no-diff
+    def test_a_gate_with_no_placeholder_checks_head_only(self) -> None:
+        _ = _commit(self.repo, "pipeline.toml", TestNeed.NO_PLACEHOLDER)
+        _ = self.run_gate()
+        # A shallow CI checkout holds no `origin/main`.
+        with mock.patch.object(git, "rev_list_first_parent", wraps=git.rev_list_first_parent) as walk:
+            code, out, runner = self.run_gate(base="origin/main")
+        self.assertEqual((code, runner.calls), (0, []))
+        self.assertIn("verified", out)
+        self.assertNotIn("warning", out)
+        walk.assert_not_called()
+
+    # SPEC: gate#comparator-newest-record
+    def test_a_record_found_only_on_origin_is_a_comparator(self) -> None:
+        origin = make_origin(self, self.repo)
+        _ = self.run_gate()
+        self.assertEqual(self.tangier("gate", "push")[0], 0)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        _ = subprocess.run(["git", "clone", "-q", origin, tmp.name], capture_output=True, check=True)
+        _ = _commit(tmp.name, "other/b.py", "b = 2\n")
+        _, _, runner = self.run_gate(cwd=tmp.name)
+        self.assertEqual(runner.calls, OTHER_ONLY)
+
+    # SPEC: gate#run-force
+    def test_force_diffs_from_the_merge_base(self) -> None:
+        _ = self.run_gate()
+        _ = _commit(self.repo, "other/b.py", "b = 2\n")
+        _, _, runner = self.run_gate("--force")
+        self.assertEqual(runner.calls, [["bin/test", "--dirs", "other,svc", "--files", "svc/a.py"], ["bin/lint"]])
+
+
+class TestRunMany(GateCase):
+    SECOND = CONFIG + '[gate.lint]\ncmd = "bin/lint --all"\nscope = "svc"\n'
+
+    def setUp(self) -> None:
+        super().setUp()
+        _ = _commit(self.repo, "pipeline.toml", self.SECOND)
+
+    # SPEC: gate#run-all
+    def test_all_runs_every_gate_in_name_order(self) -> None:
+        runner = RecordingRunner()
+        code, _, _ = self.tangier("gate", "run", "--all", "--base", self.base, runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, [*SELECTED, ["bin/lint", "--all"]])
+        self.assertEqual(len(_gate_refs(self.repo)), 2)
+
+    # SPEC: gate#run-all
+    def test_a_failing_gate_still_runs_the_rest_and_sets_the_exit_code(self) -> None:
+        runner = RecordingRunner({("bin/test",): Result(3), ("bin/lint", "--all"): Result(4)})
+        code, _, _ = self.tangier("gate", "run", "backend", "lint", "--base", self.base, runner=runner)
+        self.assertEqual(code, 3)
+        self.assertEqual(runner.calls, [SELECTED[0], ["bin/lint", "--all"]])
+        self.assertEqual(_gate_refs(self.repo), [])
+
+    # SPEC: gate#run-all
+    def test_no_gate_and_no_all_is_an_error(self) -> None:
+        code, _, err = self.tangier("gate", "run", "--base", self.base)
+        self.assertEqual(code, 2)
+        self.assertIn("--all", err)
+
+    # SPEC: gate#run-dry-run
+    def test_dry_run_runs_nothing_and_writes_nothing(self) -> None:
+        _write(self.repo, "scratch.txt", "dirty\n")
+        runner = RecordingRunner()
+        code, out, _ = self.tangier("gate", "run", "--all", "--dry-run", "--base", self.base, runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(_gate_refs(self.repo), [])
+        self.assertIn("gate `backend`: required", out)
+        self.assertIn(f"base {self.base[:7]} (merge base with {self.base})", out)
+        self.assertIn("bin/test --dirs svc --files svc/a.py", out)
+        self.assertIn("gate `lint`: required", out)
+
+    # SPEC: gate#run-dry-run
+    def test_dry_run_reports_a_verified_gate(self) -> None:
+        _ = self.tangier("gate", "run", "backend", "--base", self.base)
+        _, out, _ = self.tangier("gate", "run", "--all", "--dry-run", "--base", self.base)
+        self.assertIn("gate `backend`: verified", out)
+
+    # SPEC: gate#run-debug
+    def test_debug_prints_the_trail(self) -> None:
+        recorded = _git(self.repo, "rev-parse", "HEAD")
+        _ = self.tangier("gate", "run", "backend", "--base", self.base)
+        _ = _commit(self.repo, "svc/a.py", "a = 3\n")
+        head = _git(self.repo, "rev-parse", "HEAD")
+        _, out, err = self.tangier("gate", "run", "backend", "--dry-run", "--debug", "--base", self.base)
+        self.assertIn(f"{head[:7]} ", err)
+        self.assertIn(f"{recorded[:7]} ", err)
+        self.assertIn("miss", err)
+        self.assertIn("local", err)
+        self.assertIn("changed in scope: svc/a.py", err)
+        self.assertIn(f"base {recorded[:7]} (record at {recorded[:7]}, local)", out)
+
+
 class TestStore(GateCase):
     def setUp(self) -> None:
         super().setUp()
@@ -498,13 +708,13 @@ class TestStore(GateCase):
             code, _, err = self.tangier("gate", "run", "backend", "--base", self.base)
         self.assertEqual(code, 0, err)
         self.assertEqual(self.tangier("gate", "push")[0], 0)
-        return self.key(base=self.base)
+        return self.key()
 
     # SPEC: gate#verified-local-then-origin
     # SPEC: gate#push
     def test_a_pushed_record_is_verified_from_a_second_clone(self) -> None:
         other = self.clone()
-        args = ("gate", "verified", "backend", "--base", self.base)
+        args = ("gate", "verified", "backend")
         self.assertEqual(self.tangier(*args, cwd=other)[:2], (1, "unverified\n"))
 
         _ = self.tangier("gate", "run", "backend", "--base", self.base)
@@ -534,23 +744,33 @@ class TestStore(GateCase):
     def test_github_outputs_names_each_gate(self) -> None:
         other = self.clone()
         args = ("gate", "github-outputs", "--base", self.base)
-        key = self.key(base=self.base)
+        key = self.key()
         self.assertEqual(
-            self.tangier(*args, cwd=other)[1], f"backend-status=required\nbackend-verified=false\nbackend-key={key}\n"
+            self.tangier(*args, cwd=other)[1],
+            f"backend-status=required\nbackend-run=true\nbackend-verified=false\nbackend-key={key}\n",
         )
         _ = self.record_and_push(datetime.now(UTC))
         self.assertEqual(
-            self.tangier(*args, cwd=other)[1], f"backend-status=verified\nbackend-verified=true\nbackend-key={key}\n"
+            self.tangier(*args, cwd=other)[1],
+            f"backend-status=verified\nbackend-run=false\nbackend-verified=true\nbackend-key={key}\n",
         )
 
     # SPEC: gate#github-outputs
     # SPEC: gate#status-values
     def test_github_outputs_still_keys_a_gate_that_is_not_needed(self) -> None:
-        # An empty diff needs no gate. `not-needed` comes before `verified`.
-        self.assertEqual(self.tangier("gate", "run", "backend", "--base", "HEAD", "--force")[0], 0)
+        # An empty diff needs no gate.
         key = self.key()
         _, out, _ = self.tangier("gate", "github-outputs", "--base", "HEAD")
-        self.assertEqual(out, f"backend-status=not-needed\nbackend-verified=true\nbackend-key={key}\n")
+        self.assertEqual(
+            out, f"backend-status=not-needed\nbackend-run=false\nbackend-verified=false\nbackend-key={key}\n"
+        )
+
+    # SPEC: gate#status-values
+    def test_a_record_at_head_is_verified_before_the_need_test(self) -> None:
+        # The same empty diff, but HEAD's content has a record.
+        self.assertEqual(self.tangier("gate", "run", "backend", "--base", "HEAD", "--force")[0], 0)
+        _, out, _ = self.tangier("gate", "github-outputs", "--base", "HEAD")
+        self.assertIn("backend-status=verified\n", out)
 
     # SPEC: gate#github-outputs
     def test_github_outputs_reads_origin_once_for_all_gates(self) -> None:
@@ -559,12 +779,12 @@ class TestStore(GateCase):
         with mock.patch.object(git, "ls_remote", wraps=git.ls_remote) as ls_remote:
             _, out, _ = self.tangier("gate", "github-outputs", "--base", self.base)
         self.assertEqual(ls_remote.call_count, 1)
-        self.assertEqual([line.split("=")[0] for line in out.splitlines()][::3], ["backend-status", "lint-status"])
+        self.assertEqual([line.split("=")[0] for line in out.splitlines()][::4], ["backend-status", "lint-status"])
 
     # SPEC: gate#origin-unreachable
     def test_an_unreachable_origin_is_not_verified(self) -> None:
         _ = _git(self.repo, "remote", "set-url", "origin", os.path.join(self.origin, "gone"))
-        code, out, err = self.tangier("gate", "verified", "backend", "--base", self.base)
+        code, out, err = self.tangier("gate", "verified", "backend")
         self.assertEqual((code, out), (1, "unverified\n"))
         self.assertIn("warning", err)
 

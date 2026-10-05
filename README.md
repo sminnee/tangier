@@ -124,34 +124,40 @@ scope = ["core", "backend-gate-inputs"]
 paths = ["uv.lock", "pyproject.toml", "bin/test", "pipeline.toml"]
 ```
 
-The record sits under a **gate key**: a hash of the resolved commands, the `env` table, and the
+The record sits under a **gate key**: a hash of the raw commands, the `env` table, and the
 content of the `scope` packages. The key ignores commit SHA and history. A rebase or a re-cut that
 leaves the scope unchanged keeps the record valid.
 
-tangier decides whether a diff needs a gate. A gate is needed when a changed file is one of its
-scope's key inputs and, for a gate with placeholders, at least one list is non-empty. A gate the
-diff does not need does no work. So a pre-push hook runs every gate, then pushes the records:
+Each run diffs from the gate's **comparator**: the newest commit between `HEAD` and the merge base
+with `--base` whose content already has a record. On a branch built up over many commits, a gate
+then re-tests only what changed since its last pass. With no record, it diffs from the merge base.
+
+tangier decides whether that diff needs the gate. A gate is needed when a changed file is one of
+its scope's key inputs and, for a gate with placeholders, at least one list is non-empty. A gate
+the diff does not need does no work. So a pre-push hook runs every gate, then pushes the records:
 
 ```sh
-for g in test-backend lint-backend test-frontend; do
-  tangier gate run "$g" || exit 1     # "not-needed for this diff", "verified", or a run
-done
+tangier gate run --all || exit 1     # each gate: "not-needed", "verified", or a run
 tangier gate push
 
 tangier gate github-outputs          # in CI
 # test-backend-status=required
+# test-backend-run=true
 # test-backend-verified=false
 # test-backend-key=812f61d775681885026b167c33efd2155f04c861
 ```
 
-`-status` is `not-needed`, `verified` or `required`. A CI job runs the gate only when it is
-`required`, so the workflow holds no copy of the scope rules:
+`-status` is `verified`, `not-needed` or `required`. `-run` is `true` when it is `required`. A CI
+job runs the gate only then, so the workflow holds no copy of the scope rules:
 
 ```yaml
 test-backend:
   needs: gates
-  if: needs.gates.outputs.test-backend-status == 'required'
+  if: needs.gates.outputs.test-backend-run == 'true'
 ```
+
+`gate run --all --dry-run` shows each gate's status, the commit it diffs from, and the commands it
+would run. Add `--debug` to see each commit the comparator walk checked.
 
 `gate run` refuses a dirty tree, because the key describes `HEAD`. If the commands leave the tree
 dirty, `gate run` writes no record and exits 1. Two flags change that:
@@ -159,15 +165,17 @@ dirty, `gate run` writes no record and exits 1. Two flags change that:
 | Flag | Effect |
 | --- | --- |
 | `--read-only` | Reuse a record, but write none. A dirty tree runs, and reads no record. |
-| `--force` | Run the commands even when the gate is not needed or a record exists. |
+| `--force` | Run the commands from the merge base, even when the gate is not needed or a record exists. |
+| `--dry-run` | Print each gate's plan. Run nothing and write nothing. |
+| `--debug` | Print the comparator walk and the diff to stderr. |
 
 Records are git refs under `refs/tangier/gates/`. A local record needs no network. Reading records
 in CI needs `contents: read` only. `gate prune --older-than 30` deletes old records.
 
-A gate with a `{...}` placeholder needs the diff between `--base` and `HEAD`, so its checkout must
-hold `origin/main` and the merge base. Without them, its `gate` commands fail instead of giving a
-key. A gate with no placeholder needs no `--base` for its key. Without a merge base, it counts as
-needed and runs, with a warning. On a push to `main` the diff is empty and no gate is needed, so a
+The key reads no diff, so `gate key` and `gate verified` need `HEAD` only. A gate with a `{...}`
+placeholder and no record at `HEAD` needs the diff, so its checkout must hold `origin/main` and the
+merge base. Without them, `gate run` fails instead of running with empty lists. A gate with no
+placeholder and no merge base counts as needed and runs, with a warning. On a push to `main` the diff is empty and no gate is needed, so a
 full build passes `--force`.
 
 A verified gate carries the same confidence as a diff-based PR build, not more. Keep a nightly full
@@ -212,6 +220,28 @@ test:
         tangier gate run test "${flags[@]}"
 ```
 
+With several gates, or a gate with a `{...}` placeholder, one `gates` job decides which gates run.
+Each gate job is then a bare `gate run`, which finds its own comparator and item lists:
+
+```yaml
+gates:
+  outputs:
+    test-backend-run: ${{ steps.gates.outputs.test-backend-run }}
+  steps:
+    - uses: actions/checkout@v4
+      with: { fetch-depth: 0, filter: "blob:none" }
+    - id: gates
+      run: tangier gate github-outputs
+
+test-backend:
+  needs: gates
+  if: needs.gates.outputs.test-backend-run == 'true'
+  steps:
+    - uses: actions/checkout@v4
+      with: { fetch-depth: 0, filter: "blob:none" }
+    - run: tangier gate run test-backend --read-only
+```
+
 | Rule | Reason |
 | --- | --- |
 | The command moves from the workflow to `[gate.<name>]`. The step becomes `tangier gate run <name>`. | One definition serves the developer and CI. |
@@ -220,12 +250,13 @@ test:
 | On a push to `main` and on a nightly run, pass `--read-only --force`. | This is the full build that does not consult records. |
 | A gate with no placeholder needs the default shallow checkout only. | Its key covers the commands and the scope at `HEAD`. |
 | A gate with a `{...}` placeholder needs the merge base. Use `fetch-depth: 0` with `filter: blob:none`. | The item lists come from the diff. `fetch-depth: 0` alone fetches every blob of every branch. The blobless filter fetches commits and trees only. |
+| A gate job takes no item lists from the `gates` job. | `gate run` computes the comparator and the lists itself, from the same diff. |
 | A matrix dimension moves into the gate's commands, or becomes one gate for each leg. | The key has no matrix dimension, so one record satisfies every leg. |
 | Setup steps still run. To skip them, add `tangier gate verified <name>` as an early step and put `if:` on the setup steps. | `gate run` saves the command time only. |
 | Leave the pull request job on the merge commit, which is the checkout default. | The key then covers the merged content. A moved `main` gives a miss, never a false hit. |
 
-tangier's own `pipeline.toml` and `.github/workflows/ci.yaml` follow these rules. tangier has no
-nightly run.
+tangier's own `pipeline.toml` and `.github/workflows/ci.yaml` follow these rules. Its gates have no
+placeholder, so it keeps one job per gate and no `gates` job. tangier has no nightly run.
 
 ## Actions
 

@@ -91,6 +91,11 @@ def merge_base(base: str, head: str) -> str:
     return _git_checked("merge-base", base, head).strip()
 
 
+def rev_list_first_parent(head: str, stop: str) -> list[str]:
+    """The commits on `head`'s first-parent line, newest first, that `stop` cannot reach."""
+    return _git_checked("rev-list", "--first-parent", head, f"^{stop}").split()
+
+
 def status_porcelain() -> list[str]:
     """One line per tracked change or untracked file; empty when the tree is clean.
 
