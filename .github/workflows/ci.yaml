@@ -7,7 +7,8 @@ on:
 
 jobs:
   test:
-    # The Python versions are commands of `[gate.test]` in pipeline.toml.
+    # The Python versions are members of the `[gate.test]` group in pipeline.toml.
+    # One step for each member, so each version reports and reuses its own record.
     runs-on: ubuntu-latest
     steps:
       # Shallow: the gate has no placeholder, so its key needs HEAD only.
@@ -16,7 +17,7 @@ jobs:
         with:
           # A verified gate never calls uv, and an empty cache fails the post step.
           enable-cache: false
-      - name: Run the test gate
+      - name: Run test.py311
         # No setup-python: the runner's own Python runs tangier, which is the
         # environment tangier must work in.
         env:
@@ -26,7 +27,21 @@ jobs:
           # build that does not consult records.
           flags=(--read-only)
           if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
-          python3 -m tangier gate run test "${flags[@]}"
+          python3 -m tangier gate run test.py311 "${flags[@]}"
+      - name: Run test.py312
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          flags=(--read-only)
+          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          python3 -m tangier gate run test.py312 "${flags[@]}"
+      - name: Run test.py313
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          flags=(--read-only)
+          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          python3 -m tangier gate run test.py313 "${flags[@]}"
       - name: CLI smoke check
         run: python3 -m tangier --help
 
@@ -73,13 +88,20 @@ jobs:
         with:
           enable-cache: false
       - run: uv tool install ruff
-      - name: Run the lint gate
+      - name: Run lint.check
         env:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
           if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
-          python3 -m tangier gate run lint "${flags[@]}"
+          python3 -m tangier gate run lint.check "${flags[@]}"
+      - name: Run lint.format
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          flags=(--read-only)
+          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          python3 -m tangier gate run lint.format "${flags[@]}"
 
   lint-actions:
     # `action-validator` covers `actions/*/action.yaml`, the file type nothing
