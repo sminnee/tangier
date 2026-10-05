@@ -1,6 +1,6 @@
 [project]
 name = "tangier"
-version = "0.1.0"
+version = "0.2.0"
 description = "Content-addressed CI/deploy pipeline toolkit: change mapping, image tagging, kustomize deploys"
 readme = "README.md"
 requires-python = ">=3.11"
