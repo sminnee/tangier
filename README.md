@@ -360,6 +360,14 @@ Pushing the version tag publishes it to PyPI through `.github/workflows/release.
 uses trusted publishing, so the repo holds no PyPI token. Register the publisher once on pypi.org:
 project `tangier`, repository `sminnee/tangier`, workflow `release.yaml`, environment `pypi`.
 
+`skills/tangier/` teaches an agent to use tangier in any repo. `SKILL.md` is the entry point, and
+each command with agent rules has its own file, such as `gate.md`. Link the skill from the checkout
+that tracks `main`, so it follows that checkout:
+
+```sh
+ln -s /path/to/tangier/skills/tangier ~/.claude/skills/tangier
+```
+
 `bin/parity-check <path-to-repo>` diffs `tangier changemap` against a repo's pre-extraction
 `bin/changemap` across many refs, in throwaway worktrees, and is the gate for migrating a repo onto
 tangier. It is deliberately not part of CI — it needs a checkout of the consuming repo.
