@@ -7,7 +7,7 @@ SHA parity depends on. The reserved-section cases are new.
 
 import unittest
 
-from tangier.config import DEFAULT_SHA_EXCLUDE, ConfigError, read_config, scope_tags
+from tangier.config import DEFAULT_SHA_EXCLUDE, ConfigError, GateSpec, gate_groups, read_config, scope_tags
 from tangier.tests.support import parse_toml, parse_toml_stderr
 
 
@@ -578,6 +578,82 @@ class TestGate(unittest.TestCase):
         with self.assertRaises(ConfigError) as ctx:
             _ = parse_toml(_GATE_TAGS + '[gate."a b"]\ncmd = "bin/test"\nscope = "svc"\n')
         self.assertIn("gate name", str(ctx.exception))
+
+    # SPEC: gate#group-table
+    def test_a_table_without_cmd_is_a_group_of_member_gates(self) -> None:
+        cfg = parse_toml(
+            _GATE_TAGS + '[gate.test]\ncmd = "bin/test"\nscope = "svc"\n'
+            '[gate.lint]\nscope = "inputs"\n'
+            '[gate.lint.check]\ncmd = "ruff check ."\nscope = "svc"\n'
+            '[gate.lint.format]\ncmd = "ruff format --check ."\n'
+        )
+        # Config order, which is not name order.
+        self.assertEqual(list(cfg.gates), ["test", "lint.check", "lint.format"])
+        self.assertEqual(cfg.gates["lint.check"].group, "lint")
+        self.assertIsNone(cfg.gates["test"].group)
+        self.assertEqual(gate_groups(cfg), {"lint": ["lint.check", "lint.format"]})
+
+    # SPEC: gate#group-merge
+    def test_a_group_merges_its_env_and_scope_into_each_member(self) -> None:
+        cfg = parse_toml(
+            _GATE_TAGS + '[gate.lint]\nscope = ["inputs", "svc"]\nenv = { A = "group", B = "group" }\n'
+            '[gate.lint.check]\ncmd = "ruff check ."\nscope = ["lib", "svc"]\nenv = { B = "member" }\n'
+            '[gate.lint.format]\ncmd = "ruff format --check ."\n'
+        )
+        self.assertEqual(
+            cfg.gates["lint.check"],
+            GateSpec(
+                commands=[["ruff", "check", "."]],
+                env={"A": "group", "B": "member"},
+                scope=["inputs", "svc", "lib"],
+                group="lint",
+            ),
+        )
+        self.assertEqual(
+            cfg.gates["lint.format"],
+            GateSpec(
+                commands=[["ruff", "format", "--check", "."]],
+                env={"A": "group", "B": "group"},
+                scope=["inputs", "svc"],
+                group="lint",
+            ),
+        )
+
+    # SPEC: gate#group-table
+    def test_a_malformed_group_raises(self) -> None:
+        cases = {
+            "no members": ('[gate.lint]\nscope = "svc"\n', "requires `cmd`"),
+            "a scalar beside the members": (
+                '[gate.lint]\npaths = "x"\n[gate.lint.check]\ncmd = "ruff"\nscope = "svc"\n',
+                "member tables only, not `paths`",
+            ),
+            "two levels": ('[gate.lint.check.deep]\ncmd = "ruff"\nscope = "svc"\n', "one level only"),
+            "a member without cmd": (
+                '[gate.lint]\nscope = "svc"\n[gate.lint.check]\nscope = "svc"\n',
+                "requires `cmd`",
+            ),
+            "a member named lock": ('[gate.deps.lock]\ncmd = "uv lock --check"\nscope = "svc"\n', "named `lock`"),
+            "no scope anywhere": ('[gate.lint.check]\ncmd = "ruff"\n', "requires `scope`"),
+            "a bad member name": ('[gate.lint."a b"]\ncmd = "ruff"\nscope = "svc"\n', "gate name"),
+        }
+        for label, (body, expected) in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(ConfigError) as ctx:
+                    _ = parse_toml(_GATE_TAGS + body)
+                self.assertIn(expected, str(ctx.exception))
+
+    # SPEC: gate#output-name-collision
+    def test_two_gates_whose_outputs_share_a_name_raise(self) -> None:
+        cases = {
+            "member and flat gate": '[gate.lint-check]\ncmd = "a"\nscope = "svc"\n',
+            "member and group": '[gate.lint-check.x]\ncmd = "a"\nscope = "svc"\n',
+        }
+        member = '[gate.lint.check]\ncmd = "ruff"\nscope = "svc"\n'
+        for label, other in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(ConfigError) as ctx:
+                    _ = parse_toml(_GATE_TAGS + member + other)
+                self.assertIn("share the output name `lint-check-run`", str(ctx.exception))
 
     # SPEC: gate#cmd-no-shell
     def test_shell_syntax_is_rejected_at_parse_time(self) -> None:

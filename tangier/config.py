@@ -182,6 +182,8 @@ class GateSpec:
     commands: list[list[str]]
     env: dict[str, str]
     scope: list[str]
+    # The group's name, for a member of `[gate.<group>.<name>]`. Its full name is `<group>.<name>`.
+    group: str | None = None
 
 
 @dataclass
@@ -452,38 +454,119 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv]
     return envs, rollout, after
 
 
-# A gate name becomes a ref component (`refs/tangier/gates/<name>/<key>`) and
-# an output name (`<name>-verified`), so it must be valid as both.
+# Each part of a gate name becomes part of a ref component
+# (`refs/tangier/gates/<group>.<name>/<key>`) and of an output name
+# (`<group>-<name>-verified`), so it must be valid as both.
 _GATE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+_GATE_KEYS = {"cmd", "env", "scope"}
+
+
+def gate_output_name(name: str) -> str:
+    """The GitHub output prefix for a gate or group: `frontend.lint` gives `frontend-lint`."""
+    return name.replace(".", "-")
+
+
+def gate_groups(cfg: Config) -> dict[str, list[str]]:
+    """Each group name, mapped to its members' full names, in config order."""
+    groups: dict[str, list[str]] = {}
+    for name, spec in cfg.gates.items():
+        if spec.group:
+            groups.setdefault(spec.group, []).append(name)
+    return groups
 
 
 def _parse_gates(path: str, body: dict[str, Any]) -> dict[str, GateSpec]:
+    """Parse `[gate]`: a table with `cmd` is a gate, and a table without one is a group of gates.
+
+    A group's `env` and `scope` are merged into each member here, so every
+    later reader sees one resolved `GateSpec`.
+    """
     out: dict[str, GateSpec] = {}
     for name, spec in body.items():
         section = f"gate.{name}"
-        if not _GATE_NAME.fullmatch(name):
-            raise ConfigError(
-                f"{path}: `[{section}]` is not a valid gate name (letters, digits, `-` and `_`, not starting with `-`)"
-            )
+        _check_gate_name(path, section, name)
         spec = _require_table(path, section, spec)
-        _check_keys(path, section, spec, {"cmd", "env", "scope"})
-        for required in ("cmd", "scope"):
-            if required not in spec:
-                raise ConfigError(f"{path}: `[{section}]` requires `{required}`")
-        cmds = _coerce_str_or_list(path, section, "cmd", spec["cmd"])
-        scope = _coerce_str_or_list(path, section, "scope", spec["scope"])
-        for key, val in (("cmd", cmds), ("scope", scope)):
-            if not val:
-                raise ConfigError(f"{path}: `[{section}]` `{key}` is empty")
-        env = spec.get("env", {})
-        if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
-            raise ConfigError(f"{path}: `[{section}].env` must be a table of strings")
-        out[name] = GateSpec(
-            commands=[_split_command(path, f"`[{section}] cmd`", cmd) for cmd in cmds],
-            env=dict(env),
-            scope=scope,
-        )
+        if "cmd" in spec:
+            out[name] = _parse_gate(path, section, spec, None, {}, [])
+            continue
+        members = {k: v for k, v in spec.items() if k not in ("env", "scope")}
+        if not members:
+            raise ConfigError(f"{path}: `[{section}]` requires `cmd`, or member gates to make it a group")
+        for member, value in members.items():
+            if not isinstance(value, dict):
+                raise ConfigError(
+                    f"{path}: `[{section}]` has no `cmd`, so it is a group, which takes `env`, `scope` "
+                    f"and member tables only, not `{member}`"
+                )
+        group_env = _gate_env(path, section, spec)
+        group_scope = _coerce_str_or_list(path, section, "scope", spec.get("scope", []))
+        for member, value in members.items():
+            member_section = f"{section}.{member}"
+            _check_gate_name(path, member_section, member)
+            if member == "lock":
+                # Git refuses a ref component that ends in `.lock`, so the record could never be written.
+                raise ConfigError(f"{path}: `[{member_section}]`: a member cannot be named `lock`")
+            if "cmd" not in value:
+                nested = any(isinstance(v, dict) for v in value.values())
+                raise ConfigError(
+                    f"{path}: `[{member_section}]` requires `cmd`" + (": groups nest one level only" if nested else "")
+                )
+            out[f"{name}.{member}"] = _parse_gate(path, member_section, value, name, group_env, group_scope)
+    _check_gate_output_names(path, out)
     return out
+
+
+def _check_gate_name(path: str, section: str, name: str) -> None:
+    if not _GATE_NAME.fullmatch(name):
+        raise ConfigError(
+            f"{path}: `[{section}]` is not a valid gate name (letters, digits, `-` and `_`, not starting with `-`)"
+        )
+
+
+def _gate_env(path: str, section: str, spec: dict[str, Any]) -> dict[str, str]:
+    env = spec.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+        raise ConfigError(f"{path}: `[{section}].env` must be a table of strings")
+    return dict(env)
+
+
+def _parse_gate(
+    path: str,
+    section: str,
+    spec: dict[str, Any],
+    group: str | None,
+    group_env: dict[str, str],
+    group_scope: list[str],
+) -> GateSpec:
+    """One gate. A member takes its group's `env` beneath its own, and its group's `scope` ahead of its own."""
+    _check_keys(path, section, spec, _GATE_KEYS)
+    if not group_scope and "scope" not in spec:
+        raise ConfigError(f"{path}: `[{section}]` requires `scope`")
+    cmds = _coerce_str_or_list(path, section, "cmd", spec["cmd"])
+    own_scope = _coerce_str_or_list(path, section, "scope", spec.get("scope", []))
+    scope = list(dict.fromkeys([*group_scope, *own_scope]))
+    for key, val in (("cmd", cmds), ("scope", scope)):
+        if not val:
+            raise ConfigError(f"{path}: `[{section}]` `{key}` is empty")
+    return GateSpec(
+        commands=[_split_command(path, f"`[{section}] cmd`", cmd) for cmd in cmds],
+        env={**group_env, **_gate_env(path, section, spec)},
+        scope=scope,
+        group=group,
+    )
+
+
+def _check_gate_output_names(path: str, gates: dict[str, GateSpec]) -> None:
+    """Reject two gates, or a gate and a group, whose GitHub outputs would share a name."""
+    seen: dict[str, str] = {}
+    names = [*gates, *dict.fromkeys(spec.group for spec in gates.values() if spec.group)]
+    for name in names:
+        output = gate_output_name(name)
+        if output in seen:
+            raise ConfigError(
+                f"{path}: `[gate.{seen[output]}]` and `[gate.{name}]` share the output name `{output}-run`; rename one"
+            )
+        seen[output] = name
 
 
 def _parse_tailnet(path: str, body: dict[str, Any]) -> TailnetSettings:

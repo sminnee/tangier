@@ -156,6 +156,26 @@ test-backend:
   if: needs.gates.outputs.test-backend-run == 'true'
 ```
 
+A gate is one record for all its commands. When one command's inputs change, every command runs
+again. To keep them apart, make a **group**: a `[gate.<name>]` table with no `cmd`, holding member
+gates. The members share the group's `env` and `scope`, and each keeps its own record:
+
+```toml
+[gate.lint]
+scope = ["backend"]
+
+[gate.lint.pyright]
+cmd = "pyright"
+
+[gate.lint.vulture]
+cmd   = "vulture"
+scope = ["vulture-allowlist"]          # added to the group's scope
+```
+
+`gate run lint` runs every member. `gate github-outputs` adds
+`lint-pyright-run` for the member and `lint-run` for the group, which is `true` when any member
+needs a run. A group has no run order: put a prerequisite in the member that needs it.
+
 `gate run --all --dry-run` shows each gate's status, the commit it diffs from, and the commands it
 would run. Add `--debug` to see each commit the comparator walk checked.
 
@@ -197,16 +217,17 @@ test:
     - run: bin/test
 ```
 
-After:
+After, with one member gate for each Python version:
 
 ```toml
 [gate.test]
-cmd = [
-  "uv run --no-project --python 3.11 python -m unittest discover -s tangier -p test_*.py -t .",
-  "uv run --no-project --python 3.12 python -m unittest discover -s tangier -p test_*.py -t .",
-  "uv run --no-project --python 3.13 python -m unittest discover -s tangier -p test_*.py -t .",
-]
 scope = ["gate-inputs"]
+
+[gate.test.py311]
+cmd = "uv run --no-project --python 3.11 python -m unittest discover -s tangier -p test_*.py -t ."
+
+[gate.test.py312]
+cmd = "uv run --no-project --python 3.12 python -m unittest discover -s tangier -p test_*.py -t ."
 ```
 
 ```yaml
@@ -215,11 +236,14 @@ test:
     - uses: actions/checkout@v4       # shallow: this gate has no placeholder
     - uses: astral-sh/setup-uv@v6
       with: { enable-cache: false }   # a verified gate never calls uv
-    - env: { EVENT: "${{ github.event_name }}" }
+    - name: Run test.py311
+      env: { EVENT: "${{ github.event_name }}" }
       run: |
         flags=(--read-only)
         if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
-        tangier gate run test "${flags[@]}"
+        tangier gate run test.py311 "${flags[@]}"
+    - name: Run test.py312
+      # ...the same, for test.py312
 ```
 
 With several gates, or a gate with a `{...}` placeholder, one `gates` job decides which gates run.
@@ -244,6 +268,28 @@ test-backend:
     - run: tangier gate run test-backend --read-only
 ```
 
+A group is one job with one step for each member. The job runs when any member needs a run. Each
+step then runs its member, or reuses its record in seconds, and reports on its own:
+
+```yaml
+gates:
+  outputs:
+    python-run: ${{ steps.gates.outputs.python-run }}
+  # ...as above
+
+python:
+  needs: gates
+  if: needs.gates.outputs.python-run == 'true'
+  steps:
+    - uses: actions/checkout@v4
+      with: { fetch-depth: 0, filter: "blob:none" }
+    - run: tangier gate run python.pyright --read-only
+    - run: tangier gate run python.ruff --read-only
+    - run: tangier gate run python.unittest --read-only
+```
+
+Add `if: "!cancelled()"` to the later steps to see every member's result when one fails.
+
 | Rule | Reason |
 | --- | --- |
 | The command moves from the workflow to `[gate.<name>]`. The step becomes `tangier gate run <name>`. | One definition serves the developer and CI. |
@@ -253,7 +299,8 @@ test-backend:
 | A gate with no placeholder needs the default shallow checkout only. | Its key covers the commands and the scope at `HEAD`. |
 | A gate with a `{...}` placeholder needs the merge base. Use `fetch-depth: 0` with `filter: blob:none`. | The item lists come from the diff. `fetch-depth: 0` alone fetches every blob of every branch. The blobless filter fetches commits and trees only. |
 | A gate job takes no item lists from the `gates` job. | `gate run` computes the comparator and the lists itself, from the same diff. |
-| A matrix dimension moves into the gate's commands, or becomes one gate for each leg. | The key has no matrix dimension, so one record satisfies every leg. |
+| A matrix dimension becomes one member gate for each leg, in a group. | The key has no matrix dimension. A member per leg gives each leg its own record. |
+| A long gate whose commands read different inputs becomes a group. | A change then voids only the members whose scope it touches. |
 | Setup steps still run. To skip them, add `tangier gate verified <name>` as an early step and put `if:` on the setup steps. | `gate run` saves the command time only. |
 | Leave the pull request job on the merge commit, which is the checkout default. | The key then covers the merged content. A moved `main` gives a miss, never a false hit. |
 

@@ -806,7 +806,7 @@ class TestRunMany(GateCase):
         _ = _commit(self.repo, "pipeline.toml", self.SECOND)
 
     # SPEC: gate#run-all
-    def test_all_runs_every_gate_in_name_order(self) -> None:
+    def test_all_runs_every_gate_in_config_order(self) -> None:
         runner = RecordingRunner()
         code, _, _ = self.tangier("gate", "run", "--all", "--base", self.base, runner=runner)
         self.assertEqual(code, 0)
@@ -865,6 +865,129 @@ class TestRunMany(GateCase):
         _write(self.repo, "svc/a.py", "a = 3\n")
         _, _, err = self.tangier("gate", "run", "backend", "--dry-run", "--debug", "--base", self.base)
         self.assertIn(f"working tree ({self.tree()[:7]})", err)
+
+
+class TestGroups(GateCase):
+    GROUPED = (
+        # `format` before `check`, so config order and name order differ.
+        CONFIG + '[gate.lint]\nenv = { LINT = "1" }\n'
+        '[gate.lint.format]\ncmd = "bin/lint format"\nscope = "inputs"\n'
+        '[gate.lint.check]\ncmd = "bin/lint check"\nscope = "svc"\n'
+    )
+    CHECK = ["bin/lint", "check"]
+    FORMAT = ["bin/lint", "format"]
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Touches `inputs`, as `svc/a.py` touched `svc`, so every member is needed from `self.base`.
+        _ = _commit(self.repo, "pipeline.toml", self.GROUPED)
+
+    def run_gates(self, *selectors: str, runner: RecordingRunner | None = None) -> int:
+        return self.tangier("gate", "run", *selectors, "--base", self.base, runner=runner)[0]
+
+    # SPEC: gate#selector
+    # SPEC: gate#group-ref
+    def test_a_group_selector_runs_each_member_in_config_order_with_its_own_record(self) -> None:
+        # The second overlaps and runs each gate once, in config order, not argument order.
+        for selectors in (["lint"], ["lint.check", "lint"]):
+            with self.subTest(selectors):
+                for ref in _gate_refs(self.repo):
+                    _ = _git(self.repo, "update-ref", "-d", ref)
+                runner = RecordingRunner()
+                self.assertEqual(self.run_gates(*selectors, runner=runner), 0)
+                self.assertEqual(runner.calls, [self.FORMAT, self.CHECK])
+                self.assertEqual((runner.envs[0] or {})["LINT"], "1")
+                refs = _gate_refs(self.repo)
+                self.assertEqual(
+                    [ref.rsplit("/", 1)[0] for ref in refs],
+                    [
+                        "refs/tangier/gates/lint.check",
+                        "refs/tangier/gates/lint.format",
+                    ],
+                )
+
+    # SPEC: gate#selector
+    def test_a_failing_member_still_runs_the_rest(self) -> None:
+        runner = RecordingRunner({tuple(self.FORMAT): Result(3)})
+        self.assertEqual(self.run_gates("lint", runner=runner), 3)
+        self.assertEqual(runner.calls, [self.FORMAT, self.CHECK])
+        self.assertEqual([ref.split("/")[3] for ref in _gate_refs(self.repo)], ["lint.check"])
+
+    # SPEC: gate#group-records-per-member
+    def test_a_change_voids_only_the_member_whose_scope_it_touches(self) -> None:
+        self.assertEqual(self.run_gates("lint"), 0)
+        _ = _commit(self.repo, "svc/a.py", "a = 3\n")
+        runner = RecordingRunner()
+        self.assertEqual(self.run_gates("lint", runner=runner), 0)
+        self.assertEqual(runner.calls, [self.CHECK])
+
+    # SPEC: gate#selector
+    def test_an_unknown_selector_is_an_error(self) -> None:
+        for selector in ("nope", "lint.nope", "lint.*"):
+            with self.subTest(selector):
+                code, _, err = self.tangier("gate", "run", selector, "--base", self.base)
+                self.assertEqual(code, 2)
+                self.assertIn(f"`{selector}`", err)
+
+    # SPEC: gate#selector
+    def test_key_prints_each_member_of_a_group(self) -> None:
+        _, check, _ = self.tangier("gate", "key", "lint.check")
+        _, both, _ = self.tangier("gate", "key", "lint")
+        self.assertRegex(check, r"^[0-9a-f]{40}\n$")
+        self.assertRegex(both.splitlines()[0], r"^lint\.format [0-9a-f]{40}$")
+        self.assertEqual(both.splitlines()[1], f"lint.check {check.strip()}")
+
+    # SPEC: gate#selector
+    def test_a_group_is_verified_when_every_member_is(self) -> None:
+        self.assertEqual(self.run_gates("lint.check"), 0)
+        self.assertEqual(self.tangier("gate", "verified", "lint.check")[:2], (0, "verified\n"))
+        self.assertEqual(self.tangier("gate", "verified", "lint")[:2], (1, "unverified\n"))
+        self.assertEqual(self.run_gates("lint.format"), 0)
+        self.assertEqual(self.tangier("gate", "verified", "lint")[:2], (0, "verified\n"))
+
+    def group_outputs(self, base: str) -> dict[str, str]:
+        _, out, _ = self.tangier("gate", "github-outputs", "--base", base)
+        return dict(line.split("=", 1) for line in out.splitlines())
+
+    # SPEC: gate#github-outputs
+    # SPEC: gate#group-outputs
+    def test_group_outputs_aggregate_their_members(self) -> None:
+        outputs = self.group_outputs("HEAD")
+        # Gates in name order, then the group, which has no `-key`.
+        self.assertEqual(
+            [name for name in outputs if name.startswith("lint")],
+            [
+                *(f"lint-check-{suffix}" for suffix in ("status", "run", "verified", "key")),
+                *(f"lint-format-{suffix}" for suffix in ("status", "run", "verified", "key")),
+                "lint-status",
+                "lint-run",
+                "lint-verified",
+            ],
+        )
+        self.assertEqual(outputs["lint-check-status"], "not-needed")
+        self.assertEqual(
+            [outputs["lint-status"], outputs["lint-run"], outputs["lint-verified"]], ["not-needed", "false", "false"]
+        )
+
+        # One member verified and one not needed: the group is not verified.
+        self.assertEqual(self.run_gates("lint.check"), 0)
+        outputs = self.group_outputs("HEAD")
+        self.assertEqual([outputs["lint-check-status"], outputs["lint-format-status"]], ["verified", "not-needed"])
+        self.assertEqual(
+            [outputs["lint-status"], outputs["lint-run"], outputs["lint-verified"]], ["not-needed", "false", "false"]
+        )
+
+        outputs = self.group_outputs(self.base)
+        self.assertEqual([outputs["lint-check-status"], outputs["lint-format-status"]], ["verified", "required"])
+        self.assertEqual(
+            [outputs["lint-status"], outputs["lint-run"], outputs["lint-verified"]], ["required", "true", "false"]
+        )
+
+        self.assertEqual(self.run_gates("lint.format"), 0)
+        outputs = self.group_outputs(self.base)
+        self.assertEqual(
+            [outputs["lint-status"], outputs["lint-run"], outputs["lint-verified"]], ["verified", "false", "true"]
+        )
 
 
 class TestStore(GateCase):
