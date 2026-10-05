@@ -8,7 +8,7 @@ import shlex
 import sys
 
 from tangier import gate
-from tangier.config import Config, GateSpec
+from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs
 from tangier.runner import Runner, Subprocess
 
@@ -18,7 +18,14 @@ def _runner(args: argparse.Namespace) -> Runner:
 
 
 def cmd_key(config: Config, args: argparse.Namespace) -> int:
-    print(gate.key(config, args.name, gate.snapshot(args.head).tree))
+    """Print the key. A group prints `<name> <key>` for each member."""
+    names = gate.select(config, args.name)
+    tree = gate.snapshot(args.head).tree
+    if names == [args.name]:
+        print(gate.key(config, args.name, tree))
+        return 0
+    for name in names:
+        print(f"{name} {gate.key(config, name, tree)}")
     return 0
 
 
@@ -47,12 +54,10 @@ def _selected(config: Config, args: argparse.Namespace) -> list[str]:
     if args.all and args.name:
         raise gate.GateError("name gates or pass `--all`, not both")
     if args.all:
-        return sorted(config.gates)
+        return list(config.gates)
     if not args.name:
         raise gate.GateError("name a gate to run, or pass `--all`")
-    for name in args.name:
-        _ = gate.spec_for(config, name)
-    return list(args.name)
+    return gate.select_all(config, args.name)
 
 
 def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.OriginRecords) -> int:
@@ -136,8 +141,15 @@ def _run_commands(runner: Runner, spec: GateSpec, commands: list[list[str]]) -> 
 
 
 def cmd_verified(config: Config, args: argparse.Namespace) -> int:
-    """Print `verified`/`unverified` AND set the exit code, as `image exists` does."""
-    if gate.verified(args.name, gate.key(config, args.name, gate.snapshot(args.head).tree)):
+    """Print `verified`/`unverified` AND set the exit code, as `image exists` does.
+
+    A group is verified only when every member is.
+    """
+    names = gate.select(config, args.name)
+    tree = gate.snapshot(args.head).tree
+    # One exact-ref lookup for one gate. A group lists origin's gate refs once for all its members.
+    origin = gate.OriginRecords() if len(names) > 1 else None
+    if all(gate.verified(name, gate.key(config, name, tree), origin) for name in names):
         print("verified")
         return 0
     print("unverified")
@@ -152,21 +164,38 @@ def cmd_push(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
-    """Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate.
+    """Emit `<gate>-status`, `-run`, `-verified` and `-key` for every gate, then the first three for every group.
 
-    `-run` is `true` when the status is `required`, for a plain `if:`.
+    `-run` is `true` when the status is `required`, for a plain `if:`. A `.`
+    in a name becomes `-`.
     """
     # One read of origin for all gates, not one per gate.
     origin = gate.OriginRecords()
+    snap = gate.snapshot(args.head)
+    statuses = {name: gate.plan(config, name, args.base, snap, origin) for name in sorted(config.gates)}
     pairs: dict[str, str] = {}
-    for name in sorted(config.gates):
-        p = gate.plan(config, name, args.base, gate.snapshot(args.head), origin)
-        pairs[f"{name}-status"] = p.status
-        pairs[f"{name}-run"] = "true" if p.status == "required" else "false"
-        pairs[f"{name}-verified"] = "true" if p.status == "verified" else "false"
-        pairs[f"{name}-key"] = p.key
+    for name, p in statuses.items():
+        _add_status(pairs, gate_output_name(name), p.status)
+        pairs[f"{gate_output_name(name)}-key"] = p.key
+    for group, members in sorted(gate_groups(config).items()):
+        _add_status(pairs, gate_output_name(group), _group_status([statuses[m].status for m in members]))
     emit_outputs(pairs)
     return 0
+
+
+def _add_status(pairs: dict[str, str], prefix: str, status: str) -> None:
+    pairs[f"{prefix}-status"] = status
+    pairs[f"{prefix}-run"] = "true" if status == "required" else "false"
+    pairs[f"{prefix}-verified"] = "true" if status == "verified" else "false"
+
+
+def _group_status(statuses: list[str]) -> str:
+    """`required` if any member is, else `verified` if every member is, else `not-needed`."""
+    if "required" in statuses:
+        return "required"
+    if all(status == "verified" for status in statuses):
+        return "verified"
+    return "not-needed"
 
 
 def cmd_prune(config: Config, args: argparse.Namespace) -> int:
@@ -204,8 +233,8 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     gp = sub.add_parser("gate", help="record a local gate pass, and reuse it in CI")
     gsub = gp.add_subparsers(dest="cmd", required=True)
 
-    kp = gsub.add_parser("key", help="print a gate's content key")
-    _ = kp.add_argument("name")
+    kp = gsub.add_parser("key", help="print a gate's content key; a group prints `<name> <key>` per member")
+    _ = kp.add_argument("name", help="a gate or a group")
     # No `--base`: the key reads content only.
     _add_head_arg(kp)
     kp.set_defaults(func=cmd_key)
@@ -213,8 +242,8 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     rp = gsub.add_parser(
         "run", help="run gates on the working tree, unless the diff from the last verified commit does not need them"
     )
-    _ = rp.add_argument("name", nargs="*")
-    _ = rp.add_argument("--all", action="store_true", help="run every configured gate, in name order")
+    _ = rp.add_argument("name", nargs="*", help="a gate, or a group for every gate in it")
+    _ = rp.add_argument("--all", action="store_true", help="run every configured gate, in config order")
     # No `--head`: the commands run against the checked-out tree, so the only
     # content a record can describe is the working tree.
     _add_diff_args(rp, head=False)
@@ -237,7 +266,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     rp.set_defaults(func=cmd_run)
 
     vp = gsub.add_parser("verified", help="has this gate passed? prints verified/unverified, exits 0/1")
-    _ = vp.add_argument("name")
+    _ = vp.add_argument("name", help="a gate, or a group, which is verified when every member is")
     _add_head_arg(vp)
     vp.set_defaults(func=cmd_verified)
 

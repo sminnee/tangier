@@ -36,7 +36,7 @@ paths = ["uv.lock", "pyproject.toml", "bin/test", "pipeline.toml"]
 - `[gate.<name>]` takes `cmd`, `env` and `scope` only. `cmd` and `scope` are required and
   non-empty, and each accepts a bare string for one entry. `env` is a table of strings. The name
   uses letters, digits, `-` and `_`, and does not start with `-`, because it becomes a ref
-  component. `[config-table]`
+  component. A table without `cmd` is a [group](#groups). `[config-table]`
 - Each command is split into arguments at parse time and runs without a shell. Shell operators and
   command substitution are rejected, as for `[deploy] after`. `[cmd-no-shell]`
 - A placeholder is a whole argument: `{<name>-items}` for an items list, `{<group>}` for a
@@ -56,6 +56,53 @@ paths = ["uv.lock", "pyproject.toml", "bin/test", "pipeline.toml"]
 - A glob in a tag that feeds a gate scope must be a literal path or `dir/**`. Any other glob
   contributes nothing to the key, so it is a config error. A SHA bucket only warns: there the cost
   is a stale image tag, and here it is a false pass. `[unhashable-scope-glob-raises]`
+
+## Groups
+
+A gate is one record for all its commands, so a change that one command reads re-runs them all.
+A group splits a gate into member gates. They share settings, and each keeps its own record.
+
+```toml
+[gate.lint]
+scope = ["gate-inputs"]
+env   = { RUFF_CACHE_DIR = ".ruff" }
+
+[gate.lint.check]
+cmd = "ruff check ."
+
+[gate.lint.format]
+cmd   = "ruff format --check ."
+scope = ["docs"]
+```
+
+- A `[gate.<name>]` table with `cmd` is a gate. A table without `cmd` is a group. A group takes
+  `env`, `scope` and member tables only, and needs at least one member. Each member is a gate
+  table with `cmd`. Groups nest one level only. Flat gates and groups can sit side by side.
+  `[group-table]`
+- A member's full name is `<group>.<member>`, as `lint.check`. Each part follows the gate name
+  rule. A member cannot be named `lock`, because git refuses a ref component that ends in `.lock`.
+  Gates are kept in config order. `[group-table]`
+- The group's `env` sits beneath each member's `env`, and the member's value wins. The group's
+  `scope` comes before the member's, with duplicates removed. A member may leave out `scope` when
+  the group sets one. The key, the need test and the run all read the merged gate. `[group-merge]`
+- A group has no ordering field. When one command needs another to run first, such as a build
+  before a type check, put both in the member that needs it. Each member then runs correctly on
+  its own.
+- Each member has its own key and record, under `refs/tangier/gates/<group>.<member>/<key>`. A
+  change voids only the members whose scope it touches. `[group-records-per-member]`
+  `[group-ref]`
+- Output names map `.` to `-`: `lint.check` gives `lint-check-run`. Two gates, or a gate and a
+  group, whose outputs would share a name are a config error. `[output-name-collision]`
+
+## Selector
+
+`gate run`, `gate key` and `gate verified` take selectors, not only gate names.
+
+- A selector is a gate's full name, such as `lint.check`, or a group's name, such as `lint`. A
+  group selects its members in config order. Any other selector is an error, exit 2. `gate run` runs the selected
+  gates once each, in config order. `gate key` with a group prints `<name> <key>` for each member.
+  `gate verified` with a group is verified only when every member has a record at `HEAD`.
+  `[selector]`
 
 ## Key
 
@@ -184,18 +231,19 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 
 | Command | Behaviour |
 | --- | --- |
-| `gate key <name>` | Print the key. |
-| `gate run <name> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--force`, `--dry-run` and `--debug`. |
-| `gate verified <name>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has a record. |
+| `gate key <selector>` | Print the key. |
+| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--force`, `--dry-run` and `--debug`. |
+| `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has a record. |
 | `gate push` | Push local gate records to `origin`. |
-| `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate. |
+| `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. |
 | `gate prune --older-than <days>` | Delete old gate records, on `origin` and in this clone. |
 
 `gate run` has no `--head`. The commands test the checked-out tree, so the working tree is the only
 content a record can describe. `gate key` and `gate verified` take no `--base`, because the key reads no diff.
 
-- A gate name that the config does not hold is an error, exit 2. `[unknown-gate]`
-- `gate run` takes one or more gate names, or `--all` for every configured gate in name order. No
+- A gate name or selector that the config does not hold is an error, exit 2. `[unknown-gate]`
+- `gate run` takes one or more [selectors](#selector), or `--all` for every configured gate in
+  config order. No
   name and no `--all` is an error, exit 2. Each gate is planned and run in turn. A failing gate
   does not stop the rest, so one run reports every failure. The exit code is the first non-zero
   one. All gates share one read of `origin`. `[run-all]`
@@ -239,7 +287,11 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   `<gate>-verified=true|false` and `<gate>-key=<key>` for each gate, in name order. `-run` is
   `true` when the status is `required`, for a plain `if:`. A gate the diff does not need still
   gets its `-key`. It echoes to stdout and appends to `$GITHUB_OUTPUT` when set. It reads `origin`
-  once for all gates. `[github-outputs]`
+  once for all gates. A `.` in a member's name becomes `-`. `[github-outputs]`
+- Each group gets `<group>-status`, `<group>-run` and `<group>-verified`, after the gates, in
+  group name order. The status is `required` when any member is required, `verified` when every
+  member is verified, and `not-needed` otherwise. `-run` is `true` when the status is `required`.
+  A group has no `-key`. `[group-outputs]`
 - The status is one word, checked in this order: `verified` when the keyed content has a record,
   `not-needed` when the diff from the comparator does not need the gate, and `required`
   otherwise. A CI job runs the gate when the status is `required`. `[status-values]`

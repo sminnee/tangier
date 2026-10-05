@@ -18,7 +18,15 @@ from datetime import UTC, datetime, timedelta
 
 from tangier import __version__, git
 from tangier.changemap import AnswerSet, answer_set_for_files, scope_lines, scope_touched
-from tangier.config import ITEMS_PLACEHOLDER_SUFFIX, Config, GateSpec, entry_tags, is_placeholder, scope_tags
+from tangier.config import (
+    ITEMS_PLACEHOLDER_SUFFIX,
+    Config,
+    GateSpec,
+    entry_tags,
+    gate_groups,
+    is_placeholder,
+    scope_tags,
+)
 
 REF_PREFIX = "refs/tangier/gates"
 # Where `prune` mirrors origin's gate refs, apart from this clone's own records.
@@ -112,6 +120,26 @@ def spec_for(cfg: Config, name: str) -> GateSpec:
         known = ", ".join(sorted(cfg.gates)) or "(none)"
         raise GateError(f"no `[gate.{name}]` in config (configured: {known})")
     return spec
+
+
+def select(cfg: Config, selector: str) -> list[str]:
+    """The gates a selector names: a gate's full name, or a group's name.
+
+    A group gives its members in config order.
+    """
+    if selector in cfg.gates:
+        return [selector]
+    members = gate_groups(cfg).get(selector)
+    if members is None:
+        known = ", ".join([*cfg.gates, *gate_groups(cfg)]) or "(none)"
+        raise GateError(f"no gate or group `{selector}` in config (configured: {known})")
+    return members
+
+
+def select_all(cfg: Config, selectors: list[str]) -> list[str]:
+    """Every gate the selectors name, once each, in config order."""
+    chosen = {name for selector in selectors for name in select(cfg, selector)}
+    return [name for name in cfg.gates if name in chosen]
 
 
 def placeholder_lists(spec: GateSpec, answers: AnswerSet) -> dict[str, list[str]]:
