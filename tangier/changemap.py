@@ -119,6 +119,27 @@ def scope_lines(cfg: Config, tags: Iterable[str], head: str = "HEAD") -> list[st
         actually declares `exclude`.
     Conflating them would change the hash of every bucket and scope that has no exclusions.
     """
+    bucket_globs, keep = _scope_filter(cfg, tags)
+    return tree_lines(globs.globs_to_ls_tree_paths(bucket_globs), head, keep)
+
+
+def scope_touched(cfg: Config, tags: Iterable[str], files: Iterable[str]) -> bool:
+    """Whether any of `files` is one of `scope_lines`' inputs for `tags`.
+
+    The same globs and the same `keep` filter as `scope_lines`, so a file
+    touches the scope exactly when it can move the scope's lines. Gate scopes
+    hold only literal paths and `dir/**` globs, for which a glob match equals
+    membership in the `ls-tree` walk. A deleted file counts: it left the walk.
+    """
+    scope_globs, keep = _scope_filter(cfg, tags)
+    return any(globs.matches(f, scope_globs) and (keep is None or keep(f)) for f in files)
+
+
+def _scope_filter(cfg: Config, tags: Iterable[str]) -> tuple[list[str], Callable[[str], bool] | None]:
+    """The globs `tags` contribute, with their transitive deps, and the `keep` filter for them.
+
+    `keep` is None when neither filter applies (see `scope_lines`).
+    """
     bucket_globs: list[str] = []
     contributing: set[str] = set()
     for m in tags:
@@ -143,8 +164,7 @@ def scope_lines(cfg: Config, tags: Iterable[str], head: str = "HEAD") -> list[st
         return True
 
     # Neither filter applies -> walk everything unfiltered, the byte-stable fast path.
-    keep: Callable[[str], bool] | None = _keep if (sha_exclude or needs_claim_filter) else None
-    return tree_lines(globs.globs_to_ls_tree_paths(bucket_globs), head, keep)
+    return bucket_globs, _keep if (sha_exclude or needs_claim_filter) else None
 
 
 # ---------------------------------------------------------------------------
