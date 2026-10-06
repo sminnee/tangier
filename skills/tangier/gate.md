@@ -25,6 +25,7 @@ When the repo has a pre-push hook that runs the gates, such as `bin/pre-push-gat
 `tangier gate run <group>.<member>` runs one member of a group. `tangier gate run <group>` runs
 every member. While you work, run the narrowest selector that covers what you changed. Its pass is
 recorded, and the commit of that work reuses it.
+`tangier gate list` shows the configured gates and groups.
 
 ## CI-only gates
 
