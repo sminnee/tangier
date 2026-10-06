@@ -258,6 +258,18 @@ class TestKey(GateCase):
             _ = self.key(body)
         self.assertIn("`ghost` matches no tracked file", str(ctx.exception))
 
+    # SPEC: gate#key-all
+    def test_a_bare_key_names_the_gate_even_when_there_is_one(self) -> None:
+        self.assertEqual(self.tangier("gate", "key")[:2], (0, f"backend {self.key()}\n"))
+
+    # SPEC: gate#key-all
+    def test_a_bare_key_prints_nothing_when_one_gate_fails_closed(self) -> None:
+        ghost = '[gate.ghost]\ncmd = "true"\nscope = "ghost"\n[ghost]\npaths = "ghost/**"\n'
+        _ = _commit(self.repo, "pipeline.toml", CONFIG + ghost)
+        code, out, err = self.tangier("gate", "key")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("`ghost` matches no tracked file", err)
+
 
 class TestWorkingTree(GateCase):
     def names(self, tree: str) -> list[str]:
@@ -1175,6 +1187,7 @@ class TestGroups(GateCase):
     )
     CHECK = ["bin/lint", "check"]
     FORMAT = ["bin/lint", "format"]
+    GATES = ("backend", "lint.format", "lint.check")
 
     def setUp(self) -> None:
         super().setUp()
@@ -1235,6 +1248,11 @@ class TestGroups(GateCase):
         self.assertRegex(check, r"^[0-9a-f]{40}\n$")
         self.assertRegex(both.splitlines()[0], r"^lint\.format [0-9a-f]{40}$")
         self.assertEqual(both.splitlines()[1], f"lint.check {check.strip()}")
+
+    # SPEC: gate#key-all
+    def test_a_bare_key_prints_every_gate_in_config_order(self) -> None:
+        expected = "".join(f"{name} {self.tangier('gate', 'key', name)[1]}" for name in self.GATES)
+        self.assertEqual(self.tangier("gate", "key")[:2], (0, expected))
 
     # SPEC: gate#list
     def test_list_prints_each_gate_with_group_members_indented(self) -> None:

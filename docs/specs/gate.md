@@ -104,6 +104,8 @@ scope = ["docs"]
   gates once each, in config order. `gate key` with a group prints `<name> <key>` for each member.
   `gate verified` with a group is verified only when every member has a record at `HEAD`.
   `[selector]`
+- `gate key` with no selector prints `<name> <key>` for every gate, in config order, even when
+  there is one. When any gate fails closed, it prints no keys. `[key-all]`
 
 ## Key
 
@@ -262,7 +264,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | Command | Behaviour |
 | --- | --- |
 | `gate list` | Print every gate and group. |
-| `gate key <selector>` | Print the key. |
+| `gate key [<selector>]` | Print the key. With no selector, print `<name> <key>` for every gate. |
 | `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--dry-run`, `--debug` and `--accept`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
 | `gate push` | Sync gate records with `origin`: pull, merge runs, push. |
