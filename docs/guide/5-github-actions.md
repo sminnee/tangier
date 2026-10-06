@@ -34,10 +34,13 @@ plan:
     - id: changes
       run: uvx "$TANGIER" changemap github-outputs
     - id: gates
-      run: uvx "$TANGIER" gate github-outputs
+      run: uvx "$TANGIER" gate github-outputs --summary
     - id: builds
       run: uvx "$TANGIER" changemap build-matrix
 ```
+
+`--summary` adds a table of every gate's status, and who recorded each verified gate, to the
+run's summary page.
 
 The checkout needs the merge base; see
 [checkout depth](../../skills/tangier/reference/github-actions.md#checkout-depth).
@@ -118,7 +121,7 @@ to every tangier call:
 - id: changes
   run: uvx "$TANGIER" changemap github-outputs $FULL
 - id: gates
-  run: uvx "$TANGIER" gate github-outputs $FULL
+  run: uvx "$TANGIER" gate github-outputs --summary $FULL
 ```
 
 Each gate job passes it on:
