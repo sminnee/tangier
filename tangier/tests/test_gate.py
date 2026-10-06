@@ -1078,9 +1078,9 @@ class TestStore(GateCase):
     def test_github_outputs_reads_origin_once_for_all_gates(self) -> None:
         second = CONFIG + '[gate.lint]\ncmd = "bin/lint"\nscope = "svc"\n'
         _ = _commit(self.repo, "pipeline.toml", second)
-        with mock.patch.object(git, "ls_remote", wraps=git.ls_remote) as ls_remote:
+        with mock.patch.object(git, "fetch", wraps=git.fetch) as fetch:
             _, out, _ = self.tangier("gate", "github-outputs", "--base", self.base)
-        self.assertEqual(ls_remote.call_count, 1)
+        self.assertEqual(fetch.call_count, 1)
         self.assertEqual([line.split("=")[0] for line in out.splitlines()][::4], ["backend-status", "lint-status"])
 
     # SPEC: gate#origin-unreachable

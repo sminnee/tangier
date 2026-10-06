@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from collections.abc import Container
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -229,7 +228,7 @@ def comparator(
     base: str,
     snap: Snapshot,
     snap_key: str,
-    origin: Container[str] | None = None,
+    origin: OriginRecords | None = None,
     *,
     records: bool = True,
 ) -> Comparator:
@@ -281,7 +280,7 @@ def plan(
     name: str,
     base: str,
     snap: Snapshot,
-    origin: Container[str] | None = None,
+    origin: OriginRecords | None = None,
     *,
     force: bool = False,
 ) -> GatePlan:
@@ -375,36 +374,48 @@ def read_record(sha: str) -> dict[str, object]:
     return record
 
 
-def origin_records(pattern: str = f"{REF_PREFIX}/*") -> set[str]:
-    """The gate refs on origin that match `pattern`. Empty, with a warning, when origin cannot be read.
+def _mirror(ref: str) -> str:
+    """Where `fetch_origin` puts origin's `ref`, a ref or a pattern under `REF_PREFIX`."""
+    return ORIGIN_MIRROR_PREFIX + ref[len(REF_PREFIX) :]
 
-    An origin that cannot be reached counts as holding no record: the caller
-    then runs the gate, which is the safe direction.
+
+def fetch_origin(pattern: str = f"{REF_PREFIX}/*") -> None:
+    """Mirror origin's gate refs that match `pattern` under `ORIGIN_MIRROR_PREFIX`.
+
+    The fetch prunes, so a mirrored ref that origin no longer has goes too.
     """
-    try:
-        return {ref for _, ref in git.ls_remote(REMOTE, pattern)}
-    except git.GitError as e:
-        print(f"warning: cannot read gate records from {REMOTE}, so they count as absent: {e}", file=sys.stderr)
-        return set()
+    git.fetch(REMOTE, f"+{pattern}:{_mirror(pattern)}")
 
 
 class OriginRecords:
-    """The gate refs on origin that match `pattern`, read once, at the first lookup.
+    """Origin's gate records that match `pattern`, fetched in one call, at the first lookup.
 
-    A caller that finds every record locally then reads no network.
+    A caller that finds every record locally then reads no network. An origin
+    that cannot be reached counts as holding no record, with a warning: the
+    caller then runs the gate, which is the safe direction.
     """
 
     def __init__(self, pattern: str = f"{REF_PREFIX}/*") -> None:
         self.pattern = pattern
-        self._refs: set[str] | None = None
+        self._blobs: dict[str, str] | None = None
+
+    def _fetched(self) -> dict[str, str]:
+        """Each record's ref on origin, mapped to its blob."""
+        if self._blobs is None:
+            try:
+                fetch_origin(self.pattern)
+                found = git.for_each_ref(_mirror(self.pattern).removesuffix("/*"))
+            except git.GitError as e:
+                print(f"warning: cannot read gate records from {REMOTE}, so they count as absent: {e}", file=sys.stderr)
+                found = []
+            self._blobs = {REF_PREFIX + ref[len(ORIGIN_MIRROR_PREFIX) :]: sha for sha, ref in found}
+        return self._blobs
 
     def __contains__(self, ref: object) -> bool:
-        if self._refs is None:
-            self._refs = origin_records(self.pattern)
-        return ref in self._refs
+        return ref in self._fetched()
 
 
-def verified(name: str, key: str, origin: Container[str] | None = None) -> str | None:
+def verified(name: str, key: str, origin: OriginRecords | None = None) -> str | None:
     """Where a record for this key is: `local`, `origin`, or None.
 
     Local first, since it needs no network. `origin` is shared by a caller
@@ -413,9 +424,7 @@ def verified(name: str, key: str, origin: Container[str] | None = None) -> str |
     ref = ref_for(name, key)
     if git.ref_exists(ref):
         return "local"
-    # Membership, not "any result": `ls-remote` matches a pattern against
-    # trailing path components, and only the exact ref is a record.
-    if ref in (OriginRecords(ref) if origin is None else origin):
+    if ref in (OriginRecords(f"{REF_PREFIX}/{name}/*") if origin is None else origin):
         return "origin"
     return None
 
@@ -448,7 +457,7 @@ def prune(older_than_days: int) -> Pruned:
     The local records go too because `push` sends every local ref: an old one
     left here would put its pruned ref back on origin.
     """
-    git.fetch(REMOTE, f"+{REF_PREFIX}/*:{ORIGIN_MIRROR_PREFIX}/*")
+    fetch_origin()
     cutoff = now() - timedelta(days=older_than_days)
     on_origin = _expired(ORIGIN_MIRROR_PREFIX, cutoff)
     if on_origin:

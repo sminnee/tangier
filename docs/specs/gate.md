@@ -150,7 +150,7 @@ full build covers.
 - The working tree is checked first, which on a clean tree is `HEAD`. With a record there, the gate
   is verified. Otherwise, for a gate with placeholders, the newest commit with a record is the
   comparator. On a dirty tree that can be `HEAD` itself.
-  Records are looked up locally first, then in one `ls-remote` of `origin`. `[comparator-newest-record]`
+  Records are looked up locally first, then in one fetch of `origin`'s gate refs. `[comparator-newest-record]`
 - The walk follows `HEAD`'s first-parent line down to the merge base. A record on a merged branch,
   reachable only through a second parent, is not used. A record on a commit that is not an
   ancestor is never reached. `[comparator-first-parent]`
@@ -215,8 +215,10 @@ A record is a JSON blob. The ref `refs/tangier/gates/<gate>/<key>` points at it.
 - `gate push` pushes every local gate ref to `origin` with a forced refspec. Two people can record
   the same key with different blobs. The last writer wins, and both blobs mean the same pass. With
   no local record, `gate push` does nothing and exits 0. `[push]`
-- A gate is verified when the local ref exists, or when `git ls-remote origin` returns the ref. The
-  local check runs first. `[verified-local-then-origin]`
+- A gate is verified when the local ref exists, or when `origin` holds it. The local check runs
+  first. The first lookup that reaches `origin` fetches its gate refs, in one call, into
+  `refs/tangier/origin-gates/*`, and every later lookup reads that mirror.
+  `[verified-local-then-origin]`
 - An `origin` that cannot be read counts as not verified, with a warning on stderr. The gate then
   runs. `[origin-unreachable]`
 
