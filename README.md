@@ -27,8 +27,8 @@ Without uv, `python3 -m tangier` runs it from a checkout.
 
 Requires Python 3.11+ and **has no dependencies** — deliberately. tangier runs on CI runners that
 have no `setup-python` step and no package installer available, so it must work against the system
-Python. CI asserts both that the dependency list is empty and that every module imports under
-`python -I`.
+Python. The `no-dependencies` gate asserts both that the dependency list is empty and that every
+module imports with no site-packages, under `python3 -I -S`.
 
 ## Quick start
 
@@ -345,7 +345,8 @@ visible from the call site.
 bin/test                  # stdlib unittest, no dependencies; one Python, any tree
 tangier gate run test     # the suite on 3.11, 3.12 and 3.13, one member each; needs uv
 tangier gate run lint     # lint.check and lint.format
-tangier gate push         # before the PR push, so CI reuses both passes
+tangier gate run no-dependencies  # no declared dependency, and no third-party import
+tangier gate push         # before the PR push, so CI reuses the passes
 ```
 
 Releases are a maintainer step, not part of the everyday loop. `bin/release v0.2.0` tags a version

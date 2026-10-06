@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Fail when tangier declares a dependency or imports a third-party package.
+
+tangier runs on bare CI runners with no package installer, so it must run on
+the system Python alone. Run it as `python3 -I -S bin/check-no-dependencies`:
+`-S` drops every site-packages directory and `-I` drops PYTHONPATH, so a
+third-party import fails. The checkout is added back below, as the only place
+tangier may come from.
+"""
+
+import os
+import pkgutil
+import sys
+import tomllib
+from importlib import import_module
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+with open(os.path.join(ROOT, "pyproject.toml"), "rb") as fh:
+    deps = tomllib.load(fh)["project"]["dependencies"]
+if deps:
+    sys.exit(f"tangier must have no dependencies, found: {deps}")
+print("dependencies == []")
+
+sys.path.insert(0, ROOT)
+# Every module, found by walking the package, so a new one is checked without
+# a change here. The tests may import what the shipped code must not, and
+# importing `__main__` would run the CLI.
+modules = [
+    m.name
+    for m in pkgutil.walk_packages([os.path.join(ROOT, "tangier")], prefix="tangier.")
+    if not m.name.startswith("tangier.tests") and m.name != "tangier.__main__"
+]
+for name in modules:
+    import_module(name)
+print(f"{len(modules)} modules import stdlib-only")

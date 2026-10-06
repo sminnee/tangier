@@ -46,39 +46,18 @@ jobs:
         run: python3 -m tangier --help
 
   no-dependencies:
-    # tangier runs on bare runners with no pip install, so the dependency list
-    # must stay empty and no module may import a third-party package.
+    # The check is `[gate.no-dependencies]` in pipeline.toml.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Assert dependencies == []
+      - name: Run no-dependencies
+        # No setup-python: the runner's own Python is the one tangier must work on.
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
-          python - <<'EOF'
-          import tomllib, sys
-          with open("pyproject.toml", "rb") as fh:
-              deps = tomllib.load(fh)["project"]["dependencies"]
-          if deps:
-              sys.exit(f"tangier must have no dependencies, found: {deps}")
-          print("dependencies == []")
-          EOF
-      - name: Import every module in isolated mode
-        # -I ignores site-packages and PYTHONPATH, so any third-party import
-        # fails here. The checkout dir is added back explicitly — that is the
-        # only path tangier itself is allowed to come from.
-        run: |
-          python -I -c "
-          import sys; sys.path.insert(0, '.')
-          import tangier.cli, tangier.config, tangier.globs, tangier.git
-          import tangier.runner, tangier.changemap, tangier.image, tangier.deploy
-          import tangier.github, tangier.tailnet, tangier.gate
-          import tangier.commands.changemap_cmds
-          import tangier.commands.image_cmds, tangier.commands.deploy_cmds
-          import tangier.commands.tailnet_cmds, tangier.commands.gate_cmds
-          print('all modules import stdlib-only')
-          "
+          flags=(--read-only)
+          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          python3 -m tangier gate run no-dependencies "${flags[@]}"
 
   lint:
     runs-on: ubuntu-latest
