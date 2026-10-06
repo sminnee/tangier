@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shlex
 import sys
@@ -149,7 +150,7 @@ def _print_debug(p: gate.GatePlan) -> None:
 
 
 def _ran_on(run: dict[str, object]) -> str:
-    """One line on where and when a run happened: `ci github-actions push refs/heads/main job=e2e <time>`."""
+    """Where, when and for how long a run ran: `ci github-actions push refs/heads/main job=e2e <time> 12.3s`."""
     runner = run.get("runner")
     runner = runner if isinstance(runner, dict) else {}
     if runner.get("kind") == "ci":
@@ -159,7 +160,11 @@ def _ran_on(run: dict[str, object]) -> str:
     else:
         where = "@".join(str(part) for part in (run.get("user"), runner.get("host")) if part)
         parts = [runner.get("kind", "local"), where]
-    return " ".join(str(part) for part in [*parts, run.get("time")] if part)
+    duration = run.get("duration")
+    # Records come from origin, so a hand-edited `duration` must not crash `--debug`.
+    ok = isinstance(duration, (int, float)) and not isinstance(duration, bool) and math.isfinite(duration)
+    took = _took(float(duration)) if ok else None
+    return " ".join(str(part) for part in [*parts, run.get("time"), took] if part)
 
 
 def _run_commands(runner: Runner, spec: GateSpec, commands: list[list[str]]) -> int:

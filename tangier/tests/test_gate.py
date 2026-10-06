@@ -483,6 +483,19 @@ class TestRun(GateCase):
             },
         )
 
+    # SPEC: gate#run-debug
+    def test_debug_shows_no_duration_for_a_run_without_a_readable_one(self) -> None:
+        runs = [
+            {"time": "2026-03-01T00:00:00+00:00", "runner": {"kind": "ci"}},
+            {"time": "2026-03-02T00:00:00+00:00", "runner": {"kind": "ci"}, "duration": float("inf")},
+        ]
+        record = {"format": 2, "gate": "backend", "key": self.key(), "runs": runs}
+        _put_blob(self.repo, f"refs/tangier/gates/backend/{self.key()}", json.dumps(record))
+        code, _, err = self.run_gate("--dry-run", "--debug")
+        self.assertEqual(code, 0)
+        self.assertIn("    ci 2026-03-01T00:00:00+00:00 (accepted)\n", err)
+        self.assertIn("    ci 2026-03-02T00:00:00+00:00 (accepted)\n", err)
+
     # SPEC: gate#record-runs
     def test_a_second_pass_at_the_same_key_adds_a_run(self) -> None:
         ref = f"refs/tangier/gates/backend/{self.key()}"
@@ -1040,16 +1053,24 @@ class TestComparator(GateCase):
 
     # SPEC: gate#run-debug
     def test_debug_marks_each_run_accepted_or_ignored(self) -> None:
-        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
+        with (
+            mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)),
+            _taking(12.34),
+        ):
             self.run_in_ci()
-        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
+        with (
+            mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)),
+            _taking(245.0),
+        ):
             _ = self.run_gate("--force")
         code, out, _ = self.run_gate("--accept", "ci", "--dry-run", "--debug")
         self.assertEqual(code, 0)
         self.assertIn(
-            "    ci github-actions push refs/heads/main job=backend 2026-03-01T00:00:00+00:00 (accepted)\n", out
+            "    ci github-actions push refs/heads/main job=backend 2026-03-01T00:00:00+00:00 12.3s (accepted)\n", out
         )
-        self.assertIn(f"    local dev@example.com@{socket.gethostname()} 2026-03-02T00:00:00+00:00 (ignored)\n", out)
+        self.assertIn(
+            f"    local dev@example.com@{socket.gethostname()} 2026-03-02T00:00:00+00:00 4m05s (ignored)\n", out
+        )
 
     # SPEC: gate#run-force
     def test_force_diffs_from_the_merge_base(self) -> None:
