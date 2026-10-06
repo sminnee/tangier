@@ -14,6 +14,7 @@ import io
 import itertools
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -142,6 +143,16 @@ def _taking(seconds: float) -> Any:
     return mock.patch.object(gate_cmds, "clock", side_effect=itertools.count(100.0, seconds).__next__)
 
 
+def _summary(*rows: str, accept: str = "") -> str:
+    """The `github-outputs --summary` table with these rows, and `accept` as its filter line."""
+    filter_line = f"Only runs accepted by {accept} count.\n\n" if accept else ""
+    return (
+        f"## Gates\n\n{filter_line}| Gate | Status | Recorded by |\n| --- | --- | --- |\n"
+        + "".join(f"{row}\n" for row in rows)
+        + "\nA `verified` or `not-needed` gate's job is skipped.\n"
+    )
+
+
 def _put_blob(root: str, ref: str, content: str, *, remote: str | None = None) -> None:
     """Point `ref` at a blob of `content`, here or, with `remote`, on that remote."""
     blob = subprocess.run(
@@ -158,11 +169,12 @@ class GateCase(unittest.TestCase):
         # The diff from `self.base` to HEAD touches the scope and selects `svc`, so the gate is needed.
         self.base = _git(self.repo, "rev-parse", "HEAD")
         _ = _commit(self.repo, "svc/a.py", "a = 2\n")
-        # A runner's `$GITHUB_OUTPUT` must not receive the test's output lines.
+        # A runner's `$GITHUB_OUTPUT` and `$GITHUB_STEP_SUMMARY` must not receive the test's output.
         patcher = mock.patch.dict(os.environ)
         _ = patcher.start()
         self.addCleanup(patcher.stop)
         _ = os.environ.pop("GITHUB_OUTPUT", None)
+        _ = os.environ.pop("GITHUB_STEP_SUMMARY", None)
         # A run on a CI runner would record a `ci` runner.
         for var in ("CI", "GITHUB_ACTIONS"):
             _ = os.environ.pop(var, None)
@@ -1442,6 +1454,33 @@ class TestGroups(GateCase):
             [outputs["lint-status"], outputs["lint-run"], outputs["lint-verified"]], ["verified", "false", "true"]
         )
 
+    # SPEC: gate#github-outputs-summary
+    def test_summary_has_a_row_per_gate_group_and_member(self) -> None:
+        self.assertEqual(self.run_gates("lint.check"), 0)
+        head = _git(self.repo, "rev-parse", "--short=7", "HEAD")
+        recorded = f"local · `{head}` · {socket.gethostname()}"
+        for base, needed in (("HEAD", "not-needed"), (self.base, "required")):
+            with self.subTest(base):
+                code, out, err = self.tangier("gate", "github-outputs", "--base", base, "--summary")
+                self.assertEqual(code, 0, err)
+                # The table follows the output lines, which are unchanged.
+                self.assertEqual(
+                    out,
+                    self.tangier("gate", "github-outputs", "--base", base)[1]
+                    + _summary(
+                        f"| `backend` | {needed} |  |",
+                        f"| `lint` (group) | {needed} |  |",
+                        f"| `lint.format` | {needed} |  |",
+                        f"| `lint.check` | verified | {recorded} |",
+                    ),
+                )
+
+    # SPEC: gate#github-outputs-summary
+    def test_no_summary_flag_prints_no_table(self) -> None:
+        code, out, err = self.tangier("gate", "github-outputs", "--base", self.base)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(all(re.fullmatch(r"[a-z0-9-]+=\S*", line) for line in out.splitlines()), out)
+
 
 class TestStore(GateCase):
     def setUp(self) -> None:
@@ -1641,6 +1680,49 @@ class TestStore(GateCase):
             _, out, _ = self.tangier("gate", "github-outputs", "--base", self.base)
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual([line.split("=")[0] for line in out.splitlines()][::4], ["backend-status", "lint-status"])
+
+    # SPEC: gate#github-outputs-summary
+    def test_summary_names_a_ci_run_and_the_accept_filter_in_the_step_summary(self) -> None:
+        with mock.patch.dict(os.environ, GITHUB_PUSH):
+            _ = self.record_and_push(datetime(2026, 3, 1, tzinfo=UTC))
+        head = _git(self.repo, "rev-parse", "--short=7", "HEAD")
+        path = os.path.join(self.clone(), "summary.md")
+        args = ("--summary", "--accept", "local", "--accept", "ci,event=push")
+        with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": path}):
+            code, out, err = self.tangier("gate", "github-outputs", "--base", self.base, *args, cwd=self.clone())
+        self.assertEqual(code, 0, err)
+        # Only the output lines reach stdout.
+        self.assertEqual(out, self.tangier("gate", "github-outputs", "--base", self.base, cwd=self.clone())[1])
+        with open(path) as fh:
+            self.assertEqual(
+                fh.read(),
+                _summary(
+                    f"| `backend` | verified | ci · `{head}` · [CI / backend](https://github.com/org/repo/actions/runs/123) |",
+                    accept="`--accept local` or `--accept ci,event=push`",
+                ),
+            )
+
+    # SPEC: gate#github-outputs-summary
+    def test_summary_names_the_newest_run_that_accept_takes(self) -> None:
+        with mock.patch.dict(os.environ, GITHUB_PUSH):
+            _ = self.record_and_push(datetime(2026, 3, 1, tzinfo=UTC))
+        # `--full` reads no record, so the newer local run joins the CI one.
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
+            self.assertEqual(self.tangier("gate", "run", "backend", "--full")[0], 0)
+        head = _git(self.repo, "rev-parse", "--short=7", "HEAD")
+        ci = f"ci · `{head}` · [CI / backend](https://github.com/org/repo/actions/runs/123)"
+        local = f"local · `{head}` · {socket.gethostname()}"
+        for accept, recorded in (((), local), (("--accept", "ci"), ci)):
+            with self.subTest(accept):
+                _, out, _ = self.tangier("gate", "github-outputs", "--base", self.base, "--summary", *accept)
+                self.assertIn(f"| `backend` | verified | {recorded} |\n", out)
+
+    # SPEC: gate#github-outputs-summary
+    def test_summary_leaves_out_what_a_legacy_record_lacks(self) -> None:
+        legacy = {"gate": "backend", "key": self.key(), "head": "abc", "time": "2026-03-01T00:00:00+00:00"}
+        _put_blob(self.repo, f"refs/tangier/gates/backend/{self.key()}", json.dumps(legacy))
+        _, out, _ = self.tangier("gate", "github-outputs", "--base", self.base, "--summary")
+        self.assertIn("| `backend` | verified | local · `abc` |\n", out)
 
     # SPEC: gate#origin-unreachable
     def test_an_unreachable_origin_is_not_verified(self) -> None:

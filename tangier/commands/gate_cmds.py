@@ -16,7 +16,7 @@ import tangier
 from tangier import gate, git, jobs, ranon
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
-from tangier.github import emit_outputs
+from tangier.github import emit_outputs, write_summary
 from tangier.runner import Runner, Subprocess
 
 # The run clock. Tests patch this.
@@ -643,7 +643,8 @@ def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
     """Emit `<gate>-status`, `-run`, `-verified` and `-key` for every gate, then the first three for every group.
 
     `-run` is `true` when the status is `required`, for a plain `if:`. A `.`
-    in a name becomes `-`.
+    in a name becomes `-`. `--summary` also writes a gate table to
+    `$GITHUB_STEP_SUMMARY`, or to stdout when that is unset.
     """
     # One read of origin for all gates, not one per gate. `--full` reads none.
     origin = gate.OriginRecords()
@@ -659,7 +660,54 @@ def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
     for group, members in sorted(gate_groups(config).items()):
         _add_status(pairs, gate_output_name(group), _group_status([statuses[m].status for m in members]))
     emit_outputs(pairs)
+    if args.summary:
+        table = _summary_table(config, statuses, args.accept)
+        if not write_summary(table):
+            print(table, end="")
     return 0
+
+
+def _summary_table(config: Config, statuses: dict[str, gate.GatePlan], accept: list[gate.Accept]) -> str:
+    """A markdown table of every gate in config order, each group's row before its members'."""
+    lines = ["## Gates", ""]
+    if accept:
+        lines += [f"Only runs accepted by {' or '.join(f'`--accept {a}`' for a in accept)} count.", ""]
+    lines += ["| Gate | Status | Recorded by |", "| --- | --- | --- |"]
+    groups = gate_groups(config)
+    for name, spec in config.gates.items():
+        if spec.group and groups[spec.group][0] == name:
+            status = _group_status([statuses[m].status for m in groups[spec.group]])
+            lines.append(f"| `{spec.group}` (group) | {status} |  |")
+        lines.append(f"| `{name}` | {statuses[name].status} | {_recorded_by(statuses[name])} |")
+    lines += ["", "A `verified` or `not-needed` gate's job is skipped."]
+    return "\n".join(lines) + "\n"
+
+
+def _recorded_by(p: gate.GatePlan) -> str:
+    """For a verified gate, the newest accepted run at its key: `ci · `abc1234` · [CI / job](url)`."""
+    if p.status != "verified":
+        return ""
+    # The first step is the snapshot, whose record made the gate verified.
+    runs = [run for run, ok in p.trail[0].runs if ok]
+    if not runs:
+        return ""
+    run = max(runs, key=lambda r: str(r.get("time") or ""))
+    runner = run.get("runner")
+    runner = runner if isinstance(runner, dict) else {}
+    head = run.get("head")
+    parts = [str(runner.get("kind") or "local")]
+    if isinstance(head, str) and head:
+        parts.append(f"`{head[:7]}`")
+    if runner.get("kind") == "ci":
+        where = " / ".join(str(runner[name]) for name in ("workflow", "job") if runner.get(name))
+        url = runner.get("url")
+        if where and url:
+            where = f"[{where}]({url})"
+    else:
+        where = str(runner.get("host") or "")
+    if where:
+        parts.append(where)
+    return " · ".join(parts)
 
 
 def _add_status(pairs: dict[str, str], prefix: str, status: str) -> None:
@@ -819,4 +867,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     add_diff_args(op)
     _add_accept(op)
     add_full(op, "mark every gate and group required, as if every tag changed")
+    _ = op.add_argument(
+        "--summary", action="store_true", help="also write a gate table to $GITHUB_STEP_SUMMARY (or stdout)"
+    )
     op.set_defaults(func=cmd_github_outputs)
