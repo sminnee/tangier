@@ -163,6 +163,22 @@ full build covers.
 - The walk follows `HEAD`'s first-parent line down to the merge base. A record on a merged branch,
   reachable only through a second parent, is not used. A record on a commit that is not an
   ancestor is never reached. `[comparator-first-parent]`
+- One merge is the exception: a pull request's merge commit. CI checks out a pull request as a
+  merge commit whose first parent is the `main` tip, and with `--base HEAD^1` that parent is the
+  merge base. So when `HEAD` is a merge commit whose first parent is the merge base, the walk
+  goes on to the second parent, the PR head, and down its first-parent line. It stops where the
+  branch left `main`. This step comes after the first-parent line and before the fall-back.
+  `[comparator-pr-head]`
+  - The diff stays two-dot, from the record to the keyed tree. When `main` moved, the diff holds
+    `main`'s changes since the branch left it, as well as the branch's own. They were never tested
+    together, so they run.
+  - The rule reads the commit graph only, so a local `git merge --no-ff` onto `main` has the same
+    shape and is walked the same way.
+  - In a shallow clone, the walk stops at the shallow boundary. With no record above it, the
+    gate diffs from the merge base. When `main` has moved further than the clone's depth, the
+    walk can pass the fork point onto older `main` commits. Every commit it reaches is an ancestor
+    of `HEAD`, so a longer or shorter walk costs extra runs, never a wrong skip.
+  - `--debug` labels each step on this line `<sha> (PR head)`.
 - With no record, the comparator is the merge base, as a run with no records would diff.
   `[comparator-falls-back-to-merge-base]`
 - A record with no run that `--accept` takes is a miss, as if it had never been written. The walk

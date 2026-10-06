@@ -282,10 +282,11 @@ def comparator(
     The snapshot comes first. A gate with no placeholder stops there: an older
     record cannot narrow its commands, so it then diffs from the merge base,
     and needs none when `base` cannot be read. A gate with placeholders walks
-    the first-parent line from `snap.commit` down to the merge base, and falls
-    back to the merge base with no hit. A commit whose key is the snapshot's
-    was already looked up, so the walk does not look it up again: on a clean
-    tree that is HEAD.
+    the first-parent line from `snap.commit` down to the merge base. When
+    `snap.commit` is a pull request's merge commit, it then walks the PR head
+    line (see `_pr_head_line`). It falls back to the merge base with no hit. A
+    commit whose key is the snapshot's was already looked up, so the walk does
+    not look it up again: on a clean tree that is HEAD.
     """
     spec = spec_for(cfg, name)
     found = OriginRecords(f"{REF_PREFIX}/{name}/*") if origin is None else origin
@@ -305,18 +306,35 @@ def comparator(
             ) from e
         return Comparator(None, None, f"no merge base with {base}: {e}", trail)
     if has_placeholder(spec):
-        for commit in [*git.rev_list_first_parent(snap.commit, mb), mb]:
+        walk = [(commit, commit[:7]) for commit in git.rev_list_first_parent(snap.commit, mb)]
+        walk += [(commit, f"{commit[:7]} (PR head)") for commit in _pr_head_line(snap.commit, mb)]
+        for commit, label in [*walk, (mb, mb[:7])]:
             try:
                 k = key(cfg, name, commit)
             except GateError:
                 # Only the snapshot must have a key. An older commit with none holds no record.
-                trail.append(Step(commit, commit[:7], None, None))
+                trail.append(Step(commit, label, None, None))
                 continue
             where, runs = (None, []) if k == snap_key else lookup(name, k, found, accept)
-            trail.append(Step(commit, commit[:7], k, where, runs))
+            trail.append(Step(commit, label, k, where, runs))
             if where:
                 return Comparator(commit, where, f"record at {commit[:7]}, {where}", trail)
     return Comparator(mb, None, f"merge base with {base}", trail)
+
+
+def _pr_head_line(commit: str, mb: str) -> list[str]:
+    """The PR head's first-parent line down to `mb`, newest first, when `commit` is a merge whose first parent is `mb`.
+
+    See `docs/specs/gate.md#comparator-pr-head`. The spec requires the walk
+    never to raise, so a git error ends it with no commits.
+    """
+    try:
+        parents = git.parents(commit)
+        if len(parents) != 2 or parents[0] != mb:
+            return []
+        return git.rev_list_first_parent(parents[1], mb)
+    except git.GitError:
+        return []
 
 
 def plan(

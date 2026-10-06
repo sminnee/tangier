@@ -23,7 +23,9 @@ scope = ["smartypants", "test-backend-inputs"]
 - **Record.** A record is a git ref, `refs/tangier/gates/<gate>/<key>`. `gate run` publishes
   the records it writes to `origin`, and CI reads them with `contents: read`.
 - **Comparator.** A run diffs from the newest commit on the branch that has a record, or from the
-  merge base. On a long branch, each run then re-tests only what changed since the last pass.
+  merge base. On a long branch, each run then re-tests only what changed since the last pass. In
+  CI, a pull request's merge commit walks on down the PR head, so a record pushed from the branch
+  counts.
 - **Need.** A gate whose diff touches none of its scope, or whose placeholder lists are all empty,
   is `not-needed` and does no work.
 
