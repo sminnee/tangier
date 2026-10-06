@@ -4,11 +4,12 @@ Every external command tangier runs goes through a Runner, so tests can assert
 call sequences without touching a registry or a cluster. This is the only module
 permitted to import `subprocess` or `time`.
 
-Four methods, each naming a capability the ported shell actually uses and none
+Five methods, each naming a capability tangier actually uses and none
 expressible by the others:
 
   run    one command
   pipe   a chain of commands, shell-pipeline semantics
+  spawn  a detached command that outlives tangier, its output in a log file
   sleep  the poll loop's clock — faked in tests so a 600s timeout costs microseconds
   which  turn a missing binary into a clean error instead of an OSError
 """
@@ -50,6 +51,10 @@ class Runner(Protocol):
     def pipe(
         self, stages: list[list[str]], *, input: str | None = None, env: dict[str, str] | None = None
     ) -> Result: ...
+
+    def spawn(
+        self, argv: list[str], *, log: str, env: dict[str, str] | None = None, pass_fds: tuple[int, ...] = ()
+    ) -> int: ...
 
     def sleep(self, seconds: float) -> None: ...
 
@@ -143,6 +148,27 @@ class Subprocess:
             _ = p.wait()
         return Result(procs[-1].returncode, stdout or "", stderr or "")
 
+    def spawn(
+        self, argv: list[str], *, log: str, env: dict[str, str] | None = None, pass_fds: tuple[int, ...] = ()
+    ) -> int:
+        """Start `argv` in its own session, appending stdout and stderr to `log`. Returns its pid.
+
+        The new session keeps a Ctrl-C at the terminal, or a killed parent, from
+        reaching it. Its pid is its process group, so one `killpg` stops it and
+        everything it started. `pass_fds` stay open in it.
+        """
+        with open(log, "ab") as out:
+            proc = subprocess.Popen(
+                argv,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+                pass_fds=pass_fds,
+            )
+        return proc.pid
+
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
 
@@ -178,6 +204,13 @@ class DryRun:
             self.calls.append(list(stage))
         print("would run: " + " | ".join(" ".join(s) for s in stages), file=sys.stderr)
         return Result(0)
+
+    def spawn(
+        self, argv: list[str], *, log: str, env: dict[str, str] | None = None, pass_fds: tuple[int, ...] = ()
+    ) -> int:
+        self.calls.append(list(argv))
+        print("would spawn: " + " ".join(argv), file=sys.stderr)
+        return 0
 
     def sleep(self, seconds: float) -> None:
         return None

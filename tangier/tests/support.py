@@ -143,6 +143,7 @@ class RecordingRunner:
         self.stdins: list[str | None] = []
         self.envs: list[dict[str, str] | None] = []
         self.slept: list[float] = []
+        self.spawned: list[list[str]] = []
         self.responses = dict(responses or {})
         self.missing: set[str] = set()
 
@@ -181,6 +182,13 @@ class RecordingRunner:
             self.calls.append(list(stage))
         self.stdins.append(input)
         return self._lookup(stages[-1] if stages else [])
+
+    def spawn(
+        self, argv: list[str], *, log: str, env: dict[str, str] | None = None, pass_fds: tuple[int, ...] = ()
+    ) -> int:
+        """Record the call and start nothing. Nothing holds the job's `alive` lock, so the job reads as died."""
+        self.spawned.append(list(argv))
+        return 0
 
     def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
