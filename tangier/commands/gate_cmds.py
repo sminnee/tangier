@@ -10,6 +10,7 @@ import sys
 import time
 
 from tangier import gate, ranon
+from tangier.commands.args import add_diff_args
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs
 from tangier.runner import Runner, Subprocess
@@ -283,12 +284,6 @@ def _add_accept(p: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_diff_args(p: argparse.ArgumentParser, *, head: bool = True) -> None:
-    _ = p.add_argument("--base", default="origin/main")
-    if head:
-        _ = p.add_argument("--head", default="HEAD")
-
-
 def _add_head_arg(p: argparse.ArgumentParser) -> None:
     _ = p.add_argument("--head", default=None, help="key this commit, not the working tree")
 
@@ -310,7 +305,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _ = rp.add_argument("--all", action="store_true", help="run every configured gate, in config order")
     # No `--head`: the commands run against the checked-out tree, so the only
     # content a record can describe is the working tree.
-    _add_diff_args(rp, head=False)
+    add_diff_args(rp, head=False)
     _ = rp.add_argument(
         "--read-only",
         action="store_true",
@@ -340,7 +335,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     pp.set_defaults(func=cmd_push)
 
     op = gsub.add_parser("github-outputs", help="emit <gate>-status, -run, -verified and -key as $GITHUB_OUTPUT lines")
-    _add_diff_args(op)
+    add_diff_args(op)
     _add_accept(op)
     op.set_defaults(func=cmd_github_outputs)
 
