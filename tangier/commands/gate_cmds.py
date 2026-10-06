@@ -175,8 +175,14 @@ def cmd_verified(config: Config, args: argparse.Namespace) -> int:
 
 def cmd_push(config: Config, args: argparse.Namespace) -> int:
     del config, args
-    count = gate.push()
-    print(f"pushed {count} gate record(s) to {gate.REMOTE}" if count else "no gate records to push")
+    synced = gate.sync()
+    if synced.pushed or synced.pulled or synced.merged:
+        print(
+            f"synced gate records with {gate.REMOTE}: "
+            f"pushed {synced.pushed}, pulled {synced.pulled}, merged {synced.merged}"
+        )
+    else:
+        print(f"gate records already in sync with {gate.REMOTE}")
     return 0
 
 
@@ -310,7 +316,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _add_accept(vp)
     vp.set_defaults(func=cmd_verified)
 
-    pp = gsub.add_parser("push", help="push local gate records to origin")
+    pp = gsub.add_parser("push", help="sync gate records with origin: pull, merge runs, push")
     pp.set_defaults(func=cmd_push)
 
     op = gsub.add_parser("github-outputs", help="emit <gate>-status, -run, -verified and -key as $GITHUB_OUTPUT lines")
