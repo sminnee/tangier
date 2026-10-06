@@ -1,35 +1,91 @@
 name: Release
 
-# Publish to PyPI when an exact version tag is pushed. The `v0`
-# alias does not match `v*.*.*`, so moving it publishes nothing.
-#
-# Trusted publishing, so the repo holds no PyPI token. CONTRIBUTING.md has the setup.
+# Release when CI passes on a push to main and bin/release-plan says the version
+# is new. CONTRIBUTING.md has the process, re-runs, and the trusted publishing setup.
+# This must stay the top-level workflow: the publisher is registered to release.yaml.
 
 on:
-  push:
-    tags: ["v*.*.*"]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
 
 jobs:
-  publish:
+  plan:
+    # event == 'push': a fork PR from a branch named main also matches branches: [main].
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      # The workflow's own ref, not head_sha: bin/release-plan comes from the
+      # same commit as this workflow, and judges head_sha through git show.
+      - uses: actions/checkout@v4
+        with:
+          # Every tag, to compare against the highest released version.
+          fetch-depth: 0
+      - id: plan
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: bin/release-plan "$SHA" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    # Job-level, so only real releases queue. A queued release may be replaced by
+    # a newer one, which re-plans; a running one is never cancelled mid-publish.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+        with:
+          fetch-depth: 0
+      # Planned again: "Re-run failed jobs" reuses the plan job's old outputs, and
+      # a release may have queued behind a newer one. Either could move v0 backwards.
+      - id: recheck
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: bin/release-plan "$SHA" >> "$GITHUB_OUTPUT"
+      - if: steps.recheck.outputs.release == 'true'
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: git checkout --detach "$SHA"
+      - if: steps.recheck.outputs.release == 'true'
+        uses: astral-sh/setup-uv@v6
         with:
           enable-cache: false
-      - name: Check the tag matches the package version
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          if [ "$TAG" != "v$version" ]; then
-            echo "::error::tag $TAG does not match pyproject.toml version $version"
-            exit 1
-          fi
-      - run: uv build
+      - if: steps.recheck.outputs.release == 'true'
+        run: uv build
       # Pinned by commit: this job can publish as tangier, so a moved tag must not change what runs.
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+      - if: steps.recheck.outputs.release == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          # A re-run after a failed tag push finds the version already on PyPI.
+          skip-existing: true
+      # Tagged after publishing, so the alias never names a version PyPI lacks.
+      - name: Tag the version and move the major alias
+        if: steps.recheck.outputs.release == 'true'
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          VERSION: ${{ steps.recheck.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          tag="v$VERSION"
+          alias="${tag%%.*}"   # v0.2.2 -> v0
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            git tag -a "$tag" -m "Release $tag" "$SHA"
+          fi
+          git tag -f -a "$alias" -m "Alias for $tag" "$SHA"
+          git push origin "refs/tags/$tag"
+          git push -f origin "refs/tags/$alias"
