@@ -136,10 +136,29 @@ empty and a gate with placeholders tests nothing.
 A green nightly triggers the prod deploy, from a second workflow on `workflow_run`. See the
 [canonical workflow](../../skills/tangier/reference/github-actions.md#the-prod-deploy-after-a-green-nightly).
 
+## Recording passes from CI
+
+A `gate run` without `--read-only` records a pass and publishes it to `origin` in the same step.
+No push step is needed.
+
+- Give the job `permissions: contents: write`, and keep the credentials `actions/checkout` leaves
+  behind. The publish pushes with them. A `--read-only` job needs `contents: read` only.
+- A read-only token still lets the run pass. A pull request from a fork has one. The publish then
+  warns, the record stays in the runner, and the gate runs again next time. Never switch to
+  `pull_request_target` to get a write token: it runs the fork's code with that token.
+- Each job publishes the records it wrote. A later job has nothing to send, because the records stay
+  in the runner that wrote them.
+- Jobs that record the same content at the same time are safe. Each push is leased, and a rejected
+  one merges `origin`'s runs and tries again.
+- A push to `refs/tangier/` triggers no workflow.
+- Records age out on the next `gate sync`, wherever it runs. When nobody syncs by hand, a scheduled
+  job keeps them pruned. See the
+  [canonical workflow](../../skills/tangier/reference/github-actions.md#syncing-records).
+
 ## CI-only gates
 
 A gate that needs CI's services or secrets is CI-only. Its job runs without `--read-only`, accepts
-only CI runs, and pushes the record. The job is in the
+only CI runs, and [publishes the record](#recording-passes-from-ci). The job is in the
 [canonical workflow](../../skills/tangier/reference/github-actions.md#a-ci-only-gate). A developer
 checks CI's coverage with `tangier gate run e2e --accept ci --dry-run`.
 

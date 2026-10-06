@@ -135,13 +135,12 @@ member. An unknown selector exits 2.
 
 | Command | Flags | Behaviour | Exit |
 | --- | --- | --- | --- |
-| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept` | Run each gate on the working tree, unless it is verified or not needed. | the first non-zero code |
+| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept` | Run each gate on the working tree, unless it is verified or not needed. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. | the first non-zero code |
 | `gate list` | | Print every gate in config order, with a group's members indented under a `<group> (group)` line. | 0 |
 | `gate key [<selector>]` | `--head` | Print the key. A group, or no selector, prints `<name> <key>` per gate, and nothing when any gate fails closed. | 0, or 2 when a scope entry matches no file |
 | `gate verified <selector>` | `--head`, `--accept` | Print `verified` or `unverified`. A group needs every member. | 0 verified, 1 unverified |
-| `gate push` | | Sync records with `origin`: fetch, merge runs, push. Makes 3 attempts against a racing `origin`. | 0, or 2 |
+| `gate sync` | | Sync records with `origin`: pull, merge runs, push, and delete records whose newest run is older than `[gate] prune-after-days`, locally and on `origin`. Makes 3 attempts against a racing `origin`. | 0, or 2 |
 | `gate github-outputs` | `--base`, `--head`, `--accept`, `--full` | Each gate's and group's status. | 0 |
-| `gate prune` | `--older-than DAYS` | Delete records whose newest run is older than `DAYS`, on `origin` and locally. `DAYS` is 1 or more. | 0 |
 
 ### `gate run` flags
 

@@ -44,11 +44,10 @@ scope = ["smartypants", "astronort-lector", "test-backend-inputs"]
 
 A change to `lib/smartycore` selects every service that depends on it, runs their unit tests, and
 rebuilds their images. A change to `service/lector` runs only lector's tests and builds only
-lector's image. A pre-push hook runs the gates:
+lector's image. A pre-push hook runs the gates, and `gate run` publishes each pass to `origin`:
 
 ```sh
 tangier gate run --all
-tangier gate push
 ```
 
 One CI workflow handles every event: a pull request runs what its diff selects, a push to `main`
