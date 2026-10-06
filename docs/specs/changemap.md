@@ -143,6 +143,12 @@ expanded, shas, items, touched, file-sets, ignored).
   `build-packages-empty` exists because an empty `strategy.matrix` is a hard error in GitHub
   Actions rather than a skip. `[build-matrix-empty-guard]`
 - `--no-expand` returns the un-expanded matched set (debug). `[no-expand-debug-flag]`
+- `--full` on `github-outputs`, `build-matrix`, `items` and `explain` answers as if every tag
+  changed, for a nightly or any other "run everything" build. Every tag is matched and expanded,
+  every items list is complete, every `touched` tag is `true`, and each file-set holds every
+  tracked file at `--head` that its globs match. `build-matrix --full` gives every bucket with an
+  `[image.*]` table. It reads no diff, so `--base` is ignored and a shallow checkout works.
+  `[full-answer-set]`
 
 A bad ref yields an empty diff rather than an error: `git diff` runs with `check=False`, so a
 shallow clone missing `origin/main` degrades to "nothing changed" instead of failing CI.

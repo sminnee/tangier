@@ -285,3 +285,26 @@ def answer_set_for_files(
         file_sets=file_sets,
         ignored=ignored,
     )
+
+
+def full_answer_set(cfg: Config, head: str, *, compute_shas: bool = True) -> AnswerSet:
+    """The answer set as if every tag changed: `--full`. Reads no diff, so it needs no merge base.
+
+    Each file-set holds every tracked file at `head` that its globs match. See
+    `[run-full]` in `docs/specs/gate.md`.
+    """
+    # `ls_tree` reads a bad ref as an empty tree, which would empty every file-set without a word.
+    _ = git.rev_parse_tree(head)
+    every_tag = set(cfg.paths)
+    tracked = [git.ls_tree_path(line) for line in git.ls_tree(head, [])]
+    return AnswerSet(
+        matched=every_tag,
+        expanded=every_tag,
+        shas={bucket: sha_for_bucket(cfg, bucket, head) for bucket in sorted(buckets(cfg))} if compute_shas else {},
+        items={name: project_items(cfg, name, every_tag) for name in cfg.items},
+        touched={tag: True for tag in cfg.touched},
+        file_sets={
+            group: [f for f in tracked if globs.matches(f, group_globs)] for group, group_globs in cfg.file_sets.items()
+        },
+        ignored=[],
+    )

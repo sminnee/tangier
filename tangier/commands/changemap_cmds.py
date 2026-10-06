@@ -13,9 +13,11 @@ import sys
 
 from tangier import git
 from tangier.changemap import (
+    AnswerSet,
     buckets,
     compute_answer_set,
     expand_with_dependents,
+    full_answer_set,
     match_files_to_tags,
     project_items,
     provenance,
@@ -23,6 +25,13 @@ from tangier.changemap import (
 )
 from tangier.config import Config, version_var_for
 from tangier.github import emit_outputs
+
+
+def _answers(config: Config, args: argparse.Namespace, *, compute_shas: bool = True) -> AnswerSet:
+    """The answer set for the diff, or with `--full` the complete one, as if every tag changed."""
+    if args.full:
+        return full_answer_set(config, args.head, compute_shas=compute_shas)
+    return compute_answer_set(config, args.base, args.head, expand=not args.no_expand, compute_shas=compute_shas)
 
 
 def cmd_list(config: Config, args: argparse.Namespace) -> int:
@@ -69,7 +78,7 @@ def cmd_items(config: Config, args: argparse.Namespace) -> int:
         # Unknown items name -> empty output, exit 0. A typo in a runner script
         # yields "nothing changed" rather than a failure; preserved deliberately.
         return 0
-    answers = compute_answer_set(config, args.base, args.head, expand=not args.no_expand, compute_shas=False)
+    answers = _answers(config, args, compute_shas=False)
     for path in answers.items.get(args.name, []):
         print(path)
     return 0
@@ -110,6 +119,16 @@ def cmd_explain(config: Config, args: argparse.Namespace) -> int:
     if files_by_group is None:
         files_by_group = parse_files_args(getattr(args, "files", None))
 
+    if args.full:
+        # Every tag, and each file-set's complete list unless `--files` names one.
+        answers = full_answer_set(config, args.head, compute_shas=False)
+        files_by_group = {group: ",".join(f) for group, f in answers.file_sets.items()} | files_by_group
+        print("## Modified tags")
+        print("")
+        print("(every tag — --full)")
+        _print_invocations(config, answers.expanded, files_by_group)
+        return 0
+
     files = git.changed_files(args.base, args.head)
     per_tag, _ignored = match_files_to_tags(config, files)
     matched_raw = set(per_tag.keys())
@@ -140,6 +159,11 @@ def cmd_explain(config: Config, args: argparse.Namespace) -> int:
                 sources = ", ".join(sorted(prov.get(tag, set())))
                 print(f"{tag} (depends on: {sources})")
 
+    _print_invocations(config, expanded, files_by_group)
+    return 0
+
+
+def _print_invocations(config: Config, expanded: set[str], files_by_group: dict[str, str]) -> None:
     print("")
     print("## Resulting CI invocations")
     print("")
@@ -161,7 +185,6 @@ def cmd_explain(config: Config, args: argparse.Namespace) -> int:
             print(line)
         else:
             print(f"# {name}: {csv}")
-    return 0
 
 
 def cmd_build_matrix(config: Config, args: argparse.Namespace) -> int:
@@ -183,7 +206,7 @@ def cmd_build_matrix(config: Config, args: argparse.Namespace) -> int:
     to get right than `fromJSON(...)[0]`.
     """
     # No hashes: the matrix names buckets, and each leg computes its own tag.
-    answers = compute_answer_set(config, args.base, args.head, expand=not args.no_expand, compute_shas=False)
+    answers = _answers(config, args, compute_shas=False)
     touched = {config.sha_bucket[t] for t in answers.expanded if t in config.sha_bucket}
     packages = sorted(touched & set(config.images))
     emit_outputs(
@@ -203,7 +226,7 @@ def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
     and one line per file-set group whose name IS the output name (so adding an
     `[e2e-files]` table needs no code change here).
     """
-    answers = compute_answer_set(config, args.base, args.head, expand=not args.no_expand)
+    answers = _answers(config, args)
     # Insertion order is the emitted order, and `bin/parity-check` diffs it
     # against the pre-extraction script — so the four groups stay in this order.
     pairs: dict[str, str] = {}

@@ -334,6 +334,52 @@ class TestAnswerSet(unittest.TestCase):
         self.assertFalse(hasattr(answers, "eval_files"))
 
 
+class TestFullAnswerSet(unittest.TestCase):
+    """`--full`: the answer set as if every tag changed, read from a real tree."""
+
+    def setUp(self) -> None:
+        self.cfg = make_config(
+            lib={"paths": "lib/**", "unittest_items": "lib"},
+            svc={"paths": "svc/**", "depends": "lib", "unittest_items": "svc", "touched": True, "sha": True},
+            web={"paths": "web/**", "e2e_items": "e2e/web", "touched": True},
+            **{"unittest-files": {"files": True, "paths": ["**/*_test.py"]}},
+        )
+        self.root = make_git_repo(
+            self,
+            {
+                "lib/util.py": "u = 1\n",
+                "lib/util_test.py": "t = 1\n",
+                "svc/main_test.py": "t = 1\n",
+                "web/app.ts": "x\n",
+                "docs/notes_test.py": "outside every tag\n",
+            },
+        )
+
+    # SPEC: changemap#full-answer-set
+    def test_every_tag_is_selected_and_every_list_is_complete(self) -> None:
+        with contextlib.chdir(self.root):
+            answers = changemap.full_answer_set(self.cfg, "HEAD")
+            svc_sha = changemap.sha_for_bucket(self.cfg, "svc", "HEAD")
+        self.assertEqual(
+            answers,
+            changemap.AnswerSet(
+                matched={"lib", "svc", "web"},
+                expanded={"lib", "svc", "web"},
+                shas={"svc": svc_sha},
+                items={"unittest": ["lib", "svc"], "e2e": ["e2e/web"]},
+                touched={"svc": True, "web": True},
+                # A file outside every tag still counts: a file-set selects by its own globs.
+                file_sets={"unittest-files": ["docs/notes_test.py", "lib/util_test.py", "svc/main_test.py"]},
+                ignored=[],
+            ),
+        )
+
+    # SPEC: changemap#full-answer-set
+    def test_a_head_that_names_no_commit_is_an_error(self) -> None:
+        with contextlib.chdir(self.root), self.assertRaises(git.GitError):
+            _ = changemap.full_answer_set(self.cfg, "no-such-ref")
+
+
 class TestSyntheticConfig(unittest.TestCase):
     """The four regressions a real monorepo's config records as having broken CI.
 

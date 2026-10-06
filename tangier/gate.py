@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from tangier import __version__, git
-from tangier.changemap import AnswerSet, answer_set_for_files, scope_lines, scope_touched
+from tangier.changemap import AnswerSet, answer_set_for_files, full_answer_set, scope_lines, scope_touched
 from tangier.config import (
     ITEMS_PLACEHOLDER_SUFFIX,
     Config,
@@ -275,7 +275,6 @@ def comparator(
     snap_key: str,
     origin: OriginRecords | None = None,
     *,
-    records: bool = True,
     accept: Sequence[Accept] = (),
 ) -> Comparator:
     """The newest content, from the snapshot back to its merge base with `base`, that has a record.
@@ -286,17 +285,16 @@ def comparator(
     the first-parent line from `snap.commit` down to the merge base, and falls
     back to the merge base with no hit. A commit whose key is the snapshot's
     was already looked up, so the walk does not look it up again: on a clean
-    tree that is HEAD. `records=False` reads no record and gives the merge base.
+    tree that is HEAD.
     """
     spec = spec_for(cfg, name)
     found = OriginRecords(f"{REF_PREFIX}/{name}/*") if origin is None else origin
     trail: list[Step] = []
 
-    if records:
-        where, runs = lookup(name, snap_key, found, accept)
-        trail.append(Step(snap.commit, snap.label, snap_key, where, runs))
-        if where:
-            return Comparator(snap.commit, where, f"record at {snap.label}, {where}", trail, verified=True)
+    where, runs = lookup(name, snap_key, found, accept)
+    trail.append(Step(snap.commit, snap.label, snap_key, where, runs))
+    if where:
+        return Comparator(snap.commit, where, f"record at {snap.label}, {where}", trail, verified=True)
     try:
         mb = git.merge_base(base, snap.commit)
     except git.GitError as e:
@@ -306,7 +304,7 @@ def comparator(
                 f"resolved. Fetch `{base}` with enough history to reach the merge base, or pass `--base` ({e})"
             ) from e
         return Comparator(None, None, f"no merge base with {base}: {e}", trail)
-    if records and has_placeholder(spec):
+    if has_placeholder(spec):
         for commit in [*git.rev_list_first_parent(snap.commit, mb), mb]:
             try:
                 k = key(cfg, name, commit)
@@ -328,7 +326,7 @@ def plan(
     snap: Snapshot,
     origin: OriginRecords | None = None,
     *,
-    force: bool = False,
+    full: bool = False,
     accept: Sequence[Accept] = (),
 ) -> GatePlan:
     """What a run of the gate on the snapshot does. See `docs/specs/gate.md#status-values`.
@@ -336,12 +334,28 @@ def plan(
     `verified` when the snapshot has a record. Otherwise the diff from the
     comparator to the snapshot's tree decides: `not-needed` when no key input
     changed or every placeholder list is empty, and `required` otherwise.
-    `force` reads no record and is always `required`, so it diffs from the
-    merge base.
+    `full` reads no record and no diff, and is always `required`: each list is
+    complete, as if every tag changed. See `[run-full]` in `docs/specs/gate.md`.
     """
     spec = spec_for(cfg, name)
     snap_key = key(cfg, name, snap.tree)
-    comp = comparator(cfg, name, base, snap, snap_key, origin, records=not force, accept=accept)
+    if full:
+        lists = placeholder_lists(spec, full_answer_set(cfg, snap.tree, compute_shas=False))
+        return GatePlan(
+            name=name,
+            status="required",
+            key=snap_key,
+            snapshot=snap,
+            effective_base=None,
+            where=None,
+            how="--full",
+            commands=resolve_commands(spec, lists),
+            reason="--full",
+            trail=[],
+            changed=[],
+            lists=lists,
+        )
+    comp = comparator(cfg, name, base, snap, snap_key, origin, accept=accept)
     changed: list[str] = []
     lists: dict[str, list[str]] = {}
 
@@ -368,8 +382,7 @@ def plan(
     if comp.verified:
         return made("verified", f"{comp.where} record {snap_key}", [])
     if comp.commit is None:
-        if not force:
-            print(f"warning: gate `{name}`: {comp.how}, so it counts as needed", file=sys.stderr)
+        print(f"warning: gate `{name}`: {comp.how}, so it counts as needed", file=sys.stderr)
         return made("required", comp.how, [list(argv) for argv in spec.commands])
 
     # The comparator is an ancestor of `snap.commit`, so this two-dot diff is
@@ -382,8 +395,6 @@ def plan(
         else {}
     )
     commands = resolve_commands(spec, lists)
-    if force:
-        return made("required", "--force", commands)
     if not changed:
         return made("not-needed", f"no key input changed since {comp.how}", commands)
     if lists and not any(lists.values()):

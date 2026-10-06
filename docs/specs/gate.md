@@ -188,7 +188,7 @@ whole rule: there is no separate config.
   the gate is the safe direction. `[need-unreadable-base-runs]`
 
 On a push to `main`, `origin/main` is `HEAD`, so the diff is empty and no gate is needed. A full
-build uses `--force`.
+build uses `--full`.
 
 ## Store
 
@@ -262,10 +262,10 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | Command | Behaviour |
 | --- | --- |
 | `gate key <selector>` | Print the key. |
-| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--force`, `--dry-run`, `--debug` and `--accept`. |
+| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--dry-run`, `--debug` and `--accept`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
 | `gate push` | Sync gate records with `origin`: pull, merge runs, push. |
-| `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept`. |
+| `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept` and `--full`. |
 | `gate prune --older-than <days>` | Delete old gate records, on `origin` and in this clone. |
 
 `gate run` has no `--head`. The commands test the checked-out tree, so the working tree is the only
@@ -324,17 +324,22 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   `HEAD` over the same content is fine, because the key reads content only. `[run-dirty-after]`
 - `--read-only` writes no record, so the after-run check does not apply: a pass exits 0 whatever
   the commands left behind. It still reuses a record. `[run-read-only]`
-- `--force` skips the need test and does not look for a record. It resolves the placeholders
-  against the merge base with `--base`, so it is a full run. It always runs the commands, and it
-  writes the record by the usual rules. `[run-force]`
+- `--full` skips the need test, looks for no record and reads no diff. Each placeholder gets its
+  complete list, as if every tag changed: every items path, and every tracked file that a
+  file-set's globs match. It needs no merge base, so a shallow checkout works, and `--base` is
+  ignored. It always runs the commands, and it writes the record by the usual rules. A complete
+  file-set can repeat tests that the items already cover; `--dirs` and `--files` are a union, and
+  a missed file would cost coverage. `[run-full]`
 - The two flags combine:
 
   | Flags | Tests need | Reads a record | Writes a record |
   | --- | --- | --- | --- |
   | none | Yes | Yes | Yes |
   | `--read-only` | Yes | Yes | No |
-  | `--force` | No | No | Yes |
-  | `--read-only --force` | No | No | No |
+  | `--full` | No | No | Yes |
+  | `--read-only --full` | No | No | No |
+- `gate github-outputs --full` gives every gate and every group the status `required`. It reads
+  no record and no diff.
 - `gate github-outputs` emits `<gate>-status=<status>`, `<gate>-run=true|false`,
   `<gate>-verified=true|false` and `<gate>-key=<key>` for each gate, in name order. `-run` is
   `true` when the status is `required`, for a plain `if:`. A gate the diff does not need still

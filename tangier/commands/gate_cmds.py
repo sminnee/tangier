@@ -10,7 +10,7 @@ import sys
 import time
 
 from tangier import gate, ranon
-from tangier.commands.args import add_diff_args
+from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs
 from tangier.runner import Runner, Subprocess
@@ -70,7 +70,7 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
     """Plan one gate, then run it unless it is verified or not needed.
 
     Each gate takes its own snapshot, because an earlier gate's commands can
-    change the tree. `--force` reads no record.
+    change the tree. `--full` reads no record and no diff.
     """
     snap = gate.snapshot()
     if snap.dirty:
@@ -81,7 +81,7 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
             else "no uncommitted change touches the scope"
         )
         print(f"gate `{name}`: keying the working tree; {what}", file=sys.stderr)
-    p = gate.plan(config, name, args.base, snap, origin, force=args.force, accept=args.accept)
+    p = gate.plan(config, name, args.base, snap, origin, full=args.full, accept=args.accept)
     if args.debug:
         _print_debug(p)
     if args.dry_run:
@@ -213,11 +213,12 @@ def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
     `-run` is `true` when the status is `required`, for a plain `if:`. A `.`
     in a name becomes `-`.
     """
-    # One read of origin for all gates, not one per gate.
+    # One read of origin for all gates, not one per gate. `--full` reads none.
     origin = gate.OriginRecords()
     snap = gate.snapshot(args.head)
     statuses = {
-        name: gate.plan(config, name, args.base, snap, origin, accept=args.accept) for name in sorted(config.gates)
+        name: gate.plan(config, name, args.base, snap, origin, full=args.full, accept=args.accept)
+        for name in sorted(config.gates)
     }
     pairs: dict[str, str] = {}
     for name, p in statuses.items():
@@ -311,11 +312,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="reuse a record, but write none",
     )
-    _ = rp.add_argument(
-        "--force",
-        action="store_true",
-        help="run the commands from the merge base, even when the gate is not needed or a record exists",
-    )
+    add_full(rp, "run with complete lists, as if every tag changed; reads no record and no diff")
     _ = rp.add_argument(
         "--dry-run", action="store_true", help="print each gate's status, base and commands; run and write nothing"
     )
@@ -337,6 +334,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     op = gsub.add_parser("github-outputs", help="emit <gate>-status, -run, -verified and -key as $GITHUB_OUTPUT lines")
     add_diff_args(op)
     _add_accept(op)
+    add_full(op, "mark every gate and group required, as if every tag changed")
     op.set_defaults(func=cmd_github_outputs)
 
     xp = gsub.add_parser("prune", help="delete old gate records, on origin and in this clone")

@@ -15,7 +15,7 @@ import unittest.mock
 
 from tangier import changemap, cli, git
 from tangier.commands import changemap_cmds
-from tangier.tests.support import Raw, make_config
+from tangier.tests.support import Raw, make_config, make_git_repo
 
 
 def _capture(fn, *args) -> str:
@@ -50,7 +50,7 @@ class TestBuildMatrix(unittest.TestCase):
         )
 
     def _run(self, changed: list[str], no_expand: bool = False) -> dict[str, str]:
-        args = argparse.Namespace(base="base", head="head", no_expand=no_expand)
+        args = argparse.Namespace(base="base", head="head", no_expand=no_expand, full=False)
         with unittest.mock.patch.object(git, "changed_files", return_value=changed):
             out = _capture(changemap_cmds.cmd_build_matrix, self._cfg(), args)
         return dict(line.split("=", 1) for line in out.splitlines())
@@ -93,10 +93,21 @@ class TestBuildMatrix(unittest.TestCase):
                 "shared": {"paths": ["shared/**"]},
             }
         )
-        args = argparse.Namespace(base="base", head="head", no_expand=False)
+        args = argparse.Namespace(base="base", head="head", no_expand=False, full=False)
         with unittest.mock.patch.object(git, "changed_files", return_value=["shared/lib.py"]):
             out = _capture(changemap_cmds.cmd_build_matrix, cfg, args)
         self.assertIn('build-packages=["astrochat"]', out)
+
+    # SPEC: changemap#full-answer-set
+    def test_full_lists_every_bucket_with_an_image(self) -> None:
+        args = argparse.Namespace(base="base", head="head", no_expand=False, full=True)
+        with (
+            unittest.mock.patch.object(git, "changed_files", side_effect=AssertionError("--full reads no diff")),
+            unittest.mock.patch.object(git, "rev_parse_tree", return_value="tree"),
+            unittest.mock.patch.object(git, "ls_tree", return_value=[]),
+        ):
+            out = _capture(changemap_cmds.cmd_build_matrix, self._cfg(), args)
+        self.assertIn('build-packages=["astrochat","smartypants"]', out)
 
     def test_outputs_reach_the_github_output_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,7 +146,7 @@ class TestGithubOutputs(unittest.TestCase):
                 unittest.mock.patch.object(changemap, "sha_for_bucket", return_value="deadbeef00"),
                 unittest.mock.patch.dict(os.environ, {"GITHUB_OUTPUT": out_path}),
             ):
-                args = argparse.Namespace(base="base", head="head", no_expand=False)
+                args = argparse.Namespace(base="base", head="head", no_expand=False, full=False)
                 out = _capture(changemap_cmds.cmd_github_outputs, cfg, args)
             with open(out_path) as fh:
                 file_out = fh.read()
@@ -161,7 +172,7 @@ class TestGithubOutputs(unittest.TestCase):
             **{"eval-files": {"files": True, "paths": ["a/**/*_eval.py"]}},
         )
         with unittest.mock.patch.object(git, "changed_files", return_value=["a/x_eval.py"]):
-            args = argparse.Namespace(base="base", head="head", no_expand=False)
+            args = argparse.Namespace(base="base", head="head", no_expand=False, full=False)
             out = _capture(changemap_cmds.cmd_github_outputs, cfg, args)
         lines = set(out.splitlines())
         self.assertIn("eval-items=py/agent", lines)
@@ -175,7 +186,7 @@ class TestGithubOutputs(unittest.TestCase):
             **{"custom-group": {"files": True, "paths": ["a/**"]}},
         )
         with unittest.mock.patch.object(git, "changed_files", return_value=["a/x.py"]):
-            args = argparse.Namespace(base="base", head="head", no_expand=False)
+            args = argparse.Namespace(base="base", head="head", no_expand=False, full=False)
             out = _capture(changemap_cmds.cmd_github_outputs, cfg, args)
         self.assertIn("custom-group=a/x.py", out.splitlines())
 
@@ -198,6 +209,7 @@ class TestExplain(unittest.TestCase):
                 base="base",
                 head="head",
                 no_expand=False,
+                full=False,
                 files_map={"unittest-files": "w/foo_test.py"},
             )
             out = _capture(changemap_cmds.cmd_explain, cfg, args)
@@ -213,7 +225,7 @@ class TestExplain(unittest.TestCase):
         cfg.runners = _runners()
         with unittest.mock.patch.object(git, "changed_files", return_value=["a/x_eval.py"]):
             args = argparse.Namespace(
-                base="base", head="head", no_expand=False, files_map={"eval-files": "a/x_eval.py"}
+                base="base", head="head", no_expand=False, full=False, files_map={"eval-files": "a/x_eval.py"}
             )
             out = _capture(changemap_cmds.cmd_explain, cfg, args)
         self.assertIn("bin/evals --dirs py/agent --files a/x_eval.py", out)
@@ -223,7 +235,7 @@ class TestExplain(unittest.TestCase):
         cfg = make_config(agent={"paths": ["a/**"], "e2e_items": "e2e/agent"})
         cfg.runners = _runners()
         with unittest.mock.patch.object(git, "changed_files", return_value=["unmatched/x.py"]):
-            args = argparse.Namespace(base="base", head="head", no_expand=False, files_map={})
+            args = argparse.Namespace(base="base", head="head", no_expand=False, full=False, files_map={})
             out = _capture(changemap_cmds.cmd_explain, cfg, args)
         self.assertIn('bin/e2e-test --dirs ""', out)
 
@@ -231,7 +243,7 @@ class TestExplain(unittest.TestCase):
         cfg = make_config(agent={"paths": ["a/**"], "frontend_items": "pkg/agent"})
         cfg.runners = _runners()
         with unittest.mock.patch.object(git, "changed_files", return_value=["a/x.py"]):
-            args = argparse.Namespace(base="base", head="head", no_expand=False, files_map={})
+            args = argparse.Namespace(base="base", head="head", no_expand=False, full=False, files_map={})
             out = _capture(changemap_cmds.cmd_explain, cfg, args)
         self.assertIn("# frontend: pkg/agent", out)
 
@@ -242,7 +254,7 @@ class TestExplain(unittest.TestCase):
         cfg.runners = _runners()
         with unittest.mock.patch.object(git, "changed_files", return_value=["a/x.py"]):
             args = argparse.Namespace(
-                base="base", head="head", no_expand=False, files_map={"unittest-files": "a/x_test.py"}
+                base="base", head="head", no_expand=False, full=False, files_map={"unittest-files": "a/x_test.py"}
             )
             out = _capture(changemap_cmds.cmd_explain, cfg, args)
         self.assertIn("bin/e2e-test --dirs e2e/agent\n", out)
@@ -251,7 +263,7 @@ class TestExplain(unittest.TestCase):
         cfg = make_config(agent={"paths": ["a/**"], "unittest_items": "x"})
         cfg.runners = _runners()
         with unittest.mock.patch.object(git, "changed_files", return_value=["zzz/x.py"]):
-            args = argparse.Namespace(base="base", head="head", no_expand=False, files_map={})
+            args = argparse.Namespace(base="base", head="head", no_expand=False, full=False, files_map={})
             out = _capture(changemap_cmds.cmd_explain, cfg, args)
         self.assertIn("(none — no changed file matched any tag's paths)", out)
 
@@ -349,7 +361,7 @@ class TestItems(unittest.TestCase):
     def test_unknown_items_name_exits_0_silently(self) -> None:
         # A typo in a runner script yields "nothing changed", not a failure.
         cfg = make_config(a={"paths": ["a/**"], "unittest_items": "py/a"})
-        args = argparse.Namespace(name="nope", base="b", head="h", no_expand=False)
+        args = argparse.Namespace(name="nope", base="b", head="h", no_expand=False, full=False)
         out = _capture(changemap_cmds.cmd_items, cfg, args)
         self.assertEqual(out, "")
 
@@ -389,6 +401,60 @@ class TestCli(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             out = _capture(cli.main, ["--config", path, "changemap", "list", "--graph"])
         self.assertEqual(out.splitlines(), ["a", "b", "  a"])
+
+
+class TestFull(unittest.TestCase):
+    """`--full` on the answer-set commands, in a real repo with an empty diff."""
+
+    CONFIG = """\
+[lib]
+paths = "lib/**"
+unittest_items = "lib"
+
+[svc]
+paths = "svc/**"
+depends = "lib"
+unittest_items = "svc"
+touched = true
+sha = true
+
+[unittest-files]
+files = true
+paths = "**/*_test.py"
+
+[runners]
+unittest = { cmd = "bin/test", files = "unittest-files" }
+"""
+
+    def setUp(self) -> None:
+        self.root = make_git_repo(self, {"pipeline.toml": self.CONFIG, "lib/a_test.py": "t\n", "svc/main.py": "m\n"})
+        patcher = unittest.mock.patch.dict(os.environ)
+        _ = patcher.start()
+        self.addCleanup(patcher.stop)
+        _ = os.environ.pop("GITHUB_OUTPUT", None)
+
+    def tangier(self, *argv: str) -> str:
+        with contextlib.chdir(self.root), contextlib.redirect_stderr(io.StringIO()):
+            return _capture(cli.main, list(argv))
+
+    # SPEC: changemap#full-answer-set
+    def test_github_outputs_full_fills_every_output(self) -> None:
+        # The diff from HEAD to HEAD is empty: a push to main, or a nightly.
+        lines = self.tangier("changemap", "github-outputs", "--base", "HEAD", "--full").splitlines()
+        self.assertIn("unittest-items=lib,svc", lines)
+        self.assertIn("svc-touched=true", lines)
+        self.assertIn("unittest-files=lib/a_test.py", lines)
+        self.assertIn("unittest-items=", self.tangier("changemap", "github-outputs", "--base", "HEAD").splitlines())
+
+    # SPEC: changemap#full-answer-set
+    def test_explain_full_renders_the_complete_invocation(self) -> None:
+        out = self.tangier("changemap", "explain", "--base", "HEAD", "--full")
+        self.assertIn("bin/test --dirs lib,svc --files lib/a_test.py\n", out)
+
+    # SPEC: changemap#full-answer-set
+    def test_explain_full_takes_an_explicit_files_list_over_the_complete_one(self) -> None:
+        out = self.tangier("changemap", "explain", "--full", "--files", "unittest-files=x_test.py")
+        self.assertIn("bin/test --dirs lib,svc --files x_test.py\n", out)
 
 
 if __name__ == "__main__":
