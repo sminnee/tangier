@@ -102,8 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          filter: blob:none
+          fetch-depth: 20
       - uses: astral-sh/setup-uv@v6
       # ...setup the commands need...
       - name: Run test-backend
@@ -111,7 +110,7 @@ jobs:
           FULL: ${{ needs.plan.outputs.full }}
         run: |
           # shellcheck disable=SC2086
-          uvx "$TANGIER" gate run test-backend --read-only $FULL
+          uvx "$TANGIER" gate run test-backend --read-only --base HEAD^1 $FULL
 
   lint:
     # A group is one job, with one step per member.
@@ -123,18 +122,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          filter: blob:none
+          fetch-depth: 20
       - uses: astral-sh/setup-uv@v6
       - name: Run lint.pyright
         run: |
           # shellcheck disable=SC2086
-          uvx "$TANGIER" gate run lint.pyright --read-only $FULL
+          uvx "$TANGIER" gate run lint.pyright --read-only --base HEAD^1 $FULL
       - name: Run lint.ruff
         if: "!cancelled()"
         run: |
           # shellcheck disable=SC2086
-          uvx "$TANGIER" gate run lint.ruff --read-only $FULL
+          uvx "$TANGIER" gate run lint.ruff --read-only --base HEAD^1 $FULL
 
   lint-k8s:
     # A touched-only job: no gate, just a tag.
@@ -284,7 +282,8 @@ jobs:
 
 | Job | Checkout |
 | --- | --- |
-| Runs `changemap` or `gate` against a diff | `fetch-depth: 0` and `filter: blob:none`. The diff needs the merge base. The filter skips file contents of old commits. |
+| A gate job that runs only on a pull request or with `--full` | `fetch-depth: 20`, and `gate run --base HEAD^1`. `HEAD^1` is the PR merge commit's first parent, which is the merge base. The depth sets how far down the branch a record can be found, and 20 is cheap at any repo size. `--full` ignores `--base`. |
+| Runs `changemap` or `gate` against any other diff, such as the plan job on a push | `fetch-depth: 0` and `filter: blob:none`. The diff needs the merge base with `origin/main`. The filter skips file contents of old commits. |
 | Runs only gates with no placeholder | The default shallow checkout. |
 | Runs with `--full` only | The default shallow checkout. `--full` reads no diff. |
 | Builds or deploys | Any. The tag hashes `HEAD`'s tree. |
