@@ -247,7 +247,13 @@ def project_items(cfg: Config, name: str, expanded: set[str]) -> list[str]:
 def compute_answer_set(
     cfg: Config, base: str, head: str, *, expand: bool = True, compute_shas: bool = True
 ) -> AnswerSet:
-    files = git.changed_files(base, head)
+    return answer_set_for_files(cfg, git.changed_files(base, head), head, expand=expand, compute_shas=compute_shas)
+
+
+def answer_set_for_files(
+    cfg: Config, files: list[str], head: str, *, expand: bool = True, compute_shas: bool = True
+) -> AnswerSet:
+    """The answer set for a list of changed files. `head` is read only for the bucket SHAs."""
     per_tag, ignored = match_files_to_tags(cfg, files)
     matched = set(per_tag.keys())
     expanded = expand_with_dependents(matched, cfg.depends) if expand else set(matched)
