@@ -374,6 +374,13 @@ class TestRanOn(unittest.TestCase):
         self.assertEqual(ranon.detect({"CI": "1"}), {"kind": "ci", "provider": "unknown"})
 
 
+class TestDuration(unittest.TestCase):
+    # SPEC: gate#run-records-pass
+    def test_a_minute_or_more_shows_minutes_and_seconds(self) -> None:
+        self.assertEqual(gate_cmds._took(59.9), "59.9s")
+        self.assertEqual(gate_cmds._took(60.0), "1m00s")
+
+
 class DirtyingRunner(RecordingRunner):
     """A runner whose commands leave an untracked file behind."""
 
@@ -405,8 +412,10 @@ class TestRun(GateCase):
     # SPEC: gate#run-stops-at-first-failure
     def test_a_failing_command_stops_the_run_and_writes_no_record(self) -> None:
         runner = RecordingRunner({("bin/test",): Result(3)})
-        code, _, _ = self.run_gate(runner=runner)
+        with _taking(3.2):
+            code, out, _ = self.run_gate(runner=runner)
         self.assertEqual(code, 3)
+        self.assertIn("gate `backend`: failed in 3.2s (exit 3)", out)
         self.assertEqual(runner.calls, SELECTED[:1])
         self.assertEqual(_gate_refs(self.repo), [])
 
@@ -440,7 +449,7 @@ class TestRun(GateCase):
             mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)),
             _taking(12.34),
         ):
-            code, _, _ = self.run_gate(runner=runner)
+            code, out, _ = self.run_gate(runner=runner)
         self.assertEqual(code, 0)
         self.assertEqual(runner.calls, SELECTED)
         self.assertEqual([env["TEST_DB"] for env in runner.envs], ["1", "1"])
@@ -448,6 +457,7 @@ class TestRun(GateCase):
         self.assertIn("PATH", runner.envs[0])
 
         key = self.key()
+        self.assertIn(f"gate `backend`: passed in 12.3s, recorded as refs/tangier/gates/backend/{key} (local)", out)
         self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{key}"])
         record = json.loads(_git(self.repo, "cat-file", "blob", f"refs/tangier/gates/backend/{key}"))
         self.assertEqual(
@@ -573,10 +583,11 @@ class TestRun(GateCase):
             mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)),
             _taking(12.34),
         ):
-            code, _, err = self.run_gate()
+            code, out, err = self.run_gate()
         self.assertEqual(code, 0)
         self.assertIn("keying the working tree", err)
         key = self.worktree_key()
+        self.assertIn(f"gate `backend`: passed in 12.3s, recorded as refs/tangier/gates/backend/{key} (local)", out)
         self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{key}"])
         self.assertEqual(
             _runs(self.repo, f"refs/tangier/gates/backend/{key}"),

@@ -307,10 +307,12 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
 - When the gate is verified, `gate run` says where the record is, runs nothing, and exits 0.
   `[run-reuses-record]`
 - Otherwise `gate run` runs each command with the gate's `env` added to the caller's environment.
-  It stops at the first failure, exits with that command's code, and writes no record.
-  `[run-stops-at-first-failure]`
-- On success, `gate run` adds the run to the record, on a clean tree or a dirty one, and prints the
-  ref and the runner's kind. `[run-records-pass]`
+  It stops at the first failure, exits with that command's code, and writes no record. It prints
+  ``gate `<name>`: failed in 3.2s (exit <code>)``. `[run-stops-at-first-failure]`
+- On success, `gate run` adds the run to the record, on a clean tree or a dirty one. It prints the
+  time the commands took, the ref and the runner's kind:
+  ``gate `<name>`: passed in 12.3s, recorded as <ref> (local)``. A run of a minute or more shows
+  as `4m05s`. `[run-records-pass]`
 - On a dirty tree, `gate run` prints a note to stderr for each gate before it plans. The note lists
   the uncommitted changes and untracked files that touch the gate's scope, or says that none do.
   It shows which local files the key holds, and helps explain a CI run whose key differs from
