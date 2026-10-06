@@ -39,4 +39,4 @@ cmd = "uv run --no-project --python 3.13 python -m unittest discover -s tangier 
 paths = ["bin/check-no-dependencies"]
 
 [gate-inputs]
-paths = ["tangier/**", "pyproject.toml", "pipeline.toml"]
+paths = ["tangier/**", "pyproject.toml", "pipeline.toml", "bin/release-plan"]

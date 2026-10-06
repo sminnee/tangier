@@ -1,0 +1,65 @@
+#!/bin/bash
+# Decide whether a commit on main releases its version.
+#
+# Usage: bin/release-plan [<commit>]   (default HEAD; run inside the repo)
+#
+# Prints `version=X.Y.Z` and `release=true|false` on stdout, in the form
+# `$GITHUB_OUTPUT` takes, and the reason on stderr. The versions are read from
+# the commit, not the working tree, so any commit can be checked locally after
+# `git fetch --tags`. .github/workflows/release.yaml runs this after CI passes.
+set -euo pipefail
+
+COMMIT="$(git rev-parse --verify "${1:-HEAD}^{commit}")"
+
+PROJECT_VERSION="$(git show "$COMMIT:pyproject.toml" | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["project"]["version"])')"
+MODULE_VERSION="$(git show "$COMMIT:tangier/__init__.py" | python3 -c 'import re, sys; print(re.search(r"^__version__ = \"([^\"]+)\"", sys.stdin.read(), re.M).group(1))')"
+# test_version.py holds these equal in CI. This is the backstop before a tag.
+if [ "$PROJECT_VERSION" != "$MODULE_VERSION" ]; then
+  echo "error: the package versions differ at $COMMIT" >&2
+  echo "  pyproject.toml:      $PROJECT_VERSION" >&2
+  echo "  tangier.__version__: $MODULE_VERSION" >&2
+  exit 1
+fi
+VERSION="$PROJECT_VERSION"
+TAG="v$VERSION"
+# Plain X.Y.Z only: `sort -V` ranks 0.3.0rc1 above 0.3.0, so a pre-release
+# would block its own final release, and would move the alias onto an rc.
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "error: version must look like 1.2.3, got: $VERSION" >&2
+  exit 1
+fi
+
+plan() {
+  echo "version=$VERSION"
+  echo "release=$1"
+}
+
+HIGHEST="$(git tag -l 'v*.*.*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+# Anything not above the highest release would move the alias backwards.
+above_highest() {
+  [ -z "$HIGHEST" ] || { [ "$VERSION" != "$HIGHEST" ] && [ "$(printf '%s\n%s\n' "$HIGHEST" "$VERSION" | sort -V | tail -n 1)" = "$VERSION" ]; }
+}
+
+# `^{commit}` peels an annotated tag; a lightweight one resolves the same way.
+if TAG_COMMIT="$(git rev-parse -q --verify "refs/tags/$TAG^{commit}")"; then
+  if [ "$TAG_COMMIT" != "$COMMIT" ]; then
+    echo "$TAG tags $TAG_COMMIT: the version is unchanged, nothing to release" >&2
+    plan false
+  elif [ "$VERSION" = "$HIGHEST" ]; then
+    echo "$TAG already tags $COMMIT: releasing again, after a partial failure" >&2
+    plan true
+  else
+    echo "$TAG tags $COMMIT but v$HIGHEST is newer: not releasing" >&2
+    plan false
+  fi
+  exit 0
+fi
+
+if above_highest; then
+  echo "$TAG is new and above v${HIGHEST:-<none>}: releasing" >&2
+  plan true
+else
+  # A superseded commit whose CI finished late, or a version bumped downwards.
+  echo "warning: $TAG is untagged but not above v$HIGHEST: not releasing" >&2
+  plan false
+fi
