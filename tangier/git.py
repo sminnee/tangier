@@ -197,11 +197,6 @@ def for_each_ref(prefix: str) -> list[tuple[str, str]]:
     return _ref_lines(_git_checked("for-each-ref", "--format=%(objectname)%09%(refname)", prefix))
 
 
-def ls_remote(remote: str, pattern: str) -> list[tuple[str, str]]:
-    """(sha, ref) for every ref on `remote` that matches `pattern`."""
-    return _ref_lines(_git_checked("ls-remote", remote, pattern))
-
-
 def fetch(remote: str, refspec: str) -> None:
     """Fetch `refspec`, and delete local refs under it that `remote` no longer has."""
     _ = _git_checked("fetch", "--quiet", "--prune", remote, refspec)
