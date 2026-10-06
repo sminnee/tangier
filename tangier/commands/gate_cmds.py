@@ -37,14 +37,16 @@ def cmd_list(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_key(config: Config, args: argparse.Namespace) -> int:
-    """Print the key. A group prints `<name> <key>` for each member."""
-    names = gate.select(config, args.name)
+    """Print the key. A group, or no name, prints `<name> <key>` for each gate."""
+    names = list(config.gates) if args.name is None else gate.select(config, args.name)
     tree = gate.snapshot(args.head).tree
-    if names == [args.name]:
+    if args.name in config.gates:
         print(gate.key(config, args.name, tree))
         return 0
-    for name in names:
-        print(f"{name} {gate.key(config, name, tree)}")
+    # Every key before any output, so a gate that fails closed leaves no partial list.
+    keys = [(name, gate.key(config, name, tree)) for name in names]
+    for name, key in keys:
+        print(f"{name} {key}")
     return 0
 
 
@@ -309,8 +311,8 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     lp = gsub.add_parser("list", help="list every gate and group")
     lp.set_defaults(func=cmd_list)
 
-    kp = gsub.add_parser("key", help="print a gate's content key; a group prints `<name> <key>` per member")
-    _ = kp.add_argument("name", help="a gate or a group")
+    kp = gsub.add_parser("key", help="print a gate's content key; a group, or no name, prints `<name> <key>` per gate")
+    _ = kp.add_argument("name", nargs="?", help="a gate or a group; omit for every gate")
     # No `--base`: the key reads content only.
     _add_head_arg(kp)
     kp.set_defaults(func=cmd_key)
