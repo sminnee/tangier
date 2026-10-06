@@ -106,6 +106,10 @@ class Accept:
             pairs.append((name, wanted))
         return cls(tuple(pairs))
 
+    def __str__(self) -> str:
+        """The value in `--accept` form, with a kind bare: `ci`, `event=push` or `ci,event=push`."""
+        return ",".join(wanted if name == "kind" else f"{name}={wanted}" for name, wanted in self.fields)
+
     def matches(self, runner: Mapping[str, object]) -> bool:
         return all(runner.get(name) == wanted for name, wanted in self.fields)
 

@@ -310,7 +310,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | `gate cancel` | Stop a running job. Takes `--job`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
 | `gate sync` | Sync gate records with `origin`: pull, merge runs, push, and prune expired records. |
-| `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept` and `--full`. |
+| `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept`, `--full` and `--summary`. |
 
 `gate run` has no `--head`. The commands test the checked-out tree, so the working tree is the only
 content a record can describe. `gate key` and `gate verified` take no `--base`, because the key reads no diff.
@@ -398,6 +398,17 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   group name order. The status is `required` when any member is required, `verified` when every
   member is verified, and `not-needed` otherwise. `-run` is `true` when the status is `required`.
   A group has no `-key`. `[group-outputs]`
+- `gate github-outputs --summary` also writes a markdown gate table after the output lines. It
+  has one row per gate, in config order. A group gets a `` `<group>` (group) `` row with the group
+  status, before its members' rows, which show each member's full name. The `Recorded by` column
+  is filled only for a `verified` gate. It names the newest accepted run in the record that
+  verified it: `ci` or `local`, the run's `head` as a 7-character SHA, then where it ran. A local
+  run shows its `host`. A CI run shows `<workflow> / <job>`, linked to the run's `url`. A part the
+  record lacks is left out. With `--accept`, a line above the table names the filter, such as
+  ``Only runs accepted by `--accept ci` or `--accept event=push` count.`` A note below the table
+  says that a `verified` or `not-needed` gate's job is skipped. The table is appended to
+  `$GITHUB_STEP_SUMMARY` when that is set, and printed to stdout otherwise.
+  `[github-outputs-summary]`
 - The status is one word, checked in this order: `verified` when the keyed content has a record,
   `not-needed` when the diff from the comparator does not need the gate, and `required`
   otherwise. A CI job runs the gate when the status is `required`. `[status-values]`
