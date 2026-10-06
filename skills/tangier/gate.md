@@ -21,6 +21,19 @@ Done when `gate run --all` exits 0 on the committed tree, and every `gate run` t
 When the repo has a pre-push hook that runs the gates, such as `bin/pre-push-gates`, a plain
 `git push` does steps 1 and 4.
 
+## Long runs
+
+Outside CI, `gate run` starts a background job and waits up to `--timeout` seconds, 60 by
+default. A job that outlasts the wait keeps running.
+
+- Exit 3 means the job is still running. Run the printed `tangier gate wait --job <n>` command,
+  and repeat it while it exits 3. Do not start `gate run` again: a second run exits 2 while the
+  job runs.
+- Do not edit the worktree while a job runs. A gate whose tree changes under it writes no record.
+- Run `tangier gate status` to see each recent job and its gates. A `stale` result no longer
+  matches your working tree. Run the gate again.
+- `tangier gate cancel` stops the job.
+
 ## Selectors and groups
 
 `tangier gate run <group>.<member>` runs one member of a group. `tangier gate run <group>` runs
