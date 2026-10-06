@@ -18,6 +18,10 @@ class GitError(RuntimeError):
     """A git command failed where the caller cannot continue. Carries git's stderr."""
 
 
+class PushRejected(GitError):
+    """A push whose lease went stale: the remote ref moved since the caller last read it."""
+
+
 def _git(*args: str) -> str:
     res = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
     return res.stdout
@@ -207,5 +211,20 @@ def fetch(remote: str, refspec: str) -> None:
     _ = _git_checked("fetch", "--quiet", "--prune", remote, refspec)
 
 
-def push(remote: str, refspecs: list[str]) -> None:
-    _ = _git_checked("push", "--quiet", remote, *refspecs)
+def push(remote: str, refspecs: list[str], *, leases: dict[str, str] | None = None, atomic: bool = False) -> None:
+    """Push `refspecs` to `remote`.
+
+    `leases` maps a remote ref to the SHA it must still hold, or to `""` when it
+    must not exist yet. A ref that moved raises `PushRejected`. With `atomic`,
+    either every ref updates or none does.
+    """
+    args = ["push", "--quiet"]
+    if atomic:
+        args.append("--atomic")
+    args += [f"--force-with-lease={ref}:{sha}" for ref, sha in (leases or {}).items()]
+    try:
+        _ = _git_checked(*args, remote, *refspecs)
+    except GitError as e:
+        if "(stale info)" in str(e):
+            raise PushRejected(str(e)) from e
+        raise
