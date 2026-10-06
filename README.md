@@ -59,8 +59,8 @@ Every other job's `if:` reads one of its outputs, so no path rule is copied into
 ## Install
 
 ```sh
-uvx tangier@0.2.1 --help              # run a pinned release from PyPI
-uv tool install tangier==0.2.1        # or put it on PATH
+uvx tangier@0.2.2 --help              # run a pinned release from PyPI
+uv tool install tangier==0.2.2        # or put it on PATH
 ```
 
 Without uv, `python3 -m tangier` runs it from a checkout.

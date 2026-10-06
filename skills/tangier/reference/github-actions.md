@@ -37,7 +37,7 @@ permissions:
 
 env:
   # A pinned release from PyPI. Bump it deliberately.
-  TANGIER: tangier@0.2.1
+  TANGIER: tangier@0.2.2
 
 jobs:
   plan:
@@ -276,7 +276,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uvx tangier@0.2.1 gate sync
+      - run: uvx tangier@0.2.2 gate sync
 ```
 
 ## Checkout depth
@@ -291,7 +291,7 @@ jobs:
 
 ## Shipped actions
 
-Pin `@v0`, a moving alias that every release updates, or an exact `@v0.2.1`.
+Pin `@v0`, a moving alias that every release updates, or an exact `@v0.2.2`.
 
 ### `sminnee/tangier/.github/workflows/build.yaml@v0`
 
