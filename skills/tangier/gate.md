@@ -7,7 +7,7 @@ skips the run. When a case below is not covered, read `docs/specs/gate.md` in th
 
 1. Run `tangier gate run --all`. It keys the working tree, uncommitted work included. Each gate
    prints `verified`, `not-needed`, or runs its commands. Gates the diff does not touch cost
-   nothing.
+   nothing. When the project has [CI-only gates](#ci-only-gates), name the other gates instead.
 2. When a gate fails, fix the cause and run that gate again. A failing gate does not stop the
    others, so read every failure in the output.
 3. Commit exactly the work that passed. The commit reuses the record, so the gate does not run
@@ -24,6 +24,15 @@ A `[gate.<group>]` table without `cmd` is a group of member gates, each with its
 member. While you work, run the narrowest selector that covers what you changed. Its pass is
 recorded, and the commit of that work reuses it.
 
+## CI-only gates
+
+A CI-only gate needs CI services, secrets or hardware, so only CI runs it. Its CI job runs
+`gate run <gate> --accept ci`, and only a CI run verifies it. The CI workflow or the project's
+instructions name these gates.
+
+- Do not run a CI-only gate locally. A local pass records a `local` run, which does not count.
+- To see whether CI has covered your content, run `tangier gate run <gate> --accept ci --dry-run`.
+
 ## What voids a record
 
 A record matches while the gate's key is unchanged. The key moves when any of these change:
@@ -38,6 +47,7 @@ rebase.
 ## When a gate runs that you expected to be verified
 
 Run `tangier gate run <selector> --dry-run --debug`. It runs nothing. It prints each commit the
-comparator walk checked with its key and `miss`, `local` or `origin`, the commit the diff starts
+comparator walk checked with its key and `miss`, `local` or `origin`, and each run it read there,
+marked `accepted` or `ignored` by `--accept`. It then prints the commit the diff starts
 from, the changed files in scope, and each placeholder's list. A key that differs at a commit you
 already gated means one of the inputs above changed.

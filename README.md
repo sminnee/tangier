@@ -193,9 +193,11 @@ change the working tree, `gate run` writes no record and exits 1. These flags ch
 | `--force` | Run the commands from the merge base, even when the gate is not needed or a record exists. |
 | `--dry-run` | Print each gate's plan. Run nothing and write nothing. |
 | `--debug` | Print the comparator walk and the diff to stderr. |
+| `--accept <ran-on>` | Count only runs from here: `ci`, `local`, or `field=value,...`. Repeats. See [the spec](docs/specs/gate.md#cli). |
 
 Records are git refs under `refs/tangier/gates/`. A local record needs no network. Reading records
-in CI needs `contents: read` only. `gate prune --older-than 30` deletes old records.
+in CI needs `contents: read` only. Writing them, as a [CI-only gate](#a-ci-only-gate) does, needs
+`contents: write`. `gate prune --older-than 30` deletes old records.
 
 The key reads no diff, so `gate key` and `gate verified` need no base. Without `--head` they key
 the working tree, as `gate run` does. A gate with a `{...}` placeholder and no record for the keyed
@@ -298,7 +300,7 @@ Add `if: "!cancelled()"` to the later steps to see every member's result when on
 | The command moves from the workflow to `[gate.<name>]`. The step becomes `tangier gate run <name>`. | One definition serves the developer and CI. |
 | Run tangier as `uvx tangier@<version>`, after `astral-sh/setup-uv`. | A pinned release from PyPI. An unpinned `git+https` install runs whatever `main` holds, in a job that may have write access. |
 | The job and its check name stay. | A required status check still reports. A verified gate passes in seconds. |
-| On a pull request, pass `--read-only`. | CI reuses a record and runs on a miss. CI does not push records, and a run can leave report files in the tree. |
+| On a pull request, pass `--read-only`, except for a [CI-only gate](#a-ci-only-gate). | CI reuses a record and runs on a miss. CI does not push records, and a run can leave report files in the tree. |
 | On a push to `main` and on a nightly run, pass `--read-only --force`. | This is the full build that does not consult records. |
 | A gate with no placeholder needs the default shallow checkout only. | Its key covers the commands and the scope at `HEAD`. |
 | A gate with a `{...}` placeholder needs the merge base. Use `fetch-depth: 0` with `filter: blob:none`. | The item lists come from the diff. `fetch-depth: 0` alone fetches every blob of every branch. The blobless filter fetches commits and trees only. |
@@ -310,6 +312,35 @@ Add `if: "!cancelled()"` to the later steps to see every member's result when on
 
 tangier's own `pipeline.toml` and `.github/workflows/ci.yaml` follow these rules. Its gates have no
 placeholder, so it keeps one job per group, one step per member, and no `gates` job. tangier has no nightly run.
+
+#### A CI-only gate
+
+Some gates cannot run on a dev machine: they need CI services, secrets or hardware. CI then runs
+the gate and records the pass, and `--accept ci` makes only CI runs count:
+
+```yaml
+e2e:
+  permissions: { contents: write }    # `gate push` writes refs/tangier/gates/*
+  steps:
+    - uses: actions/checkout@v4
+    - run: |
+        uvx tangier@<version> gate run e2e --accept ci
+        uvx tangier@<version> gate push
+```
+
+The job runs without `--read-only`, so a pass leaves a record. Every run notes where it ran, and a
+local pass at the same content sits beside CI's without counting. A pull request from a fork has
+no write token, so it cannot push records. On a dev machine, see whether CI has covered your
+content:
+
+```sh
+tangier gate run e2e --accept ci --dry-run
+```
+
+`gate github-outputs` takes no gate name, so its `--accept` applies to every gate it reports.
+Without it, a local run marks a CI-only gate `verified`. Don't put the CI-only job behind the
+`gates` job's outputs. Let it run on every pull request: `gate run --accept ci` still reuses a CI
+record when one exists.
 
 ## Actions
 
