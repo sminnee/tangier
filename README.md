@@ -160,9 +160,9 @@ test-backend:
 would run. Add `--debug` to see each commit the comparator walk checked.
 
 `gate run` keys the working tree, uncommitted changes and untracked files included. A pass before
-a commit is reused by the commit made from that work, so committing does not rerun the gate. If
-the commands change the working tree, `gate run` writes no record and exits 1. These flags change
-what it does:
+a commit is reused by the commit made from that work, so committing does not rerun the gate. On a
+dirty tree, each gate first lists the uncommitted files that touch its scope. If the commands
+change the working tree, `gate run` writes no record and exits 1. These flags change what it does:
 
 | Flag | Effect |
 | --- | --- |

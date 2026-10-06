@@ -63,7 +63,13 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
     """
     snap = gate.snapshot()
     if snap.dirty:
-        print(f"gate `{name}`: keying the working tree (uncommitted changes included)", file=sys.stderr)
+        touched = gate.uncommitted_in_scope(config, name, snap)
+        what = (
+            f"uncommitted changes in scope: {', '.join(touched)}"
+            if touched
+            else "no uncommitted change touches the scope"
+        )
+        print(f"gate `{name}`: keying the working tree; {what}", file=sys.stderr)
     p = gate.plan(config, name, args.base, snap, origin, force=args.force)
     if args.debug:
         _print_debug(p)
