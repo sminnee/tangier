@@ -71,7 +71,7 @@ def _add_no_expand(p: argparse.ArgumentParser) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="tangier",
-        description="content-addressed CI/deploy pipeline toolkit",
+        description="smart CI for monorepos: change-scoped tests, local gate reuse, content-addressed builds",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _ = p.add_argument(
