@@ -144,8 +144,9 @@ record can serve as a [comparator](#comparator).
     clone, the error also names the fix: on a pull request, use `fetch-depth` of 2 or more with
     `--base HEAD^1`.
 
-For a gate with a placeholder, a CI checkout must therefore hold `origin/main` and enough history
-to reach the merge base, unless the keyed tree already has a record.
+For a gate with a placeholder, a CI checkout must therefore reach the merge base, unless the
+keyed tree already has a record. On a pull request, `--base HEAD^1` names the merge commit's first
+parent, which is the merge base. A checkout with `fetch-depth` of 2 holds it.
 
 CI computes the key on the PR merge commit. The key matches only when the merged in-scope content
 equals what the local run tested. A moved `main` gives a miss, never a false hit.

@@ -29,7 +29,8 @@ Done when each job's `if:` reads only plan outputs and every gate in `pipeline.t
 | On a pull request, pass `--read-only`, except for a CI-only gate. | CI reuses a record and runs on a miss. A run can leave report files in the tree, and a job that writes no record needs no write token. |
 | On the nightly, pass `--full` to `changemap github-outputs`, `gate github-outputs` and every `gate run`. | `--full` fills every list and reads no record. Without it, a run on `main` has an empty diff and tests nothing. |
 | On a manual run, do what the nightly does. On a push to `main`, run `build-matrix --full`. | `image build --push` skips each tag already published, so only changed images build. |
-| A job that diffs uses `fetch-depth: 0` and `filter: blob:none`. | The diff needs the merge base. See [checkout depth](reference/github-actions.md#checkout-depth). |
+| A gate job uses `fetch-depth: 20` and `gate run --base HEAD^1`. | `HEAD^1` is the PR merge commit's first parent, which is the merge base. The depth sets how far down the branch a record can be found. See [checkout depth](reference/github-actions.md#checkout-depth). |
+| Any other job that diffs, such as the plan job, uses `fetch-depth: 0` and `filter: blob:none`. | It also runs on a push, where the diff needs the merge base with `origin/main`. |
 | A gate job takes no item lists from the plan job. | `gate run` computes the comparator and the lists itself. |
 | A matrix dimension becomes one member gate per leg, in a group. | The key has no matrix dimension. |
 | A gate whose commands read different inputs becomes a group. | A change then voids only the members whose scope it touches. |

@@ -11,8 +11,11 @@ jobs:
     # One step for each member, so each version reports and reuses its own record.
     runs-on: ubuntu-latest
     steps:
-      # Shallow: the gate has no placeholder, so its key needs HEAD only.
+      # Depth 20 follows the checkout-depth rule in skills/tangier/reference/
+      # github-actions.md. These gates have no placeholder, so they need only HEAD^1.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
       - uses: astral-sh/setup-uv@v6
         with:
           # A verified gate never calls uv, and an empty cache fails the post step.
@@ -26,21 +29,21 @@ jobs:
           # A pull request reuses a gate record. Any other event is the full
           # build that does not consult records.
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
+          if [ "$EVENT" = pull_request ]; then flags+=(--base HEAD^1); else flags+=(--full); fi
           python3 -m tangier gate run test.py311 "${flags[@]}"
       - name: Run test.py312
         env:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
+          if [ "$EVENT" = pull_request ]; then flags+=(--base HEAD^1); else flags+=(--full); fi
           python3 -m tangier gate run test.py312 "${flags[@]}"
       - name: Run test.py313
         env:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
+          if [ "$EVENT" = pull_request ]; then flags+=(--base HEAD^1); else flags+=(--full); fi
           python3 -m tangier gate run test.py313 "${flags[@]}"
       - name: CLI smoke check
         run: python3 -m tangier --help
@@ -50,19 +53,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
       - name: Run no-dependencies
         # No setup-python: the runner's own Python is the one tangier must work on.
         env:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
+          if [ "$EVENT" = pull_request ]; then flags+=(--base HEAD^1); else flags+=(--full); fi
           python3 -m tangier gate run no-dependencies "${flags[@]}"
 
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: false
@@ -72,14 +79,14 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
+          if [ "$EVENT" = pull_request ]; then flags+=(--base HEAD^1); else flags+=(--full); fi
           python3 -m tangier gate run lint.check "${flags[@]}"
       - name: Run lint.format
         env:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
+          if [ "$EVENT" = pull_request ]; then flags+=(--base HEAD^1); else flags+=(--full); fi
           python3 -m tangier gate run lint.format "${flags[@]}"
 
   lint-actions:

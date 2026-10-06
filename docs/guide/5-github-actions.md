@@ -55,11 +55,13 @@ test-backend:
   if: needs.plan.outputs.test-backend-run == 'true'
   steps:
     - uses: actions/checkout@v4
-      with: { fetch-depth: 0, filter: blob:none }
-    - run: uvx "$TANGIER" gate run test-backend --read-only
+      with: { fetch-depth: 20 }
+    - run: uvx "$TANGIER" gate run test-backend --read-only --base HEAD^1
 ```
 
 The job takes no lists from the plan. `gate run` computes its comparator and lists itself.
+`--base HEAD^1` names the PR merge commit's first parent, which is the merge base, so 20 commits of
+history are enough. The comparator walks down the PR head to find the branch's newest record.
 `--read-only` reuses a record but writes none: CI does not push records, and a run can leave report
 files behind.
 
@@ -122,7 +124,7 @@ to every tangier call:
 Each gate job passes it on:
 
 ```yaml
-- run: uvx "$TANGIER" gate run test-backend --read-only $FULL
+- run: uvx "$TANGIER" gate run test-backend --read-only --base HEAD^1 $FULL
 ```
 
 `--full` answers as if every tag changed
@@ -188,8 +190,8 @@ test-backend:
   if: needs.plan.outputs.test-backend-run == 'true'
   steps:
     - uses: actions/checkout@v4
-      with: { fetch-depth: 0, filter: blob:none }
-    - run: uvx "$TANGIER" gate run test-backend --read-only $FULL
+      with: { fetch-depth: 20 }
+    - run: uvx "$TANGIER" gate run test-backend --read-only --base HEAD^1 $FULL
 ```
 
 Keep the job's name, so a required status check still reports. A verified gate's job is skipped,
