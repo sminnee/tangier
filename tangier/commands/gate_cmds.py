@@ -7,7 +7,7 @@ import os
 import shlex
 import sys
 
-from tangier import gate
+from tangier import gate, ranon
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs
 from tangier.runner import Runner, Subprocess
@@ -104,8 +104,9 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
             file=sys.stderr,
         )
         return 1
-    ref = gate.write_record(p)
-    print(f"gate `{name}`: passed, recorded as {ref}")
+    ran_on = ranon.detect()
+    ref = gate.write_record(p, ran_on)
+    print(f"gate `{name}`: passed, recorded as {ref} ({ran_on['kind']})")
     return 0
 
 

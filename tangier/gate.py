@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -34,6 +35,11 @@ REMOTE = "origin"
 
 # Bump when the key's inputs or their encoding change: every record then misses.
 KEY_VERSION = 2
+
+# The record blob's shape. A blob with no `runs` is a legacy single run.
+RECORD_FORMAT = 2
+# The most runs one record keeps. The oldest go first.
+MAX_RUNS = 20
 
 
 class GateError(RuntimeError):
@@ -344,11 +350,13 @@ def ref_for(name: str, key: str) -> str:
     return f"{REF_PREFIX}/{name}/{key}"
 
 
-def write_record(plan: GatePlan) -> str:
-    """Record a pass of the planned gate as a local ref. Returns the ref."""
-    record = {
-        "gate": plan.name,
-        "key": plan.key,
+def write_record(plan: GatePlan, runner: Mapping[str, str]) -> str:
+    """Record a pass of the planned gate, run on `runner`, in the local ref. Returns the ref.
+
+    The run joins the runs already at the ref. A local ref that is not a
+    readable record is replaced, with a warning.
+    """
+    run: dict[str, object] = {
         "head": plan.snapshot.commit,
         "tree": plan.snapshot.tree,
         "dirty": plan.snapshot.dirty,
@@ -357,10 +365,34 @@ def write_record(plan: GatePlan) -> str:
         "time": now().isoformat(timespec="seconds"),
         "tangier": __version__,
         "commands": plan.commands,
+        "runner": dict(runner),
     }
     ref = ref_for(plan.name, plan.key)
-    git.update_ref(ref, git.hash_object(json.dumps(record, indent=2, sort_keys=True) + "\n"))
+    runs: list[dict[str, object]] = []
+    if git.ref_exists(ref):
+        try:
+            runs = read_runs(git.rev_parse_ref(ref))
+        except GateError as e:
+            print(f"warning: replaced {ref}: {e}", file=sys.stderr)
+    git.update_ref(ref, _write_blob(plan.name, plan.key, merge_runs(runs, [run])))
     return ref
+
+
+def _write_blob(name: str, key: str, runs: list[dict[str, object]]) -> str:
+    record = {"format": RECORD_FORMAT, "gate": name, "key": key, "runs": runs}
+    return git.hash_object(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+
+def merge_runs(*lists: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The runs of every list, oldest first, without repeats, and at most `MAX_RUNS` of the newest.
+
+    Two runs are the same run when their `time`, `head` and `runner` match.
+    """
+    seen: dict[str, dict[str, object]] = {}
+    for run in (run for runs in lists for run in runs):
+        ident = json.dumps([run.get("time"), run.get("head"), run.get("runner")], sort_keys=True)
+        seen.setdefault(ident, run)
+    return sorted(seen.values(), key=lambda run: str(run.get("time", "")))[-MAX_RUNS:]
 
 
 def read_record(sha: str) -> dict[str, object]:
@@ -372,6 +404,27 @@ def read_record(sha: str) -> dict[str, object]:
     if not isinstance(record, dict):
         raise GateError("not a gate record: the blob is not a JSON object")
     return record
+
+
+def read_runs(sha: str) -> list[dict[str, object]]:
+    """The runs in the record a gate ref points at. Raises `GateError` when it is not one.
+
+    A legacy blob, with no `runs`, is one `local` run. See `docs/specs/gate.md#store`.
+    A newer format than this tangier writes is not one.
+    """
+    record = read_record(sha)
+    version = record.get("format", RECORD_FORMAT)
+    if not isinstance(version, int) or version > RECORD_FORMAT:
+        raise GateError(f"record format {version} is newer than this tangier reads ({RECORD_FORMAT})")
+    if "runs" not in record:
+        legacy = {name: value for name, value in record.items() if name not in ("gate", "key")}
+        return [{**legacy, "runner": {"kind": "local"}}]
+    runs = record["runs"]
+    if not isinstance(runs, list) or not all(
+        isinstance(run, dict) and isinstance(run.get("runner"), dict) for run in runs
+    ):
+        raise GateError("not a gate record: `runs` is not a list of runs, each with a `runner`")
+    return runs
 
 
 def _mirror(ref: str) -> str:
@@ -448,9 +501,9 @@ class Pruned:
 
 
 def prune(older_than_days: int) -> Pruned:
-    """Delete gate refs whose record is older than the limit, on origin and in this clone.
+    """Delete gate refs whose newest run is older than the limit, on origin and in this clone.
 
-    Age is the record's own `time`, not a ref or commit date: a record is a
+    Age is the run's own `time`, not a ref or commit date: a record is a
     blob and carries no other date. A ref that is not a readable record is left
     alone, with a warning.
 
@@ -469,7 +522,7 @@ def prune(older_than_days: int) -> Pruned:
 
 
 def _expired(prefix: str, cutoff: datetime) -> list[str]:
-    """The gate refs whose record is older than `cutoff`, read from the refs under `prefix`.
+    """The gate refs whose newest run is older than `cutoff`, read from the refs under `prefix`.
 
     Each is returned under its `REF_PREFIX` name, which is the name on origin
     for a mirrored ref.
@@ -478,8 +531,8 @@ def _expired(prefix: str, cutoff: datetime) -> list[str]:
     for sha, found in git.for_each_ref(prefix):
         ref = REF_PREFIX + found[len(prefix) :]
         try:
-            recorded = datetime.fromisoformat(str(read_record(sha)["time"]))
-            if recorded < cutoff:
+            newest = max(datetime.fromisoformat(str(run["time"])) for run in read_runs(sha))
+            if newest < cutoff:
                 old.append(ref)
         except (GateError, KeyError, ValueError, TypeError) as e:
             print(f"warning: skipped {ref}: {e}", file=sys.stderr)

@@ -156,6 +156,11 @@ def diff_names(a: str, b: str) -> list[str]:
     return [line for line in out.splitlines() if line]
 
 
+def rev_parse_ref(ref: str) -> str:
+    """The object SHA `ref` points at, whatever its type, such as a gate record's blob."""
+    return _git_checked("rev-parse", "--verify", ref).strip()
+
+
 def merge_base(base: str, head: str) -> str:
     """The commit a `base...head` diff starts from. Raises when there is none."""
     return _git_checked("merge-base", base, head).strip()

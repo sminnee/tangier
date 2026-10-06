@@ -13,6 +13,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -21,7 +22,7 @@ from typing import Any
 from unittest import mock
 
 import tangier
-from tangier import cli, gate, git
+from tangier import cli, gate, git, ranon
 from tangier.runner import Result
 from tangier.tests.support import RecordingRunner, make_git_repo, make_origin, parse_toml
 
@@ -88,6 +89,50 @@ def _gate_refs(root: str) -> list[str]:
     return _git(root, "for-each-ref", "--format=%(refname)", "refs/tangier/gates").split()
 
 
+def _runs(root: str, ref: str) -> list[dict[str, Any]]:
+    return json.loads(_git(root, "cat-file", "blob", ref))["runs"]
+
+
+# The environment of a GitHub Actions job on a push to main.
+GITHUB_PUSH = {
+    "CI": "true",
+    "GITHUB_ACTIONS": "true",
+    "GITHUB_EVENT_NAME": "push",
+    "GITHUB_REF": "refs/heads/main",
+    "GITHUB_REPOSITORY": "org/repo",
+    "GITHUB_WORKFLOW": "CI",
+    "GITHUB_JOB": "backend",
+    "GITHUB_RUN_ID": "123",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_SERVER_URL": "https://github.com",
+    "RUNNER_NAME": "GitHub Actions 7",
+}
+# Where a run in `GITHUB_PUSH` ran.
+GITHUB_PUSH_RAN_ON = {
+    "kind": "ci",
+    "provider": "github-actions",
+    "event": "push",
+    "ref": "refs/heads/main",
+    "repository": "org/repo",
+    "workflow": "CI",
+    "job": "backend",
+    "run_id": "123",
+    "run_attempt": "1",
+    "url": "https://github.com/org/repo/actions/runs/123",
+    "runner_name": "GitHub Actions 7",
+}
+LOCAL_RAN_ON = {"kind": "local", "host": socket.gethostname()}
+
+
+def _put_blob(root: str, ref: str, content: str, *, remote: str | None = None) -> None:
+    """Point `ref` at a blob of `content`, here or, with `remote`, on that remote."""
+    blob = subprocess.run(
+        ["git", "-C", root, "hash-object", "-w", "--stdin"], input=content, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    args = ("push", "-q", "-f", remote, f"{blob}:{ref}") if remote else ("update-ref", ref, blob)
+    _ = _git(root, *args)
+
+
 class GateCase(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = make_git_repo(self, FILES)
@@ -100,6 +145,9 @@ class GateCase(unittest.TestCase):
         _ = patcher.start()
         self.addCleanup(patcher.stop)
         _ = os.environ.pop("GITHUB_OUTPUT", None)
+        # A run on a CI runner would record a `ci` runner.
+        for var in ("CI", "GITHUB_ACTIONS"):
+            _ = os.environ.pop(var, None)
 
     def tangier(self, *argv: str, runner: Any = None, cwd: str | None = None) -> tuple[int, str, str]:
         """Run the CLI in a repo. Returns (exit code, stdout, stderr)."""
@@ -255,6 +303,21 @@ class TestWorkingTree(GateCase):
         self.assertIn("submodule vendored", str(ctx.exception))
 
 
+class TestRanOn(unittest.TestCase):
+    # SPEC: gate#runner-detect
+    def test_a_dev_machine_is_local_with_its_host(self) -> None:
+        self.assertEqual(ranon.detect({}), LOCAL_RAN_ON)
+        self.assertEqual(ranon.detect({"CI": "false"})["kind"], "local")
+
+    # SPEC: gate#runner-detect
+    def test_github_actions_names_the_job(self) -> None:
+        self.assertEqual(ranon.detect(GITHUB_PUSH), GITHUB_PUSH_RAN_ON)
+
+    # SPEC: gate#runner-detect
+    def test_another_ci_is_an_unknown_provider(self) -> None:
+        self.assertEqual(ranon.detect({"CI": "1"}), {"kind": "ci", "provider": "unknown"})
+
+
 class DirtyingRunner(RecordingRunner):
     """A runner whose commands leave an untracked file behind."""
 
@@ -314,6 +377,7 @@ class TestRun(GateCase):
 
     # SPEC: gate#run-records-pass
     # SPEC: gate#record-contents
+    # SPEC: gate#record-runs
     def test_a_pass_on_a_clean_tree_writes_the_record(self) -> None:
         runner = RecordingRunner()
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)):
@@ -330,18 +394,65 @@ class TestRun(GateCase):
         self.assertEqual(
             record,
             {
+                "format": 2,
                 "gate": "backend",
                 "key": key,
-                "head": _git(self.repo, "rev-parse", "HEAD"),
-                "tree": _git(self.repo, "rev-parse", "HEAD^{tree}"),
-                "dirty": False,
-                "base": self.base,
-                "user": "dev@example.com",
-                "time": "2026-03-01T12:00:00+00:00",
-                "tangier": tangier.__version__,
-                "commands": SELECTED,
+                "runs": [
+                    {
+                        "head": _git(self.repo, "rev-parse", "HEAD"),
+                        "tree": _git(self.repo, "rev-parse", "HEAD^{tree}"),
+                        "dirty": False,
+                        "base": self.base,
+                        "user": "dev@example.com",
+                        "time": "2026-03-01T12:00:00+00:00",
+                        "tangier": tangier.__version__,
+                        "commands": SELECTED,
+                        "runner": LOCAL_RAN_ON,
+                    }
+                ],
             },
         )
+
+    # SPEC: gate#record-runs
+    def test_a_second_pass_at_the_same_key_adds_a_run(self) -> None:
+        ref = f"refs/tangier/gates/backend/{self.key()}"
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
+            _ = self.run_gate()
+        with (
+            mock.patch.dict(os.environ, GITHUB_PUSH),
+            mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)),
+        ):
+            code, out, _ = self.run_gate("--force")
+        self.assertEqual(code, 0)
+        self.assertIn(f"recorded as {ref} (ci)", out)
+        self.assertEqual(
+            [(run["time"], run["runner"]) for run in _runs(self.repo, ref)],
+            [("2026-03-01T00:00:00+00:00", LOCAL_RAN_ON), ("2026-03-02T00:00:00+00:00", GITHUB_PUSH_RAN_ON)],
+        )
+
+    # SPEC: gate#record-runs
+    def test_a_record_keeps_the_newest_runs_only(self) -> None:
+        ref = f"refs/tangier/gates/backend/{self.key()}"
+        for day in range(1, gate.MAX_RUNS + 3):
+            with mock.patch.object(gate, "now", return_value=datetime(2026, 3, day, tzinfo=UTC)):
+                _ = self.run_gate("--force")
+        runs = _runs(self.repo, ref)
+        self.assertEqual(len(runs), gate.MAX_RUNS)
+        self.assertEqual(runs[0]["time"][:10], "2026-03-03")
+
+    # SPEC: gate#record-legacy
+    def test_a_legacy_record_counts_as_a_local_run(self) -> None:
+        ref = f"refs/tangier/gates/backend/{self.key()}"
+        legacy = {"gate": "backend", "key": self.key(), "head": "abc", "time": "2026-03-01T00:00:00+00:00"}
+        _put_blob(self.repo, ref, json.dumps(legacy))
+        self.assertEqual(self.tangier("gate", "verified", "backend")[:2], (0, "verified\n"))
+        # A new run joins it.
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
+            self.assertEqual(self.run_gate("--force")[0], 0)
+        runs = _runs(self.repo, ref)
+        self.assertEqual(runs[0], {"head": "abc", "time": "2026-03-01T00:00:00+00:00", "runner": {"kind": "local"}})
+        self.assertEqual((runs[1]["time"], runs[1]["runner"]), ("2026-03-02T00:00:00+00:00", LOCAL_RAN_ON))
+        self.assertEqual(len(runs), 2)
 
     # SPEC: gate#run-reuses-record
     def test_a_verified_gate_runs_nothing(self) -> None:
@@ -383,22 +494,22 @@ class TestRun(GateCase):
         self.assertIn("keying the working tree", err)
         key = self.worktree_key()
         self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{key}"])
-        record = json.loads(_git(self.repo, "cat-file", "blob", f"refs/tangier/gates/backend/{key}"))
         self.assertEqual(
-            record,
-            {
-                "gate": "backend",
-                "key": key,
-                "head": _git(self.repo, "rev-parse", "HEAD"),
-                "tree": self.tree(),
-                "dirty": True,
-                "base": self.base,
-                "user": "dev@example.com",
-                "time": "2026-03-01T12:00:00+00:00",
-                "tangier": tangier.__version__,
-                # The lists hold the untracked file as well as the committed change.
-                "commands": [["bin/test", "--dirs", "svc", "--files", "svc/a.py,svc/new.py"], ["bin/lint"]],
-            },
+            _runs(self.repo, f"refs/tangier/gates/backend/{key}"),
+            [
+                {
+                    "head": _git(self.repo, "rev-parse", "HEAD"),
+                    "tree": self.tree(),
+                    "dirty": True,
+                    "base": self.base,
+                    "user": "dev@example.com",
+                    "time": "2026-03-01T12:00:00+00:00",
+                    "tangier": tangier.__version__,
+                    # The lists hold the untracked file as well as the committed change.
+                    "commands": [["bin/test", "--dirs", "svc", "--files", "svc/a.py,svc/new.py"], ["bin/lint"]],
+                    "runner": {"kind": "local", "host": socket.gethostname()},
+                }
+            ],
         )
 
     # SPEC: gate#run-dirty-notice
@@ -674,8 +785,8 @@ class TestComparator(GateCase):
         return code, out + err, runner
 
     def record(self) -> dict[str, Any]:
-        """HEAD's record."""
-        return json.loads(_git(self.repo, "cat-file", "blob", f"refs/tangier/gates/backend/{self.key(TWO_ITEMS)}"))
+        """The newest run in HEAD's record."""
+        return _runs(self.repo, f"refs/tangier/gates/backend/{self.key(TWO_ITEMS)}")[-1]
 
     def rebase_onto_a_main_that_changes(self, rel: str, content: str) -> str:
         """Commit `rel` on a main that forks at `self.base`, rebase the branch onto it, and return main."""
@@ -714,10 +825,8 @@ class TestComparator(GateCase):
         _write(self.repo, "other/b.py", "b = 2\n")
         _, _, runner = self.run_gate()
         self.assertEqual(runner.calls, OTHER_ONLY)
-        record = json.loads(
-            _git(self.repo, "cat-file", "blob", f"refs/tangier/gates/backend/{self.worktree_key(TWO_ITEMS)}")
-        )
-        self.assertEqual(record["base"], _git(self.repo, "rev-parse", "HEAD"))
+        run = _runs(self.repo, f"refs/tangier/gates/backend/{self.worktree_key(TWO_ITEMS)}")[-1]
+        self.assertEqual(run["base"], _git(self.repo, "rev-parse", "HEAD"))
 
     # SPEC: gate#comparator-newest-record
     def test_a_record_on_a_commit_that_is_not_an_ancestor_is_ignored(self) -> None:
@@ -1124,6 +1233,16 @@ class TestStore(GateCase):
         self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{new}"])
         self.assertEqual(self.tangier("gate", "push")[0], 0)
         self.assertNotIn(f"refs/tangier/gates/backend/{old}", self.origin_refs())
+
+    # SPEC: gate#prune-by-record-time
+    def test_prune_keeps_a_record_whose_newest_run_is_recent(self) -> None:
+        key = self.record_and_push(datetime(2026, 1, 1, tzinfo=UTC))
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 2, 20, tzinfo=UTC)):
+            self.assertEqual(self.tangier("gate", "run", "backend", "--base", self.base, "--force")[0], 0)
+        self.assertEqual(self.tangier("gate", "push")[0], 0)
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
+            self.assertEqual(self.tangier("gate", "prune", "--older-than", "30")[0], 0)
+        self.assertEqual(self.origin_refs(), [f"refs/tangier/gates/backend/{key}"])
 
     # SPEC: gate#prune-by-record-time
     def test_prune_rejects_a_limit_below_one_day(self) -> None:

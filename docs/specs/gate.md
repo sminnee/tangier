@@ -188,14 +188,14 @@ build uses `--force`.
 
 ## Store
 
-A record is a JSON blob. The ref `refs/tangier/gates/<gate>/<key>` points at it.
+A record is a JSON blob. The ref `refs/tangier/gates/<gate>/<key>` points at it. The record holds
+a list of runs: each pass of the same content, on a dev machine or in CI, is one run.
 
-- A record holds these fields. `[record-contents]`
+- A record holds `format` (`2`), `gate`, `key` and `runs`. Each run holds these fields.
+  `[record-contents]`
 
   | Field | Value |
   | --- | --- |
-  | `gate` | The gate name. |
-  | `key` | The key. |
   | `head` | The commit the tested work sat on. |
   | `tree` | The tree that ran: `head`'s tree, or the working tree with uncommitted work. |
   | `dirty` | `true` when `tree` held uncommitted work. |
@@ -204,12 +204,25 @@ A record is a JSON blob. The ref `refs/tangier/gates/<gate>/<key>` points at it.
   | `time` | ISO 8601, UTC. |
   | `tangier` | The tangier version. |
   | `commands` | The resolved commands. |
+  | `runner` | Where the run happened. See below. |
 
   `base`, `commands`, `head` and `dirty` are for people. None is a key input.
 
 - A pass on a dirty tree verifies the commit later made from exactly that work, with no new run.
   A commit of only part of the work keys differently, so the gate runs again.
   `[record-reused-after-commit]`
+
+- A pass adds a run to the record at its key. Runs with the same `time`, `head` and `runner` are
+  one run. A record keeps the newest 20 runs. `[record-runs]`
+- A blob with no `runs` is a legacy record. It reads as one run whose runner is `local`: before
+  runs were recorded, CI ran `--read-only` and wrote no record. A `format` above 2 is a newer
+  record this tangier cannot read. `[record-legacy]`
+- `runner.kind` is `ci` when the `CI` variable is `true` or `1`, and `local` otherwise. A local
+  runner holds `host`. A CI runner holds `provider`: `github-actions` under GitHub Actions, and
+  `unknown` elsewhere. Under GitHub Actions it also holds `event`, `ref`, `repository`, `workflow`,
+  `job`, `run_id`, `run_attempt`, `runner_name` and the run's `url`. `[runner-detect]`
+
+  A pull request and a merged branch are one store. `event` and `ref` tell their runs apart.
 
 - `gate run` writes a local ref. It needs no network.
 - `gate push` pushes every local gate ref to `origin` with a forced refspec. Two people can record
@@ -263,7 +276,8 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
 - Otherwise `gate run` runs each command with the gate's `env` added to the caller's environment.
   It stops at the first failure, exits with that command's code, and writes no record.
   `[run-stops-at-first-failure]`
-- On success, `gate run` writes the record, on a clean tree or a dirty one. `[run-records-pass]`
+- On success, `gate run` adds the run to the record, on a clean tree or a dirty one, and prints the
+  ref and the runner's kind. `[run-records-pass]`
 - On a dirty tree, `gate run` prints a note to stderr for each gate before it plans. The note lists
   the uncommitted changes and untracked files that touch the gate's scope, or says that none do.
   It shows which local files the key holds, and helps explain a CI run whose key differs from
@@ -298,9 +312,9 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   `not-needed` when the diff from the comparator does not need the gate, and `required`
   otherwise. A CI job runs the gate when the status is `required`. `[status-values]`
 - `gate prune` fetches the gate refs on `origin` into `refs/tangier/origin-gates/*`, reads the
-  `time` of each record, and deletes the refs older than the limit on `origin`. It deletes this
-  clone's local records by the same rule, because `gate push` would put them back. The limit is
-  1 day or more. `[prune-by-record-time]`
+  `time` of each record's newest run, and deletes the refs older than the limit on `origin`. A
+  record with one recent run stays whole. It deletes this clone's local records by the same rule,
+  because `gate push` would put them back. The limit is 1 day or more. `[prune-by-record-time]`
 - Another clone that holds an old local record puts the ref back on its next `gate push`. The next
   prune deletes it again.
 - `gate prune` skips a ref that is not a readable record, with a warning. `[prune-skips-unreadable]`
