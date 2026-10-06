@@ -32,4 +32,4 @@ jobs:
           fi
       - run: uv build
       # Pinned by commit: this job can publish as tangier, so a moved tag must not change what runs.
-      - uses: pypa/gh-action-pypi-publish@ec4db0b4ddc65acdf4bff5fa45ac92d78b56bdf0 # v1.9.0
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
