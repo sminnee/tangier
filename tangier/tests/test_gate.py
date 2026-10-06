@@ -166,6 +166,11 @@ class GateCase(unittest.TestCase):
         # A run on a CI runner would record a `ci` runner.
         for var in ("CI", "GITHUB_ACTIONS"):
             _ = os.environ.pop(var, None)
+        # These tests read a run's own output, so `gate run` runs inline, as in CI.
+        # `test_gate_jobs` covers the background job.
+        background = mock.patch.object(gate_cmds, "_in_background", return_value=False)
+        _ = background.start()
+        self.addCleanup(background.stop)
 
     def tangier(self, *argv: str, runner: Any = None, cwd: str | None = None) -> tuple[int, str, str]:
         """Run the CLI in a repo. Returns (exit code, stdout, stderr)."""
