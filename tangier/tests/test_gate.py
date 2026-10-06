@@ -193,6 +193,19 @@ class GateCase(unittest.TestCase):
         _ = subprocess.run(["git", "clone", "-q", origin, tmp.name], capture_output=True, check=True)
         return tmp.name
 
+    def shallow_clone(self, depth: int) -> str:
+        """A clone of this repo's checked-out branch with `depth` commits of history, removed after the test."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        branch = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
+        url = f"file://{self.repo}"
+        _ = subprocess.run(
+            ["git", "clone", "-q", f"--depth={depth}", "--branch", branch, url, tmp.name],
+            capture_output=True,
+            check=True,
+        )
+        return tmp.name
+
 
 class TestKey(GateCase):
     # SPEC: gate#key-content-only
@@ -985,6 +998,73 @@ class TestComparator(GateCase):
         self.assertEqual(code, 0, out)
         walk.assert_called_once()
         self.assertEqual(runner.calls, BOTH)
+
+    def merge_into_main(self, main_change: tuple[str, str] | None = None) -> None:
+        """Check out a main that forks at `self.base`, and merge the branch into it as a PR's merge commit.
+
+        HEAD's parents are then (main, the branch tip). With `main_change`, main first commits that file.
+        """
+        branch = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
+        _ = _git(self.repo, "checkout", "-q", "-b", "main-tip", self.base)
+        if main_change:
+            _ = _commit(self.repo, *main_change)
+        _ = _git(self.repo, "merge", "-q", "--no-ff", "-m", "merge the PR", branch)
+
+    # SPEC: gate#comparator-pr-head
+    def test_a_pr_merge_commit_diffs_from_the_newest_record_on_the_pr_head(self) -> None:
+        _ = self.run_gate()
+        recorded = _git(self.repo, "rev-parse", "HEAD")
+        _ = _commit(self.repo, "other/b.py", "b = 2\n")
+        self.merge_into_main()
+        _, out, runner = self.run_gate("--debug", base="HEAD^1")
+        self.assertEqual(runner.calls, OTHER_ONLY)
+        self.assertEqual(self.record()["base"], recorded)
+        self.assertIn(f"  {recorded[:7]} (PR head) ", out)
+
+    # SPEC: gate#comparator-pr-head
+    def test_a_pr_merge_commit_after_main_moved_also_runs_mains_change(self) -> None:
+        _ = self.run_gate()
+        _ = _commit(self.repo, "other/b.py", "b = 2\n")
+        self.merge_into_main(("svc/c.py", "c = 1\n"))
+        _, _, runner = self.run_gate(base="HEAD^1")
+        self.assertEqual(runner.calls, [["bin/test", "--dirs", "other,svc", "--files", "svc/c.py"], ["bin/lint"]])
+
+    # SPEC: gate#comparator-pr-head
+    # SPEC: gate#comparator-falls-back-to-merge-base
+    def test_a_pr_merge_commit_with_no_record_on_the_branch_diffs_from_the_merge_base(self) -> None:
+        self.merge_into_main()
+        _, _, runner = self.run_gate(base="HEAD^1")
+        self.assertEqual(runner.calls, BOTH)
+        self.assertEqual(self.record()["base"], self.base)
+
+    # SPEC: gate#comparator-first-parent
+    # SPEC: gate#comparator-pr-head
+    def test_the_pr_head_line_does_not_walk_a_branch_merged_into_it(self) -> None:
+        branch = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
+        _ = _git(self.repo, "checkout", "-q", "-b", "side")
+        _ = _commit(self.repo, "other/b.py", "b = side\n")
+        _ = self.run_gate()
+        _ = _git(self.repo, "checkout", "-q", branch)
+        _ = _commit(self.repo, "svc/a.py", "a = 3\n")
+        _ = _git(self.repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        self.merge_into_main()
+        _, _, runner = self.run_gate(base="HEAD^1")
+        self.assertEqual(runner.calls, BOTH)
+        self.assertEqual(self.record()["base"], self.base)
+
+    # SPEC: gate#comparator-pr-head
+    def test_a_shallow_clone_stops_the_pr_head_walk_at_its_boundary(self) -> None:
+        # B has a record. The clone holds the merge commit and its parents only, so C but not B.
+        _ = self.run_gate()
+        recorded = _git(self.repo, "rev-parse", "HEAD")
+        tip = _commit(self.repo, "other/b.py", "b = 2\n")
+        self.merge_into_main()
+        code, out, runner = self.run_gate("--debug", base="HEAD^1", cwd=self.shallow_clone(2))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("warning", out)
+        self.assertEqual(runner.calls, BOTH)
+        self.assertIn(f"  {tip[:7]} (PR head) ", out)
+        self.assertNotIn(recorded[:7], out)
 
     # SPEC: gate#comparator-newest-record
     def test_a_rebase_onto_a_main_that_leaves_the_scope_keeps_the_record(self) -> None:

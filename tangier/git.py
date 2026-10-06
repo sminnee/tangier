@@ -175,6 +175,11 @@ def rev_list_first_parent(head: str, stop: str) -> list[str]:
     return _git_checked("rev-list", "--first-parent", head, f"^{stop}").split()
 
 
+def parents(commit: str) -> list[str]:
+    """`commit`'s parents, first parent first. Empty for a root commit or a shallow clone's boundary."""
+    return _git_checked("rev-list", "--parents", "-n", "1", commit).split()[1:]
+
+
 def config_get(key: str) -> str | None:
     """A git config value, or None when unset. Unset is an ordinary answer, not a failure."""
     return _git("config", "--get", key).strip() or None
