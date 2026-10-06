@@ -21,6 +21,7 @@ One config (`pipeline.toml`). Each non-reserved top-level table is one tag. Tags
 - `touched = true` opts the tag into a `<tag>-touched=true/false` line in `github-outputs`.
   `[touched-opt-in]`
 - `files = true` makes a table a projection-only file-set (globs select diff files for `--files`).
+  It takes `paths` only: any other field is a config error, since a file-set is never selected.
   `[file-set-field]`
 - `depends = ["tag", ...]` declares the tag's direct dependencies. `[subsystem-depends-key]`
 - `paths` and `depends` accept a bare string as shorthand for a single-element list.
