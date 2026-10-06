@@ -9,7 +9,7 @@ import shlex
 import sys
 import time
 
-from tangier import gate, ranon
+from tangier import gate, git, ranon
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs
@@ -56,22 +56,36 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
     The key describes the working tree, uncommitted work included. `--dry-run`
     runs nothing. A failing gate does not stop the rest, unless `--fail-fast`.
     The exit code is the first non-zero one.
+
+    Once every gate has run, the records this invocation wrote are published
+    to origin. A failed publish is a warning: the records stay local, and the
+    exit code is still the gates'.
     """
     names = _selected(config, args)
     # One read of origin for all gates, and none when every record is local.
     origin = gate.OriginRecords()
     first = 0
+    written: set[str] = set()
     for i, name in enumerate(names):
         try:
-            code = _run_one(config, args, name, origin)
-        except gate.GateError as e:
+            code, ref = _run_one(config, args, name, origin)
+        except (gate.GateError, git.GitError) as e:
             print(f"error: {e}", file=sys.stderr)
-            code = 2
+            code, ref = 2, None
         first = first or code
+        if ref:
+            written.add(ref)
         if first and args.fail_fast:
             if rest := names[i + 1 :]:
                 print(f"--fail-fast: not run: {', '.join(rest)}", file=sys.stderr)
             break
+    if written:
+        try:
+            synced = gate.publish(written)
+        except (gate.GateError, git.GitError) as e:
+            print(f"warning: gate records stay local ({e}); run `tangier gate sync` to retry", file=sys.stderr)
+        else:
+            _print_synced(synced, quiet=True)
     return first
 
 
@@ -85,8 +99,10 @@ def _selected(config: Config, args: argparse.Namespace) -> list[str]:
     return gate.select_all(config, args.name)
 
 
-def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.OriginRecords) -> int:
+def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.OriginRecords) -> tuple[int, str | None]:
     """Plan one gate, then run it unless it is verified or not needed.
+
+    Returns its exit code, and the ref it wrote or None.
 
     Each gate takes its own snapshot, because an earlier gate's commands can
     change the tree. `--full` reads no record and no diff.
@@ -105,23 +121,23 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
         _print_debug(p)
     if args.dry_run:
         _print_plan(p)
-        return 0
+        return 0, None
     if p.status == "not-needed":
         print(f"gate `{name}`: not-needed for this diff ({p.reason})")
-        return 0
+        return 0, None
     if p.status == "verified":
         print(f"gate `{name}`: verified ({p.reason}), nothing to run")
-        return 0
+        return 0, None
 
     start = clock()
     code = _run_commands(_runner(args), gate.spec_for(config, name), p.commands)
     duration = clock() - start
     if code != 0:
         print(f"gate `{name}`: failed in {_took(duration)} (exit {code})")
-        return code
+        return code, None
     if args.read_only:
         print(f"gate `{name}`: passed in {_took(duration)}, no record written (--read-only)")
-        return 0
+        return 0, None
     # The key is content only, so a moved HEAD over the same tree is fine. A
     # changed tree is not: the commands did not test what the key describes.
     after = gate.snapshot().tree
@@ -131,11 +147,11 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
             f"(tree {snap.tree[:7]}, now {after[:7]}), so no record was written",
             file=sys.stderr,
         )
-        return 1
+        return 1, None
     ran_on = ranon.detect()
     ref = gate.write_record(p, ran_on, duration)
     print(f"gate `{name}`: passed in {_took(duration)}, recorded as {ref} ({ran_on['kind']})")
-    return 0
+    return 0, ref
 
 
 def _took(seconds: float) -> str:
@@ -213,17 +229,21 @@ def cmd_verified(config: Config, args: argparse.Namespace) -> int:
     return 1
 
 
-def cmd_push(config: Config, args: argparse.Namespace) -> int:
-    del config, args
-    synced = gate.sync()
-    if synced.pushed or synced.pulled or synced.merged:
-        print(
-            f"synced gate records with {gate.REMOTE}: "
-            f"pushed {synced.pushed}, pulled {synced.pulled}, merged {synced.merged}"
-        )
-    else:
-        print(f"gate records already in sync with {gate.REMOTE}")
+def cmd_sync(config: Config, args: argparse.Namespace) -> int:
+    del args
+    _print_synced(gate.sync(config.gate_prune_after_days))
     return 0
+
+
+def _print_synced(synced: gate.Synced, *, quiet: bool = False) -> None:
+    """The counts, or that nothing moved. `quiet` prints nothing when nothing moved."""
+    if synced.pushed or synced.pulled or synced.merged or synced.pruned:
+        print(
+            f"synced gate records with {gate.REMOTE}: pushed {synced.pushed}, pulled {synced.pulled}, "
+            f"merged {synced.merged}, pruned {synced.pruned}"
+        )
+    elif not quiet:
+        print(f"gate records already in sync with {gate.REMOTE}")
 
 
 def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
@@ -262,27 +282,6 @@ def _group_status(statuses: list[str]) -> str:
     if all(status == "verified" for status in statuses):
         return "verified"
     return "not-needed"
-
-
-def cmd_prune(config: Config, args: argparse.Namespace) -> int:
-    del config
-    pruned = gate.prune(args.older_than)
-    for where, refs in ((gate.REMOTE, pruned.origin), ("local", pruned.local)):
-        for ref in refs:
-            print(f"deleted {ref} ({where})")
-    print(
-        f"pruned {len(pruned.origin)} gate record(s) on {gate.REMOTE} and {len(pruned.local)} local, "
-        f"older than {args.older_than} days"
-    )
-    return 0
-
-
-def _positive_days(value: str) -> int:
-    """A day count of at least 1. Zero or less would put the cutoff in the future and delete every record."""
-    days = int(value)
-    if days < 1:
-        raise argparse.ArgumentTypeError("must be 1 or more")
-    return days
 
 
 def _accept(value: str) -> gate.Accept:
@@ -351,17 +350,13 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _add_accept(vp)
     vp.set_defaults(func=cmd_verified)
 
-    pp = gsub.add_parser("push", help="sync gate records with origin: pull, merge runs, push")
-    pp.set_defaults(func=cmd_push)
+    sp = gsub.add_parser(
+        "sync", help="sync gate records with origin: pull, merge runs, push, and prune expired records"
+    )
+    sp.set_defaults(func=cmd_sync)
 
     op = gsub.add_parser("github-outputs", help="emit <gate>-status, -run, -verified and -key as $GITHUB_OUTPUT lines")
     add_diff_args(op)
     _add_accept(op)
     add_full(op, "mark every gate and group required, as if every tag changed")
     op.set_defaults(func=cmd_github_outputs)
-
-    xp = gsub.add_parser("prune", help="delete old gate records, on origin and in this clone")
-    _ = xp.add_argument(
-        "--older-than", type=_positive_days, required=True, metavar="DAYS", help="age limit, by the record's time"
-    )
-    xp.set_defaults(func=cmd_prune)

@@ -238,19 +238,32 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   A pull request and a merged branch are one store. `event` and `ref` tell their runs apart, and
   `--accept` can match on them.
 
-- `gate run` writes a local ref. It needs no network.
-- `gate push` syncs the gate records with `origin`. It fetches `origin`'s gate refs, then pushes
+- `gate run` writes a local ref. Once every gate in the invocation has run, an invocation that
+  wrote a record publishes it: it pulls and merges `origin`'s gate records, as `gate sync` does but
+  without pruning, and pushes only the refs it wrote, leased. A rejected push fetches and merges
+  the written gates' refs alone and pushes again, up to 3 attempts. Other local records stay
+  local. A failed publish is a warning that names `gate sync`, and the records stay local. The
+  exit code is the gates'. `--read-only` and `--dry-run` write no record, so they never publish.
+  `[run-publishes]`
+- `gate sync` syncs every gate record with `origin`. It fetches `origin`'s gate refs, then pushes
   only the refs that differ, in one atomic push. With nothing to sync, it pushes nothing and exits
-  0. `[push]`
-- A record that only `origin` holds is written to the local ref. `[push-pulls]`
-- When both hold a record at the same ref, `gate push` merges their runs into the local record,
+  0. `[sync]`
+- A record that only `origin` holds is written to the local ref. `[sync-pulls]`
+- When both hold a record at the same ref, `gate sync` merges their runs into the local record,
   and pushes it unless `origin`'s record already holds every run. A local record that cannot be
   read takes `origin`'s instead, with a warning. An `origin` record that cannot be read is
-  overwritten, with a warning. `[push-merges-runs]`
+  overwritten, with a warning. `[sync-merges-runs]`
 - Each pushed ref carries a lease on the SHA the fetch saw, or on the ref being absent. When
-  another clone pushed after the fetch, the push is rejected, and `gate push` fetches and merges
+  another clone pushed after the fetch, the push is rejected, and `gate sync` fetches and merges
   again. So a race never overwrites another clone's runs. After 3 rejected attempts it exits 2,
-  and this sync has written nothing to `origin`. `[push-retries-on-race]`
+  and this sync has written nothing to `origin`. `[sync-retries-on-race]`
+- `gate sync` prunes. A record expires when its newest run's `time` is older than
+  `prune-after-days`. A record with one recent run stays whole. An expired record is deleted
+  locally and on `origin`, in the same atomic push. The delete is leased on the SHA the fetch saw,
+  so a record that gained a fresh run since then is not deleted: the push is rejected, and the
+  retry keeps it. A ref that is not a readable record is kept, with a warning. `[sync-prunes]`
+- An expired record that `origin` lacks is deleted locally, not pushed. So a clone that synced
+  before a prune never puts the pruned record back. `[sync-drops-expired-local]`
 - A gate is verified when the local record holds an accepted run, or when `origin`'s record does.
   The local check runs first. The first lookup that reaches `origin` fetches its gate refs, in one
   call, into `refs/tangier/origin-gates/*`, and every later lookup reads that mirror.
@@ -273,9 +286,8 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | `gate key [<selector>]` | Print the key. With no selector, print `<name> <key>` for every gate. |
 | `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug` and `--accept`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
-| `gate push` | Sync gate records with `origin`: pull, merge runs, push. |
+| `gate sync` | Sync gate records with `origin`: pull, merge runs, push, and prune expired records. |
 | `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept` and `--full`. |
-| `gate prune --older-than <days>` | Delete old gate records, on `origin` and in this clone. |
 
 `gate run` has no `--head`. The commands test the checked-out tree, so the working tree is the only
 content a record can describe. `gate key` and `gate verified` take no `--base`, because the key reads no diff.
@@ -366,10 +378,3 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
 - The status is one word, checked in this order: `verified` when the keyed content has a record,
   `not-needed` when the diff from the comparator does not need the gate, and `required`
   otherwise. A CI job runs the gate when the status is `required`. `[status-values]`
-- `gate prune` fetches the gate refs on `origin` into `refs/tangier/origin-gates/*`, reads the
-  `time` of each record's newest run, and deletes the refs older than the limit on `origin`. A
-  record with one recent run stays whole. It deletes this clone's local records by the same rule,
-  because `gate push` would put them back. The limit is 1 day or more. `[prune-by-record-time]`
-- Another clone that holds an old local record puts the ref back on its next `gate push`. The next
-  prune deletes it again.
-- `gate prune` skips a ref that is not a readable record, with a warning. `[prune-skips-unreadable]`
