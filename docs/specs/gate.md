@@ -140,7 +140,9 @@ record can serve as a [comparator](#comparator).
   - a `--head` that names no commit;
   - a scope entry that matches no tracked file;
   - for a gate with a placeholder and no record for the keyed tree, a `--base` that names no commit or has
-    no merge base with the head. The commands cannot be resolved without the diff.
+    no merge base with the head. The commands cannot be resolved without the diff. In a shallow
+    clone, the error also names the fix: on a pull request, use `fetch-depth` of 2 or more with
+    `--base HEAD^1`.
 
 For a gate with a placeholder, a CI checkout must therefore hold `origin/main` and enough history
 to reach the merge base, unless the keyed tree already has a record.
@@ -209,7 +211,8 @@ whole rule: there is no separate config.
   non-empty list makes it needed. `[need-empty-placeholders]`
 - A `--base` with no merge base with `HEAD`, as in a shallow checkout, cannot be diffed. A gate
   with no placeholder and no record for the keyed tree is then needed, with a warning on stderr. Running
-  the gate is the safe direction. `[need-unreadable-base-runs]`
+  the gate is the safe direction. In a shallow clone, the warning names the fix: on a pull request,
+  use `fetch-depth` of 2 or more with `--base HEAD^1`. `[need-unreadable-base-runs]`
 
 On a push to `main`, `origin/main` is `HEAD`, so the diff is empty and no gate is needed. A full
 build uses `--full`.

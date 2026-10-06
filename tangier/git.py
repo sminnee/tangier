@@ -74,7 +74,8 @@ def ls_tree_path(line: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Helpers for the gate commands. Each raises `GitError` when git fails, except
-# `config_get` and `ref_exists`, where a miss is an ordinary answer.
+# `config_get` and `ref_exists`, where a miss is an ordinary answer, and
+# `is_shallow`, which only picks a hint.
 # ---------------------------------------------------------------------------
 
 
@@ -178,6 +179,11 @@ def rev_list_first_parent(head: str, stop: str) -> list[str]:
 def parents(commit: str) -> list[str]:
     """`commit`'s parents, first parent first. Empty for a root commit or a shallow clone's boundary."""
     return _git_checked("rev-list", "--parents", "-n", "1", commit).split()[1:]
+
+
+def is_shallow() -> bool:
+    """Whether this is a shallow clone, whose history stops at a boundary."""
+    return _git("rev-parse", "--is-shallow-repository").strip() == "true"
 
 
 def config_get(key: str) -> str | None:

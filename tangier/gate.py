@@ -45,6 +45,9 @@ MAX_RUNS = 20
 ACCEPT_FIELDS = ("kind", "provider", "event", "ref", "workflow", "job")
 RUNNER_KINDS = ("local", "ci")
 
+# How to reach the merge base from a shallow clone, which is the CI checkout default.
+SHALLOW_FIX = "This is a shallow clone: on a pull request, use `fetch-depth` of 2 or more with `--base HEAD^1`"
+
 
 class GateError(RuntimeError):
     """A gate cannot be keyed, run or recorded."""
@@ -300,9 +303,12 @@ def comparator(
         mb = git.merge_base(base, snap.commit)
     except git.GitError as e:
         if has_placeholder(spec):
+            fix = f"Fetch `{base}` with enough history to reach the merge base, or pass `--base`"
+            if git.is_shallow():
+                fix += f". {SHALLOW_FIX}"
             raise GateError(
                 f"gate `{name}`: cannot diff `{base}` against `{snap.commit[:7]}`, so the commands cannot be "
-                f"resolved. Fetch `{base}` with enough history to reach the merge base, or pass `--base` ({e})"
+                f"resolved. {fix} ({e})"
             ) from e
         return Comparator(None, None, f"no merge base with {base}: {e}", trail)
     if has_placeholder(spec):
@@ -400,7 +406,8 @@ def plan(
     if comp.verified:
         return made("verified", f"{comp.where} record {snap_key}", [])
     if comp.commit is None:
-        print(f"warning: gate `{name}`: {comp.how}, so it counts as needed", file=sys.stderr)
+        fix = f". {SHALLOW_FIX}" if git.is_shallow() else ""
+        print(f"warning: gate `{name}`: {comp.how}, so it counts as needed{fix}", file=sys.stderr)
         return made("required", comp.how, [list(argv) for argv in spec.commands])
 
     # The comparator is an ancestor of `snap.commit`, so this two-dot diff is
