@@ -11,6 +11,7 @@ is git refs, so a faked git would prove nothing about either.
 
 import contextlib
 import io
+import itertools
 import json
 import os
 import socket
@@ -24,6 +25,7 @@ from unittest import mock
 
 import tangier
 from tangier import cli, gate, git, ranon
+from tangier.commands import gate_cmds
 from tangier.runner import Result
 from tangier.tests.support import RecordingRunner, make_git_repo, make_origin, parse_toml
 
@@ -129,6 +131,11 @@ GITHUB_PUSH_RAN_ON = {
     "runner_name": "GitHub Actions 7",
 }
 LOCAL_RAN_ON = {"kind": "local", "host": socket.gethostname()}
+
+
+def _taking(seconds: float) -> Any:
+    """Patch the run clock so that each gate's commands take `seconds`."""
+    return mock.patch.object(gate_cmds, "clock", side_effect=itertools.count(100.0, seconds).__next__)
 
 
 def _put_blob(root: str, ref: str, content: str, *, remote: str | None = None) -> None:
@@ -429,7 +436,10 @@ class TestRun(GateCase):
     # SPEC: gate#record-runs
     def test_a_pass_on_a_clean_tree_writes_the_record(self) -> None:
         runner = RecordingRunner()
-        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)):
+        with (
+            mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)),
+            _taking(12.34),
+        ):
             code, _, _ = self.run_gate(runner=runner)
         self.assertEqual(code, 0)
         self.assertEqual(runner.calls, SELECTED)
@@ -454,6 +464,7 @@ class TestRun(GateCase):
                         "base": self.base,
                         "user": "dev@example.com",
                         "time": "2026-03-01T12:00:00+00:00",
+                        "duration": 12.3,
                         "tangier": tangier.__version__,
                         "commands": SELECTED,
                         "runner": LOCAL_RAN_ON,
@@ -558,7 +569,10 @@ class TestRun(GateCase):
     # SPEC: gate#record-contents
     def test_a_pass_on_a_dirty_tree_records_the_tree_it_tested(self) -> None:
         _write(self.repo, "svc/new.py", "new = 1\n")
-        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)):
+        with (
+            mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)),
+            _taking(12.34),
+        ):
             code, _, err = self.run_gate()
         self.assertEqual(code, 0)
         self.assertIn("keying the working tree", err)
@@ -574,6 +588,7 @@ class TestRun(GateCase):
                     "base": self.base,
                     "user": "dev@example.com",
                     "time": "2026-03-01T12:00:00+00:00",
+                    "duration": 12.3,
                     "tangier": tangier.__version__,
                     # The lists hold the untracked file as well as the committed change.
                     "commands": [["bin/test", "--dirs", "svc", "--files", "svc/a.py,svc/new.py"], ["bin/lint"]],
@@ -1393,7 +1408,7 @@ class TestStore(GateCase):
 
     def run_on(self, cwd: str, day: int) -> None:
         """Record a local pass in `cwd`, at 2026-03-`day`."""
-        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, day, tzinfo=UTC)):
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, day, tzinfo=UTC)), _taking(1.0):
             code, _, err = self.tangier("gate", "run", "backend", "--base", self.base, "--force", cwd=cwd)
         self.assertEqual(code, 0, err)
 
@@ -1406,6 +1421,7 @@ class TestStore(GateCase):
         with (
             mock.patch.dict(os.environ, GITHUB_PUSH),
             mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)),
+            _taking(12.34),
         ):
             code, _, err = self.tangier("gate", "run", "backend", "--base", self.base, cwd=other)
         self.assertEqual(code, 0, err)
@@ -1425,9 +1441,10 @@ class TestStore(GateCase):
             self.assertEqual(self.tangier("gate", "push", cwd=cwd)[1], "gate records already in sync with origin\n")
             self.assertEqual(_git(cwd, "rev-parse", ref), on_origin)
         self.assertEqual(_git(self.origin, "rev-parse", ref), on_origin)
+        # The merge keeps each run whole.
         self.assertEqual(
-            [(run["time"], run["runner"]) for run in _runs(self.origin, ref)],
-            [("2026-03-01T00:00:00+00:00", GITHUB_PUSH_RAN_ON), ("2026-03-02T00:00:00+00:00", LOCAL_RAN_ON)],
+            [(run["time"], run["runner"], run["duration"]) for run in _runs(self.origin, ref)],
+            [("2026-03-01T00:00:00+00:00", GITHUB_PUSH_RAN_ON, 12.3), ("2026-03-02T00:00:00+00:00", LOCAL_RAN_ON, 1.0)],
         )
 
     # SPEC: gate#push-merges-runs
