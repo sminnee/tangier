@@ -260,7 +260,8 @@ class TestKey(GateCase):
         # gate with every list empty.
         code, _, err = self.tangier("gate", "run", "backend", "--base", "origin/main")
         self.assertEqual(code, 2)
-        self.assertIn("origin/main", err)
+        self.assertIn("Fetch `origin/main` with enough history to reach the merge base", err)
+        self.assertNotIn("fetch-depth", err)
         self.assertEqual(_gate_refs(self.repo), [])
 
     # SPEC: gate#key-fails-closed
@@ -893,7 +894,18 @@ class TestNeed(GateCase):
         self.assertEqual(code, 0)
         self.assertIn("warning", err)
         self.assertIn("needed", err)
+        self.assertNotIn("fetch-depth", err)
         self.assertEqual(runner.calls, [["bin/test"], ["bin/lint"]])
+
+    # SPEC: gate#need-unreadable-base-runs
+    def test_an_unreadable_base_in_a_shallow_clone_names_the_fix(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        runner = RecordingRunner()
+        clone = self.shallow_clone(1)
+        code, _, err = self.tangier("gate", "run", "backend", "--base", "HEAD^1", runner=runner, cwd=clone)
+        self.assertEqual((code, runner.calls), (0, [["bin/test"], ["bin/lint"]]))
+        self.assertIn("so it counts as needed. This is a shallow clone", err)
+        self.assertIn("`fetch-depth` of 2 or more with `--base HEAD^1`", err)
 
 
 # `CONFIG` with a second item, `other`, in the scope.
@@ -1065,6 +1077,13 @@ class TestComparator(GateCase):
         self.assertEqual(runner.calls, BOTH)
         self.assertIn(f"  {tip[:7]} (PR head) ", out)
         self.assertNotIn(recorded[:7], out)
+
+    # SPEC: gate#key-fails-closed
+    def test_a_shallow_clone_with_no_merge_base_names_the_fix(self) -> None:
+        self.merge_into_main()
+        code, out, _ = self.run_gate(base="HEAD^1", cwd=self.shallow_clone(1))
+        self.assertEqual(code, 2)
+        self.assertIn("`fetch-depth` of 2 or more with `--base HEAD^1`", out)
 
     # SPEC: gate#comparator-newest-record
     def test_a_rebase_onto_a_main_that_leaves_the_scope_keeps_the_record(self) -> None:
