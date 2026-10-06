@@ -1132,6 +1132,32 @@ class TestRunMany(GateCase):
         self.assertEqual(runner.calls, [SELECTED[0], ["bin/lint", "--all"]])
         self.assertEqual(_gate_refs(self.repo), [])
 
+    # SPEC: gate#run-fail-fast
+    def test_fail_fast_stops_at_the_first_failing_gate(self) -> None:
+        runner = RecordingRunner({("bin/test",): Result(3)})
+        code, _, err = self.tangier("gate", "run", "--all", "--fail-fast", "--base", self.base, runner=runner)
+        self.assertEqual(code, 3)
+        self.assertEqual(runner.calls, [SELECTED[0]])
+        self.assertEqual(_gate_refs(self.repo), [])
+        self.assertIn("--fail-fast: not run: lint\n", err)
+
+    # SPEC: gate#run-fail-fast
+    def test_fail_fast_runs_on_past_a_passing_gate(self) -> None:
+        runner = RecordingRunner({("bin/lint", "--all"): Result(4)})
+        code, _, err = self.tangier("gate", "run", "--all", "--fail-fast", "--base", self.base, runner=runner)
+        self.assertEqual(code, 4)
+        self.assertEqual(runner.calls, [*SELECTED, ["bin/lint", "--all"]])
+        self.assertEqual(len(_gate_refs(self.repo)), 1)
+        self.assertNotIn("not run", err)
+
+    # SPEC: gate#run-fail-fast
+    def test_fail_fast_stops_at_a_gate_error(self) -> None:
+        # No `origin/main`, so the placeholder gate cannot resolve its base.
+        runner = RecordingRunner()
+        code, _, _ = self.tangier("gate", "run", "--all", "--fail-fast", "--base", "origin/main", runner=runner)
+        self.assertEqual(code, 2)
+        self.assertEqual(runner.calls, [])
+
     # SPEC: gate#run-all
     def test_no_gate_and_no_all_is_an_error(self) -> None:
         code, _, err = self.tangier("gate", "run", "--base", self.base)

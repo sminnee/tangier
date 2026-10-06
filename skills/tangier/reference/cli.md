@@ -135,7 +135,7 @@ member. An unknown selector exits 2.
 
 | Command | Flags | Behaviour | Exit |
 | --- | --- | --- | --- |
-| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--dry-run`, `--debug`, `--accept` | Run each gate on the working tree, unless it is verified or not needed. | the first non-zero code |
+| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept` | Run each gate on the working tree, unless it is verified or not needed. | the first non-zero code |
 | `gate list` | | Print every gate in config order, with a group's members indented under a `<group> (group)` line. | 0 |
 | `gate key [<selector>]` | `--head` | Print the key. A group, or no selector, prints `<name> <key>` per gate, and nothing when any gate fails closed. | 0, or 2 when a scope entry matches no file |
 | `gate verified <selector>` | `--head`, `--accept` | Print `verified` or `unverified`. A group needs every member. | 0 verified, 1 unverified |
@@ -150,6 +150,7 @@ member. An unknown selector exits 2.
 | `--all` | Every gate, in config order. Not with a selector. |
 | `--read-only` | Reuse a record, but write none. |
 | `--full` | Skip the need test and every record. Fill each placeholder with its complete list. Needs no merge base. |
+| `--fail-fast` | Stop at the first gate that fails or errors, and name the gates not run on stderr. Exit with that gate's code. |
 | `--dry-run` | Print each gate's status, comparator, reason and commands. Run and write nothing. |
 | `--debug` | Print the comparator walk, each run read with how long it took and whether `--accept` took it, the changed files, and each list, to stderr. |
 | `--accept RAN_ON` | Count only runs from this runner: `ci`, `local`, or `field=value,...` over `kind`, `provider`, `event`, `ref`, `workflow` and `job`. Repeats; any match counts. |

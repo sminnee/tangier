@@ -54,20 +54,24 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
     """Run each selected gate on the working tree, unless the diff from its comparator does not need it.
 
     The key describes the working tree, uncommitted work included. `--dry-run`
-    runs nothing. A failing gate does not stop the rest. The exit code is the
-    first non-zero one.
+    runs nothing. A failing gate does not stop the rest, unless `--fail-fast`.
+    The exit code is the first non-zero one.
     """
     names = _selected(config, args)
     # One read of origin for all gates, and none when every record is local.
     origin = gate.OriginRecords()
     first = 0
-    for name in names:
+    for i, name in enumerate(names):
         try:
             code = _run_one(config, args, name, origin)
         except gate.GateError as e:
             print(f"error: {e}", file=sys.stderr)
             code = 2
         first = first or code
+        if first and args.fail_fast:
+            if rest := names[i + 1 :]:
+                print(f"--fail-fast: not run: {', '.join(rest)}", file=sys.stderr)
+            break
     return first
 
 
@@ -331,6 +335,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         help="reuse a record, but write none",
     )
     add_full(rp, "run with complete lists, as if every tag changed; reads no record and no diff")
+    _ = rp.add_argument("--fail-fast", action="store_true", help="stop at the first failing gate")
     _ = rp.add_argument(
         "--dry-run", action="store_true", help="print each gate's status, base and commands; run and write nothing"
     )

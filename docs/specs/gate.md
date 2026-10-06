@@ -265,7 +265,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | --- | --- |
 | `gate list` | Print every gate and group. |
 | `gate key [<selector>]` | Print the key. With no selector, print `<name> <key>` for every gate. |
-| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--dry-run`, `--debug` and `--accept`. |
+| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug` and `--accept`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
 | `gate push` | Sync gate records with `origin`: pull, merge runs, push. |
 | `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept` and `--full`. |
@@ -282,6 +282,9 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   name and no `--all` is an error, exit 2. Each gate is planned and run in turn. A failing gate
   does not stop the rest, so one run reports every failure. The exit code is the first non-zero
   one. All gates share one read of `origin`. `[run-all]`
+- `--fail-fast` stops at the first gate that fails or errors, and names the gates it did not run
+  on stderr. The exit code is that gate's. Put cheap gates, such as lint and format, before slow
+  ones in the config, so a cheap failure stops the run first. `[run-fail-fast]`
 - `--dry-run` prints each gate's status, its comparator as a short SHA with how it was chosen
   (`record at abc1234, local` or `merge base with origin/main`), and the commands a run would
   execute. It runs nothing and writes nothing. When `--accept` rejected a record on the walk, the
