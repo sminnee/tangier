@@ -18,25 +18,18 @@ def _runner(args: argparse.Namespace) -> Runner:
 
 
 def cmd_key(config: Config, args: argparse.Namespace) -> int:
-    print(gate.key(config, args.name, args.head))
+    print(gate.key(config, args.name, gate.snapshot(args.head).tree))
     return 0
 
 
 def cmd_run(config: Config, args: argparse.Namespace) -> int:
-    """Run each selected gate at HEAD, unless the diff from its comparator does not need it.
+    """Run each selected gate on the working tree, unless the diff from its comparator does not need it.
 
-    The tree must be clean before and after each run, and HEAD must not move:
-    the key describes HEAD, so the commands must test exactly HEAD.
-    `--read-only` writes no record, so it drops the rule, and `--dry-run` runs
-    nothing. A failing gate does not stop the rest. The exit code is the first
-    non-zero one.
+    The key describes the working tree, uncommitted work included. `--dry-run`
+    runs nothing. A failing gate does not stop the rest. The exit code is the
+    first non-zero one.
     """
     names = _selected(config, args)
-    if not args.read_only and not args.dry_run and not gate.is_clean():
-        raise gate.GateError(
-            f"gate {', '.join(f'`{name}`' for name in names)}: the tree is dirty, so a pass cannot be recorded. "
-            "Commit the changes, or use `--read-only` to run without a record"
-        )
     # One read of origin for all gates, and none when every record is local.
     origin = gate.OriginRecords()
     first = 0
@@ -65,15 +58,13 @@ def _selected(config: Config, args: argparse.Namespace) -> list[str]:
 def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.OriginRecords) -> int:
     """Plan one gate, then run it unless it is verified or not needed.
 
-    A dirty tree reads no record, because no key describes it. A dry run on a
-    dirty tree plans as if the tree were committed, as a real run would after
-    a commit. `--force` reads no record.
+    Each gate takes its own snapshot, because an earlier gate's commands can
+    change the tree. `--force` reads no record.
     """
-    clean = gate.is_clean()
-    if not clean and not args.dry_run:
-        print(f"gate `{name}`: the tree is dirty, so no record applies", file=sys.stderr)
-    records = clean or (args.dry_run and not args.read_only)
-    p = gate.plan(config, name, args.base, origin, records=records, force=args.force)
+    snap = gate.snapshot()
+    if snap.dirty:
+        print(f"gate `{name}`: keying the working tree (uncommitted changes included)", file=sys.stderr)
+    p = gate.plan(config, name, args.base, snap, origin, force=args.force)
     if args.debug:
         _print_debug(p)
     if args.dry_run:
@@ -92,9 +83,15 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
     if args.read_only:
         print(f"gate `{name}`: passed, no record written (--read-only)")
         return 0
-    changed = "left the tree dirty" if not gate.is_clean() else "moved HEAD" if gate.head() != p.head else ""
-    if changed:
-        print(f"gate `{name}`: passed, but the commands {changed}, so no record was written", file=sys.stderr)
+    # The key is content only, so a moved HEAD over the same tree is fine. A
+    # changed tree is not: the commands did not test what the key describes.
+    after = gate.snapshot().tree
+    if after != snap.tree:
+        print(
+            f"gate `{name}`: passed, but the working tree changed during the run "
+            f"(tree {snap.tree[:7]}, now {after[:7]}), so no record was written",
+            file=sys.stderr,
+        )
         return 1
     ref = gate.write_record(p)
     print(f"gate `{name}`: passed, recorded as {ref}")
@@ -115,7 +112,7 @@ def _print_debug(p: gate.GatePlan) -> None:
     err = sys.stderr
     print(f"gate `{p.name}`: comparator walk, newest first", file=err)
     for step in p.trail:
-        print(f"  {step.commit[:7]} {step.key or '(no key)'} {step.where or 'miss'}", file=err)
+        print(f"  {step.label} {step.key or '(no key)'} {step.where or 'miss'}", file=err)
     print(f"gate `{p.name}`: effective base {p.effective_base or '(none)'} ({p.how})", file=err)
     print(f"gate `{p.name}`: changed in scope: {', '.join(p.changed) or '(none)'}", file=err)
     for token, items in p.lists.items():
@@ -134,7 +131,7 @@ def _run_commands(runner: Runner, spec: GateSpec, commands: list[list[str]]) -> 
 
 def cmd_verified(config: Config, args: argparse.Namespace) -> int:
     """Print `verified`/`unverified` AND set the exit code, as `image exists` does."""
-    if gate.verified(args.name, gate.key(config, args.name, args.head)):
+    if gate.verified(args.name, gate.key(config, args.name, gate.snapshot(args.head).tree)):
         print("verified")
         return 0
     print("unverified")
@@ -157,7 +154,7 @@ def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
     origin = gate.OriginRecords()
     pairs: dict[str, str] = {}
     for name in sorted(config.gates):
-        p = gate.plan(config, name, args.base, origin, head=args.head)
+        p = gate.plan(config, name, args.base, gate.snapshot(args.head), origin)
         pairs[f"{name}-status"] = p.status
         pairs[f"{name}-run"] = "true" if p.status == "required" else "false"
         pairs[f"{name}-verified"] = "true" if p.status == "verified" else "false"
@@ -193,28 +190,32 @@ def _add_diff_args(p: argparse.ArgumentParser, *, head: bool = True) -> None:
         _ = p.add_argument("--head", default="HEAD")
 
 
+def _add_head_arg(p: argparse.ArgumentParser) -> None:
+    _ = p.add_argument("--head", default=None, help="key this commit, not the working tree")
+
+
 def add_parsers(sub: argparse._SubParsersAction) -> None:
     gp = sub.add_parser("gate", help="record a local gate pass, and reuse it in CI")
     gsub = gp.add_subparsers(dest="cmd", required=True)
 
     kp = gsub.add_parser("key", help="print a gate's content key")
     _ = kp.add_argument("name")
-    # No `--base`: the key reads HEAD's content only.
-    _ = kp.add_argument("--head", default="HEAD")
+    # No `--base`: the key reads content only.
+    _add_head_arg(kp)
     kp.set_defaults(func=cmd_key)
 
     rp = gsub.add_parser(
-        "run", help="run gates at HEAD, unless the diff from the last verified commit does not need them"
+        "run", help="run gates on the working tree, unless the diff from the last verified commit does not need them"
     )
     _ = rp.add_argument("name", nargs="*")
     _ = rp.add_argument("--all", action="store_true", help="run every configured gate, in name order")
     # No `--head`: the commands run against the checked-out tree, so the only
-    # head a record can describe is HEAD.
+    # content a record can describe is the working tree.
     _add_diff_args(rp, head=False)
     _ = rp.add_argument(
         "--read-only",
         action="store_true",
-        help="write no record, and so accept a dirty tree; item lists still come from commits, not the dirty tree",
+        help="reuse a record, but write none",
     )
     _ = rp.add_argument(
         "--force",
@@ -231,7 +232,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
 
     vp = gsub.add_parser("verified", help="has this gate passed? prints verified/unverified, exits 0/1")
     _ = vp.add_argument("name")
-    _ = vp.add_argument("--head", default="HEAD")
+    _add_head_arg(vp)
     vp.set_defaults(func=cmd_verified)
 
     pp = gsub.add_parser("push", help="push local gate records to origin")

@@ -128,8 +128,8 @@ The record sits under a **gate key**: a hash of the raw commands, the `env` tabl
 content of the `scope` packages. The key ignores commit SHA and history. A rebase or a re-cut that
 leaves the scope unchanged keeps the record valid.
 
-Each run diffs from the gate's **comparator**: the newest commit between `HEAD` and the merge base
-with `--base` whose content already has a record. On a branch built up over many commits, a gate
+Each run diffs from the gate's **comparator**: the newest content, from the working tree back
+through `HEAD` to the merge base with `--base`, that already has a record. On a branch built up over many commits, a gate
 then re-tests only what changed since its last pass. With no record, it diffs from the merge base.
 
 tangier decides whether that diff needs the gate. A gate is needed when a changed file is one of
@@ -159,12 +159,14 @@ test-backend:
 `gate run --all --dry-run` shows each gate's status, the commit it diffs from, and the commands it
 would run. Add `--debug` to see each commit the comparator walk checked.
 
-`gate run` refuses a dirty tree, because the key describes `HEAD`. If the commands leave the tree
-dirty, `gate run` writes no record and exits 1. Two flags change that:
+`gate run` keys the working tree, uncommitted changes and untracked files included. A pass before
+a commit is reused by the commit made from that work, so committing does not rerun the gate. If
+the commands change the working tree, `gate run` writes no record and exits 1. These flags change
+what it does:
 
 | Flag | Effect |
 | --- | --- |
-| `--read-only` | Reuse a record, but write none. A dirty tree runs, and reads no record. |
+| `--read-only` | Reuse a record, but write none. |
 | `--force` | Run the commands from the merge base, even when the gate is not needed or a record exists. |
 | `--dry-run` | Print each gate's plan. Run nothing and write nothing. |
 | `--debug` | Print the comparator walk and the diff to stderr. |
@@ -172,9 +174,9 @@ dirty, `gate run` writes no record and exits 1. Two flags change that:
 Records are git refs under `refs/tangier/gates/`. A local record needs no network. Reading records
 in CI needs `contents: read` only. `gate prune --older-than 30` deletes old records.
 
-The key reads no diff, so `gate key` and `gate verified` need `HEAD` only. A gate with a `{...}`
-placeholder and no record at `HEAD` needs the diff, so its checkout must hold `origin/main` and the
-merge base. Without them, `gate run` fails instead of running with empty lists. A gate with no
+The key reads no diff, so `gate key` and `gate verified` need no base. Without `--head` they key
+the working tree, as `gate run` does. A gate with a `{...}` placeholder and no record for the keyed
+tree needs the diff, so its checkout must hold `origin/main` and the merge base. Without them, `gate run` fails instead of running with empty lists. A gate with no
 placeholder and no merge base counts as needed and runs, with a warning. On a push to `main` the diff is empty and no gate is needed, so a
 full build passes `--force`.
 
@@ -291,7 +293,7 @@ runs the tests before tagging.
 
 ```sh
 bin/test                  # stdlib unittest, no dependencies; one Python, any tree
-tangier gate run test     # the suite on 3.11, 3.12 and 3.13; needs uv and a clean tree
+tangier gate run test     # the suite on 3.11, 3.12 and 3.13; needs uv
 tangier gate run lint     # ruff check and ruff format --check
 tangier gate push         # before the PR push, so CI reuses both passes
 ```

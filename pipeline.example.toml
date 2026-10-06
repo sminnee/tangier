@@ -29,7 +29,7 @@ e2e = { cmd = "bin/e2e-test" }
 eval = { cmd = "bin/evals", files = "eval-files" }
 
 # --- gates, whose local pass CI can reuse -----------------------------------
-# `tangier gate run test-backend` records a pass on a clean tree. See
+# `tangier gate run test-backend` records a pass, uncommitted work included. See
 # `docs/specs/gate.md` for the key and the store.
 #
 # Commands run WITHOUT a shell, as `[deploy] after` does. A `{...}` placeholder
