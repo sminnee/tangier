@@ -1,184 +1,136 @@
-# An annotated `pipeline.toml`, in the shape a real monorepo uses.
+# A starter `pipeline.toml`, in the shape of a real monorepo: a shared library,
+# an API service split into subsystems, a worker, a web frontend, and e2e tests.
 #
-# Copy this to `pipeline.toml` at your repo root and edit. Everything except the
-# tag tables is optional: a repo that only wants selective CI needs the tags and
-# `[runners]`, and nothing else.
+# Copy it to `pipeline.toml` at your repo root and edit it. Every key is in
+# skills/tangier/reference/pipeline-toml.md. The guide in docs/guide/ explains
+# the patterns.
 
-# ---------------------------------------------------------------------------
-# Reserved sections. These names configure tangier and cannot be used as bare
-# tag names — a tag genuinely called `sha` or `k8s` is written `[tags.sha]`.
-# Reserved: tags, sha, registry, deploy, image, k8s, runners, tailnet, gate
-# ---------------------------------------------------------------------------
+# --- Registry and runners ----------------------------------------------------
 
 [registry]
 url = "registry.example.com/myorg"
 
-[sha]
-# Paths excluded from every bucket's content hash, so editing them never
-# rebuilds an image. Defaults to ["**/README.md"] when absent.
-# An explicit `exclude = []` disables filtering entirely.
-exclude = ["**/README.md"]
-
 [runners]
-# Keyed by items name (the `<name>` in `<name>_items`), NOT by tag. `files`
-# names the file-set group feeding this runner's `--files` flag — it is
-# explicit because the link is not derivable: items `unittest` pairs with the
-# group `unittest-files`. Omit `files` and the runner never gets a --files arg.
 unittest = { cmd = "bin/test", files = "unittest-files" }
-e2e = { cmd = "bin/e2e-test" }
-eval = { cmd = "bin/evals", files = "eval-files" }
+e2e      = { cmd = "bin/e2e-test" }
 
-# --- gates, whose local pass CI can reuse -----------------------------------
-# `tangier gate run test-backend` records a pass, uncommitted work included. See
-# `docs/specs/gate.md` for the key and the store.
-#
-# Commands run WITHOUT a shell, as `[deploy] after` does. A `{...}` placeholder
-# is a whole argument: `{<name>-items}` or the name of a `files = true` table.
-#
-# `scope` lists packages: a SHA bucket, or a tag with `paths`. A file the gate
-# depends on that no package covers gives a false pass, so list the test
-# script, the lockfile and this config too (see `backend-gate-inputs` below).
+# --- Shared library ----------------------------------------------------------
 
+[shared]
+paths          = "lib/shared/**"
+unittest_items = "lib/shared"
+
+# --- Services: one SHA bucket and one image each -----------------------------
+
+# The image bucket covers the whole service. It carries no test excludes,
+# because test files ship in the image and must move its tag.
+[api]
+paths   = "service/api/**"
+depends = "shared"
+sha     = true
+touched = true
+
+[worker]
+paths          = "service/worker/**"
+depends        = "shared"
+sha            = true
+touched        = true
+unittest_items = "service/worker"
+
+[webapp]
+paths   = ["frontend/**", "pnpm-lock.yaml"]
+sha     = true
+touched = true
+
+# --- API subsystems: backend and UI tags -------------------------------------
+
+# Code every subsystem uses. A change here runs every subsystem.
+[api-core]
+paths          = "service/api/api/core/**"
+exclude        = ["**/*_test.py"]
+depends        = "shared"
+unittest_items = "service/api/api/core"
+
+# A subsystem's backend. Test files are excluded so that a test-only change
+# runs no e2e; `[unittest-files]` still sends the changed test to the runner.
+[billing]
+paths          = "service/api/api/billing/**"
+exclude        = ["**/*_test.py"]
+depends        = "api-core"
+unittest_items = "service/api/api/billing"
+
+# The same subsystem's UI. A backend change runs this e2e suite too.
+[billing-ui]
+paths     = ["frontend/src/billing/**", "integration-tests/billing/**"]
+depends   = ["billing", "e2e"]
+e2e_items = "integration-tests/billing"
+
+# The e2e hub: every `-ui` tag depends on it.
+[e2e]
+paths = ["playwright.config.ts", "integration-tests/_lib/**", "frontend/src/ui/**"]
+
+# --- File-sets ----------------------------------------------------------------
+
+[unittest-files]
+files = true
+paths = ["service/api/**/*_test.py", "service/worker/**/*_test.py", "lib/shared/**/*_test.py"]
+
+# --- Cross-cutting -----------------------------------------------------------
+
+# `k8s` is a reserved name, so the tag is nested. Its output is `k8s-touched`.
+[tags.k8s]
+paths   = "k8s/**"
+touched = true
+
+# --- Gates ---------------------------------------------------------------------
+
+# Commands run without a shell. A placeholder becomes a list from the diff.
 [gate.test-backend]
-cmd = "bin/test --dirs {unittest-items} --files {unittest-files}"
-env = { TEST_DB_REQUIRED = "1" }
-scope = ["core", "scanner", "backend-gate-inputs"]
+cmd   = "bin/test --dirs {unittest-items} --files {unittest-files}"
+scope = ["api", "worker", "backend-inputs"]
 
-# --- images, keyed by SHA bucket -------------------------------------------
-# A bucket with no [image.*] table is "not buildable here", but is still
-# substitutable by `tangier image compose`.
+# A group: each member keeps its own record.
+[gate.lint]
+scope = ["api", "worker", "backend-inputs"]
 
-[image.core]
-dockerfile = "service/core/Dockerfile"
-# context = "."         # the build context is the repo root; `code-path` in a
-#                       # workflow was a dockerfile PREFIX, not a context
-# cache = true          # registry-backed layer cache on --push
-# args = { FOO = "bar" }
+[gate.lint.pyright]
+cmd = "uv run pyright"
+
+[gate.lint.ruff]
+cmd = ["uv run ruff check .", "uv run ruff format --check ."]
+
+# Files the gate's commands read that no service covers. No `sha`, so it is
+# not an image.
+[backend-inputs]
+paths = ["uv.lock", "pyproject.toml", "pipeline.toml", "bin/test"]
+
+# --- Images --------------------------------------------------------------------
+
+[image.api]
+dockerfile = "service/api/Dockerfile"
+
+[image.worker]
+dockerfile = "service/worker/Dockerfile"
 
 [image.webapp]
 dockerfile = "frontend/Dockerfile"
-# Emitted as `--secret id=x,env=X`, and ONLY when X is set in the environment.
-# The value never enters tangier — only the variable name.
-secrets = ["sentry_auth_token"]
+secrets    = ["sentry_auth_token"]
 
-# --- deploy environments ---------------------------------------------------
-# `after` and `rollout` are reserved names under `[deploy]`: an environment
-# cannot be called either.
+# --- Deploy (optional) ---------------------------------------------------------
 
-[deploy]
-# Runs once a deploy has fully rolled out — never after a rollback, since
-# cutting a release for a version that was just reverted is worse than not
-# cutting one. The string form is sugar for `{ cmd = ..., fatal = false }`.
-#
-# The command is split into arguments at parse time and run WITHOUT a shell, so
-# `&&`, `|` and friends are rejected — put that logic in a script. `${ENV}` and
-# every version variable are substituted per argument.
-after = "bin/sentry-release ${ENV}"
-# [deploy.after]      # the explicit form, when you want `fatal`
-# cmd = "bin/sentry-release ${ENV}"
-# fatal = false       # default: a failed hook does not fail a good deploy
+[k8s.api]
+deployments = ["api", "api-worker"]
 
+[k8s.worker]
+container = "worker"
+
+[k8s.webapp]
 
 [deploy.uat]
-namespace = "myorg-uat"
-overlay = "k8s/overlays/uat"
-migration_timeout = 600
-# `${...}` is substituted from the version variables, so the Job name embeds
-# the version and a re-apply stays idempotent.
-migration_job = "core-migrate-${CORE_VERSION}"
-migration_version_bucket = "core"
-
-[deploy.prod]
-namespace = "myorg-prod"
-overlay = "k8s/overlays/prod"
-migration_timeout = 3600
-migration_job = "core-migrate-${CORE_VERSION}"
-migration_version_bucket = "core"
-
-[deploy.rollout]
-max_wait = 600
-poll_interval = 10
-crash_threshold = 3
-rollback_migration_timeout = 600
-
-# --- tailnet, how CI reaches the cluster -----------------------------------
-# Each environment states its tailnet ACL tag EXPLICITLY. It is not derived from
-# the environment name: the GitHub `environment:` and the tag segment are
-# independent, and across four repos they agree in only half the cases.
-
-[tailnet]
-operator = "tailscale-operator"   # optional; this is the default
+namespace     = "myorg-uat"
+overlay       = "k8s/overlays/uat"
+migration_job = "api-migrate-${API_VERSION}"
+migration_version_bucket = "api"
 
 [tailnet.uat]
 tag = "tag:myorg-uat-deploy"
-
-[tailnet.prod]
-tag = "tag:myorg-prod-deploy"
-
-# --- k8s workloads, keyed by bucket ----------------------------------------
-# Top-level rather than nested per environment: every environment renders from
-# the same base kustomization, so per-env placement only invites drift. This is
-# also where one bucket driving several deployments is expressed.
-
-[k8s.core]
-deployments = ["core", "core-worker"]   # defaults to [bucket]
-container = "server"                    # which container carries the image tag
-# version_var = "CORE_VERSION"          # derived from the bucket name
-
-[k8s.scanner]
-deployments = ["scanner"]
-container = "worker"
-
-# ---------------------------------------------------------------------------
-# Tags. Every non-reserved top-level table is a tag; `[tags.<name>]` is the
-# escape hatch for names that collide with a reserved section.
-# ---------------------------------------------------------------------------
-
-# File-set projections (`files = true`) are projection-only: their globs select
-# directly-changed files for a runner's `--files` flag, and they never enter the
-# tag-match map, SHA buckets, touched flags, or `ignored`. The table name IS the
-# CI output name.
-[unittest-files]
-files = true
-paths = ["service/core/**/*_test.py", "lib/shared/**/*_test.py"]
-
-[eval-files]
-files = true
-paths = ["service/core/**/*_eval.py"]
-
-[shared]
-paths = "lib/shared/**"
-exclude = ["lib/shared/**/*_test.py"]
-unittest_items = "lib/shared"
-sha = "core"                # contributes to the `core` bucket
-
-[core]
-paths = "service/core/**"
-exclude = ["service/core/**/*_test.py"]
-depends = ["shared"]        # a change to `shared` also runs `core`
-unittest_items = "service/core"
-eval_items = "service/core"
-sha = true                  # this tag IS a bucket named `core`
-touched = true              # emit `core-touched=true|false`
-
-[scanner]
-paths = "service/scanner/**"
-depends = ["shared"]
-unittest_items = "service/scanner"
-sha = true
-touched = true
-
-[webapp]
-paths = "frontend/**"
-sha = true
-touched = true
-
-# A custom package: gate inputs that no SHA bucket covers. It has no `sha`
-# field, so it is not a bucket and never builds or deploys.
-[backend-gate-inputs]
-paths = ["uv.lock", "pyproject.toml", "bin/test", "pipeline.toml"]
-
-# A tag named after a reserved section is declared nested.
-[tags.k8s]
-paths = "k8s/**"
-touched = true
