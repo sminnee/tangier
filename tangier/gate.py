@@ -12,8 +12,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from tangier import __version__, git
@@ -40,6 +40,10 @@ KEY_VERSION = 2
 RECORD_FORMAT = 2
 # The most runs one record keeps. The oldest go first.
 MAX_RUNS = 20
+
+# The runner fields an `--accept` value can name, and the kinds a runner can be.
+ACCEPT_FIELDS = ("kind", "provider", "event", "ref", "workflow", "job")
+RUNNER_KINDS = ("local", "ci")
 
 
 class GateError(RuntimeError):
@@ -72,6 +76,41 @@ class Step:
     key: str | None
     # `verified()`'s answer for the key.
     where: str | None
+    # Every run read at this commit, each with whether `--accept` took it.
+    runs: list[tuple[dict[str, object], bool]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Accept:
+    """One `--accept` value: the runs whose runner has every named field. See `docs/specs/gate.md#cli`."""
+
+    fields: tuple[tuple[str, str], ...]
+
+    @classmethod
+    def parse(cls, value: str) -> Accept:
+        """A bare kind, such as `ci`, or comma-separated `field=value` pairs."""
+        pairs: list[tuple[str, str]] = []
+        for part in value.split(","):
+            name, eq, wanted = part.partition("=")
+            if not eq:
+                name, wanted = "kind", part
+            if name not in ACCEPT_FIELDS:
+                raise GateError(f"`{name}` is not a runner field (use {', '.join(ACCEPT_FIELDS)})")
+            if not wanted:
+                raise GateError(f"`{part}` names no value")
+            if name == "kind" and wanted not in RUNNER_KINDS:
+                raise GateError(f"`{wanted}` is not a runner kind (use {' or '.join(RUNNER_KINDS)})")
+            pairs.append((name, wanted))
+        return cls(tuple(pairs))
+
+    def matches(self, runner: Mapping[str, object]) -> bool:
+        return all(runner.get(name) == wanted for name, wanted in self.fields)
+
+
+def accepted(run: Mapping[str, object], accept: Sequence[Accept]) -> bool:
+    """Whether a run counts: any `--accept` value matches it, or there is none."""
+    runner = run.get("runner")
+    return not accept or (isinstance(runner, Mapping) and any(a.matches(runner) for a in accept))
 
 
 @dataclass
@@ -237,6 +276,7 @@ def comparator(
     origin: OriginRecords | None = None,
     *,
     records: bool = True,
+    accept: Sequence[Accept] = (),
 ) -> Comparator:
     """The newest content, from the snapshot back to its merge base with `base`, that has a record.
 
@@ -253,8 +293,8 @@ def comparator(
     trail: list[Step] = []
 
     if records:
-        where = verified(name, snap_key, found)
-        trail.append(Step(snap.commit, snap.label, snap_key, where))
+        where, runs = lookup(name, snap_key, found, accept)
+        trail.append(Step(snap.commit, snap.label, snap_key, where, runs))
         if where:
             return Comparator(snap.commit, where, f"record at {snap.label}, {where}", trail, verified=True)
     try:
@@ -274,8 +314,8 @@ def comparator(
                 # Only the snapshot must have a key. An older commit with none holds no record.
                 trail.append(Step(commit, commit[:7], None, None))
                 continue
-            where = None if k == snap_key else verified(name, k, found)
-            trail.append(Step(commit, commit[:7], k, where))
+            where, runs = (None, []) if k == snap_key else lookup(name, k, found, accept)
+            trail.append(Step(commit, commit[:7], k, where, runs))
             if where:
                 return Comparator(commit, where, f"record at {commit[:7]}, {where}", trail)
     return Comparator(mb, None, f"merge base with {base}", trail)
@@ -289,6 +329,7 @@ def plan(
     origin: OriginRecords | None = None,
     *,
     force: bool = False,
+    accept: Sequence[Accept] = (),
 ) -> GatePlan:
     """What a run of the gate on the snapshot does. See `docs/specs/gate.md#status-values`.
 
@@ -300,11 +341,15 @@ def plan(
     """
     spec = spec_for(cfg, name)
     snap_key = key(cfg, name, snap.tree)
-    comp = comparator(cfg, name, base, snap, snap_key, origin, records=not force)
+    comp = comparator(cfg, name, base, snap, snap_key, origin, records=not force, accept=accept)
     changed: list[str] = []
     lists: dict[str, list[str]] = {}
 
+    ignored = sum(1 for step in comp.trail if step.runs and not step.where)
+
     def made(status: str, reason: str, commands: list[list[str]]) -> GatePlan:
+        if ignored:
+            reason += f" ({ignored} record(s) ignored by --accept)"
         return GatePlan(
             name=name,
             status=status,
@@ -451,6 +496,7 @@ class OriginRecords:
     def __init__(self, pattern: str = f"{REF_PREFIX}/*") -> None:
         self.pattern = pattern
         self._blobs: dict[str, str] | None = None
+        self._runs: dict[str, list[dict[str, object]]] = {}
 
     def _fetched(self) -> dict[str, str]:
         """Each record's ref on origin, mapped to its blob."""
@@ -467,19 +513,49 @@ class OriginRecords:
     def __contains__(self, ref: object) -> bool:
         return ref in self._fetched()
 
+    def runs(self, ref: str) -> list[dict[str, object]]:
+        """The runs in origin's record at `ref`. Empty, with a warning, when it cannot be read."""
+        if ref not in self._runs:
+            try:
+                self._runs[ref] = read_runs(self._fetched()[ref])
+            except GateError as e:
+                print(f"warning: cannot read {ref} from {REMOTE}, so it counts as absent: {e}", file=sys.stderr)
+                self._runs[ref] = []
+        return self._runs[ref]
 
-def verified(name: str, key: str, origin: OriginRecords | None = None) -> str | None:
-    """Where a record for this key is: `local`, `origin`, or None.
+
+def lookup(
+    name: str, key: str, origin: OriginRecords | None = None, accept: Sequence[Accept] = ()
+) -> tuple[str | None, list[tuple[dict[str, object], bool]]]:
+    """Where an accepted run for this key is, `local`, `origin` or None, and every run read on the way.
 
     Local first, since it needs no network. `origin` is shared by a caller
-    that checks several keys, so origin is read once.
+    that checks several keys, so origin is read once. A record with no
+    accepted run is a miss, as if it were not there, and so is one that cannot
+    be read.
     """
     ref = ref_for(name, key)
+    seen: list[tuple[dict[str, object], bool]] = []
     if git.ref_exists(ref):
-        return "local"
-    if ref in (OriginRecords(f"{REF_PREFIX}/{name}/*") if origin is None else origin):
-        return "origin"
-    return None
+        try:
+            seen += [(run, accepted(run, accept)) for run in read_runs(git.rev_parse_ref(ref))]
+        except GateError as e:
+            print(f"warning: {ref} counts as absent: {e}", file=sys.stderr)
+        if any(ok for _, ok in seen):
+            return "local", seen
+    found = OriginRecords(f"{REF_PREFIX}/{name}/*") if origin is None else origin
+    if ref in found:
+        runs = [(run, accepted(run, accept)) for run in found.runs(ref)]
+        # After a push, origin holds the local runs too.
+        seen += [entry for entry in runs if entry not in seen]
+        if any(ok for _, ok in runs):
+            return "origin", seen
+    return None, seen
+
+
+def verified(name: str, key: str, origin: OriginRecords | None = None, accept: Sequence[Accept] = ()) -> str | None:
+    """Where an accepted run for this key is: `local`, `origin`, or None. See `lookup`."""
+    return lookup(name, key, origin, accept)[0]
 
 
 def push() -> int:
