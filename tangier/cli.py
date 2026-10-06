@@ -7,6 +7,7 @@ import os
 import sys
 
 from tangier.commands import changemap_cmds, deploy_cmds, gate_cmds, image_cmds, tailnet_cmds
+from tangier.commands.args import add_diff_args
 from tangier.config import Config, ConfigError, read_config
 from tangier.deploy import DeployError
 from tangier.gate import GateError
@@ -59,11 +60,6 @@ def main(argv: list[str] | None = None, *, runner: Runner | None = None) -> int:
         return 2
 
 
-def _add_diff_args(p: argparse.ArgumentParser) -> None:
-    _ = p.add_argument("--base", default="origin/main")
-    _ = p.add_argument("--head", default="HEAD")
-
-
 def _add_no_expand(p: argparse.ArgumentParser) -> None:
     _ = p.add_argument(
         "--no-expand",
@@ -113,7 +109,7 @@ def _add_changemap_parser(sub: argparse._SubParsersAction) -> None:
 
     ip = cmsub.add_parser("items", help="project the expanded changed set into a named item list")
     _ = ip.add_argument("name", help="items name (e.g. `unittest`, `e2e`)")
-    _add_diff_args(ip)
+    add_diff_args(ip)
     _add_no_expand(ip)
     ip.set_defaults(func=changemap_cmds.cmd_items)
 
@@ -121,11 +117,11 @@ def _add_changemap_parser(sub: argparse._SubParsersAction) -> None:
         "list-ignored",
         help="list changed files in the diff that matched no tag — sanity-check helper",
     )
-    _add_diff_args(li)
+    add_diff_args(li)
     li.set_defaults(func=changemap_cmds.cmd_list_ignored)
 
     ep = cmsub.add_parser("explain", help="show modified tags, dependents, and resulting CI invocations")
-    _add_diff_args(ep)
+    add_diff_args(ep)
     _add_no_expand(ep)
     _ = ep.add_argument(
         "--files",
@@ -139,7 +135,7 @@ def _add_changemap_parser(sub: argparse._SubParsersAction) -> None:
         "build-matrix",
         help="emit the buildable buckets this diff touches, as a JSON array for a build matrix",
     )
-    _add_diff_args(bm)
+    add_diff_args(bm)
     _add_no_expand(bm)
     bm.set_defaults(func=changemap_cmds.cmd_build_matrix)
 
@@ -147,7 +143,7 @@ def _add_changemap_parser(sub: argparse._SubParsersAction) -> None:
         "github-outputs",
         help="emit the answer set (SHAs, items, touched, file-sets) as $GITHUB_OUTPUT lines",
     )
-    _add_diff_args(gp)
+    add_diff_args(gp)
     _add_no_expand(gp)
     gp.set_defaults(func=changemap_cmds.cmd_github_outputs)
 
