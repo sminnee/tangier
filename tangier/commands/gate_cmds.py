@@ -23,6 +23,19 @@ def _runner(args: argparse.Namespace) -> Runner:
     return getattr(args, "runner", None) or Subprocess(echo=True)
 
 
+def cmd_list(config: Config, args: argparse.Namespace) -> int:
+    """Print each gate in config order, with a group's members indented under it."""
+    groups = gate_groups(config)
+    for name, spec in config.gates.items():
+        if not spec.group:
+            print(name)
+        elif groups[spec.group][0] == name:
+            print(f"{spec.group} (group)")
+            for member in groups[spec.group]:
+                print(f"  {member}")
+    return 0
+
+
 def cmd_key(config: Config, args: argparse.Namespace) -> int:
     """Print the key. A group prints `<name> <key>` for each member."""
     names = gate.select(config, args.name)
@@ -292,6 +305,9 @@ def _add_head_arg(p: argparse.ArgumentParser) -> None:
 def add_parsers(sub: argparse._SubParsersAction) -> None:
     gp = sub.add_parser("gate", help="record a local gate pass, and reuse it in CI")
     gsub = gp.add_subparsers(dest="cmd", required=True)
+
+    lp = gsub.add_parser("list", help="list every gate and group")
+    lp.set_defaults(func=cmd_list)
 
     kp = gsub.add_parser("key", help="print a gate's content key; a group prints `<name> <key>` per member")
     _ = kp.add_argument("name", help="a gate or a group")

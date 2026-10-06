@@ -1236,6 +1236,13 @@ class TestGroups(GateCase):
         self.assertRegex(both.splitlines()[0], r"^lint\.format [0-9a-f]{40}$")
         self.assertEqual(both.splitlines()[1], f"lint.check {check.strip()}")
 
+    # SPEC: gate#list
+    def test_list_prints_each_gate_with_group_members_indented(self) -> None:
+        self.assertEqual(
+            self.tangier("gate", "list")[:2],
+            (0, "backend\nlint (group)\n  lint.format\n  lint.check\n"),
+        )
+
     # SPEC: gate#selector
     def test_a_group_is_verified_when_every_member_is(self) -> None:
         self.assertEqual(self.run_gates("lint.check"), 0)

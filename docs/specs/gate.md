@@ -261,6 +261,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 
 | Command | Behaviour |
 | --- | --- |
+| `gate list` | Print every gate and group. |
 | `gate key <selector>` | Print the key. |
 | `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--dry-run`, `--debug` and `--accept`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
@@ -272,6 +273,8 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 content a record can describe. `gate key` and `gate verified` take no `--base`, because the key reads no diff.
 
 - A gate name or selector that the config does not hold is an error, exit 2. `[unknown-gate]`
+- `gate list` prints every gate in config order. A group's members are indented under a
+  `<group> (group)` line. `[list]`
 - `gate run` takes one or more [selectors](#selector), or `--all` for every configured gate in
   config order. No
   name and no `--all` is an error, exit 2. Each gate is planned and run in turn. A failing gate
