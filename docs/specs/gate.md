@@ -214,6 +214,10 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   It stops at the first failure, exits with that command's code, and writes no record.
   `[run-stops-at-first-failure]`
 - On success, `gate run` writes the record, on a clean tree or a dirty one. `[run-records-pass]`
+- On a dirty tree, `gate run` prints a note to stderr for each gate before it plans. The note lists
+  the uncommitted changes and untracked files that touch the gate's scope, or says that none do.
+  It shows which local files the key holds, and helps explain a CI run whose key differs from
+  `gate github-outputs`. A clean tree prints no note. `[run-dirty-notice]`
 - On success, `gate run` writes no record and exits 1 when the working tree after the run differs
   from the tree it keyed, whether the commands or anything else changed it. The commands tested
   content that the key does not describe. A moved

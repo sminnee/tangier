@@ -401,6 +401,28 @@ class TestRun(GateCase):
             },
         )
 
+    # SPEC: gate#run-dirty-notice
+    def test_a_dirty_tree_lists_its_uncommitted_files_in_the_scope(self) -> None:
+        _write(self.repo, "svc/a.py", "a = 3\n")
+        _write(self.repo, "svc/new.py", "new = 1\n")
+        _write(self.repo, "docs/notes.md", "more notes\n")
+        _, _, err = self.run_gate("--dry-run")
+        self.assertIn(
+            "gate `backend`: keying the working tree; uncommitted changes in scope: svc/a.py, svc/new.py", err
+        )
+        self.assertNotIn("docs/notes.md", err)
+
+    # SPEC: gate#run-dirty-notice
+    def test_a_dirty_tree_outside_the_scope_says_so(self) -> None:
+        _write(self.repo, "docs/notes.md", "more notes\n")
+        _, _, err = self.run_gate("--dry-run")
+        self.assertIn("gate `backend`: keying the working tree; no uncommitted change touches the scope", err)
+
+    # SPEC: gate#run-dirty-notice
+    def test_a_clean_tree_prints_no_notice(self) -> None:
+        _, _, err = self.run_gate("--dry-run")
+        self.assertNotIn("working tree", err)
+
     # SPEC: gate#record-reused-after-commit
     def test_a_pass_on_a_dirty_tree_verifies_the_commit_made_from_it(self) -> None:
         _write(self.repo, "svc/a.py", "a = 3\n")

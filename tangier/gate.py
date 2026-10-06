@@ -189,6 +189,12 @@ def key(cfg: Config, name: str, tree: str) -> str:
     return hashlib.sha1("\n".join([header, *lines]).encode()).hexdigest()
 
 
+def uncommitted_in_scope(cfg: Config, name: str, snap: Snapshot) -> list[str]:
+    """The uncommitted changes and untracked files in `snap` that touch the gate's scope."""
+    spec = spec_for(cfg, name)
+    return [f for f in git.diff_names(snap.commit, snap.tree) if scope_touched(cfg, scope_tags(cfg, spec), [f])]
+
+
 def comparator(
     cfg: Config,
     name: str,
