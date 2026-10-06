@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from tangier import __version__, git
-from tangier.changemap import AnswerSet, compute_answer_set, scope_lines, scope_touched
+from tangier.changemap import AnswerSet, answer_set_for_files, scope_lines, scope_touched
 from tangier.config import ITEMS_PLACEHOLDER_SUFFIX, Config, GateSpec, entry_tags, is_placeholder, scope_tags
 
 REF_PREFIX = "refs/tangier/gates"
@@ -34,10 +34,27 @@ class GateError(RuntimeError):
 
 
 @dataclass
-class Step:
-    """One commit the comparator walk looked at."""
+class Snapshot:
+    """The content a gate is keyed on, and the commit it sits on."""
 
     commit: str
+    tree: str
+    # Whether `tree` holds uncommitted work, so differs from `commit`'s tree.
+    dirty: bool
+
+    @property
+    def label(self) -> str:
+        """`abc1234`, or `working tree (def5678)` when the tree is dirty."""
+        return f"working tree ({self.tree[:7]})" if self.dirty else self.commit[:7]
+
+
+@dataclass
+class Step:
+    """One commit, or the working tree, that the comparator walk looked at."""
+
+    commit: str
+    # How `--debug` names it: a short SHA, or `working tree (<tree>)`.
+    label: str
     # None when no key can be made at this commit, such as when a scope entry matches nothing there.
     key: str | None
     # `verified()`'s answer for the key.
@@ -55,18 +72,21 @@ class Comparator:
     # How the commit was chosen, for people: `record at abc1234, local` or `merge base with origin/main`.
     how: str
     trail: list[Step]
+    # Whether the snapshot itself has a record. The commit can be HEAD without
+    # this, when the tree is dirty and HEAD's record is the comparator.
+    verified: bool = False
 
 
 @dataclass
 class GatePlan:
-    """What `gate run` does for one gate at one head, and why."""
+    """What `gate run` does for one gate at one snapshot, and why."""
 
     name: str
     # `verified`, `not-needed` or `required`. See `docs/specs/gate.md#status-values`.
     status: str
-    # The key at `head`, which a pass records.
+    # The snapshot's key, which a pass records.
     key: str
-    head: str
+    snapshot: Snapshot
     # The comparator: the commit the diff starts from.
     effective_base: str | None
     where: str | None
@@ -123,30 +143,44 @@ def has_placeholder(spec: GateSpec) -> bool:
     return any(is_placeholder(token) for argv in spec.commands for token in argv)
 
 
-def _commit(name: str, head: str) -> str:
+def snapshot(head: str | None = None) -> Snapshot:
+    """The content to key: the working tree when `head` is None, otherwise the commit `head` names."""
+    ref = head or "HEAD"
     try:
-        return git.rev_parse(head)
+        commit = git.rev_parse(ref)
     except git.GitError as e:
-        raise GateError(f"gate `{name}`: `{head}` does not name a commit ({e})") from e
+        raise GateError(f"`{ref}` does not name a commit ({e})") from e
+    if head is not None:
+        return Snapshot(commit, git.rev_parse_tree(commit), False)
+    try:
+        tree = git.worktree_tree()
+    except git.GitError as e:
+        raise GateError(f"cannot key the working tree: {e}") from e
+    return Snapshot(commit, tree, tree != git.rev_parse_tree(commit))
 
 
-def key(cfg: Config, name: str, head: str = "HEAD") -> str:
-    """The gate's key at `head`: a hash of its raw commands, its `env`, and its scope's content.
+def key(cfg: Config, name: str, tree: str) -> str:
+    """The gate's key for `tree`: a hash of its raw commands, its `env`, and its scope's content.
+
+    `tree` is any tree-ish. A commit and its tree give the same key.
 
     The placeholders stay unresolved, so the key reads no diff and no base: a
-    record at a commit means the gate passed for the scope as it stands there.
+    record means the gate passed for the scope as it stands in that tree.
 
     Fails closed, because the lenient git helpers turn each of these into a
     stable key that many trees share:
-      - a bad `head` walks as an empty tree;
+      - a bad `tree` walks as an empty tree;
       - a scope entry that matches no file hashes no content.
     """
     spec = spec_for(cfg, name)
-    _ = _commit(name, head)
+    try:
+        _ = git.rev_parse_tree(tree)
+    except git.GitError as e:
+        raise GateError(f"gate `{name}`: `{tree}` does not name a tree ({e})") from e
     for entry in spec.scope:
-        if not scope_lines(cfg, entry_tags(cfg, entry), head):
-            raise GateError(f"gate `{name}`: the scope entry `{entry}` matches no tracked file at `{head}`")
-    lines = scope_lines(cfg, scope_tags(cfg, spec), head)
+        if not scope_lines(cfg, entry_tags(cfg, entry), tree):
+            raise GateError(f"gate `{name}`: the scope entry `{entry}` matches no tracked file at `{tree[:7]}`")
+    lines = scope_lines(cfg, scope_tags(cfg, spec), tree)
     header = json.dumps(
         {"v": KEY_VERSION, "gate": name, "commands": spec.commands, "env": spec.env},
         sort_keys=True,
@@ -156,49 +190,55 @@ def key(cfg: Config, name: str, head: str = "HEAD") -> str:
 
 
 def comparator(
-    cfg: Config, name: str, base: str, head: str = "HEAD", origin: Container[str] | None = None, *, records: bool = True
+    cfg: Config,
+    name: str,
+    base: str,
+    snap: Snapshot,
+    snap_key: str,
+    origin: Container[str] | None = None,
+    *,
+    records: bool = True,
 ) -> Comparator:
-    """The newest commit, from `head` back to its merge base with `base`, whose content has a record.
+    """The newest content, from the snapshot back to its merge base with `base`, that has a record.
 
-    `head` comes first. A gate with no placeholder stops there: an older record
-    cannot narrow its commands, so it then diffs from the merge base, and needs
-    none when `base` cannot be read. A gate with placeholders walks `head`'s
-    first-parent line down to the merge base, and falls back to the merge base
-    with no hit. `records=False` reads no record and gives the merge base.
+    The snapshot comes first. A gate with no placeholder stops there: an older
+    record cannot narrow its commands, so it then diffs from the merge base,
+    and needs none when `base` cannot be read. A gate with placeholders walks
+    the first-parent line from `snap.commit` down to the merge base, and falls
+    back to the merge base with no hit. A commit whose key is the snapshot's
+    was already looked up, so the walk does not look it up again: on a clean
+    tree that is HEAD. `records=False` reads no record and gives the merge base.
     """
     spec = spec_for(cfg, name)
-    head_commit = _commit(name, head)
     found = OriginRecords(f"{REF_PREFIX}/{name}/*") if origin is None else origin
     trail: list[Step] = []
 
-    def check(commit: str) -> Step:
-        try:
-            k = key(cfg, name, commit)
-        except GateError:
-            # Only `head` must have a key. An older commit with none holds no record.
-            if commit == head_commit:
-                raise
-            step = Step(commit, None, None)
-        else:
-            step = Step(commit, k, verified(name, k, found))
-        trail.append(step)
-        return step
-
-    if records and check(head_commit).where:
-        return Comparator(head_commit, trail[0].where, f"record at {head_commit[:7]}, {trail[0].where}", trail)
+    if records:
+        where = verified(name, snap_key, found)
+        trail.append(Step(snap.commit, snap.label, snap_key, where))
+        if where:
+            return Comparator(snap.commit, where, f"record at {snap.label}, {where}", trail, verified=True)
     try:
-        mb = git.merge_base(base, head_commit)
+        mb = git.merge_base(base, snap.commit)
     except git.GitError as e:
         if has_placeholder(spec):
             raise GateError(
-                f"gate `{name}`: cannot diff `{base}` against `{head}`, so the commands cannot be resolved. "
-                f"Fetch `{base}` with enough history to reach the merge base, or pass `--base` ({e})"
+                f"gate `{name}`: cannot diff `{base}` against `{snap.commit[:7]}`, so the commands cannot be "
+                f"resolved. Fetch `{base}` with enough history to reach the merge base, or pass `--base` ({e})"
             ) from e
         return Comparator(None, None, f"no merge base with {base}: {e}", trail)
     if records and has_placeholder(spec):
-        for commit in [*git.rev_list_first_parent(head_commit, mb), mb]:
-            if commit != head_commit and (step := check(commit)).where:
-                return Comparator(commit, step.where, f"record at {commit[:7]}, {step.where}", trail)
+        for commit in [*git.rev_list_first_parent(snap.commit, mb), mb]:
+            try:
+                k = key(cfg, name, commit)
+            except GateError:
+                # Only the snapshot must have a key. An older commit with none holds no record.
+                trail.append(Step(commit, commit[:7], None, None))
+                continue
+            where = None if k == snap_key else verified(name, k, found)
+            trail.append(Step(commit, commit[:7], k, where))
+            if where:
+                return Comparator(commit, where, f"record at {commit[:7]}, {where}", trail)
     return Comparator(mb, None, f"merge base with {base}", trail)
 
 
@@ -206,23 +246,22 @@ def plan(
     cfg: Config,
     name: str,
     base: str,
+    snap: Snapshot,
     origin: Container[str] | None = None,
     *,
-    head: str = "HEAD",
-    records: bool = True,
     force: bool = False,
 ) -> GatePlan:
-    """What a run of the gate at `head` does. See `docs/specs/gate.md#status-values`.
+    """What a run of the gate on the snapshot does. See `docs/specs/gate.md#status-values`.
 
-    `verified` when the comparator is `head`. Otherwise the diff from the
-    comparator decides: `not-needed` when no key input changed or every
-    placeholder list is empty, and `required` otherwise. `force` reads no
-    record and is always `required`, so it diffs from the merge base.
+    `verified` when the snapshot has a record. Otherwise the diff from the
+    comparator to the snapshot's tree decides: `not-needed` when no key input
+    changed or every placeholder list is empty, and `required` otherwise.
+    `force` reads no record and is always `required`, so it diffs from the
+    merge base.
     """
     spec = spec_for(cfg, name)
-    head_key = key(cfg, name, head)
-    comp = comparator(cfg, name, base, head, origin, records=records and not force)
-    head_commit = git.rev_parse(head)
+    snap_key = key(cfg, name, snap.tree)
+    comp = comparator(cfg, name, base, snap, snap_key, origin, records=not force)
     changed: list[str] = []
     lists: dict[str, list[str]] = {}
 
@@ -230,8 +269,8 @@ def plan(
         return GatePlan(
             name=name,
             status=status,
-            key=head_key,
-            head=head_commit,
+            key=snap_key,
+            snapshot=snap,
             effective_base=comp.commit,
             where=comp.where,
             how=comp.how,
@@ -242,16 +281,19 @@ def plan(
             lists=lists,
         )
 
-    if comp.commit == head_commit and comp.where:
-        return made("verified", f"{comp.where} record {head_key}", [])
+    if comp.verified:
+        return made("verified", f"{comp.where} record {snap_key}", [])
     if comp.commit is None:
         if not force:
             print(f"warning: gate `{name}`: {comp.how}, so it counts as needed", file=sys.stderr)
         return made("required", comp.how, [list(argv) for argv in spec.commands])
 
-    changed = [f for f in git.changed_files(comp.commit, head) if scope_touched(cfg, scope_tags(cfg, spec), [f])]
+    # The comparator is an ancestor of `snap.commit`, so this two-dot diff is
+    # the three-dot diff of a clean tree, plus any uncommitted work.
+    files = git.diff_names(comp.commit, snap.tree)
+    changed = [f for f in files if scope_touched(cfg, scope_tags(cfg, spec), [f])]
     lists = (
-        placeholder_lists(spec, compute_answer_set(cfg, comp.commit, head, compute_shas=False))
+        placeholder_lists(spec, answer_set_for_files(cfg, files, snap.tree, compute_shas=False))
         if has_placeholder(spec)
         else {}
     )
@@ -274,7 +316,9 @@ def write_record(plan: GatePlan) -> str:
     record = {
         "gate": plan.name,
         "key": plan.key,
-        "head": plan.head,
+        "head": plan.snapshot.commit,
+        "tree": plan.snapshot.tree,
+        "dirty": plan.snapshot.dirty,
         "base": plan.effective_base,
         "user": git.config_get("user.email") or "unknown",
         "time": now().isoformat(timespec="seconds"),
@@ -295,16 +339,6 @@ def read_record(sha: str) -> dict[str, object]:
     if not isinstance(record, dict):
         raise GateError("not a gate record: the blob is not a JSON object")
     return record
-
-
-def head() -> str:
-    """The commit HEAD names now."""
-    return git.rev_parse("HEAD")
-
-
-def is_clean() -> bool:
-    """Whether the tree has no tracked change and no untracked file."""
-    return not git.status_porcelain()
 
 
 def origin_records(pattern: str = f"{REF_PREFIX}/*") -> set[str]:

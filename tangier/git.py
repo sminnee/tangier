@@ -8,7 +8,10 @@ that `unittest.mock.patch.object` cannot reach.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import tempfile
 
 
 class GitError(RuntimeError):
@@ -20,13 +23,13 @@ def _git(*args: str) -> str:
     return res.stdout
 
 
-def _git_checked(*args: str, input: str | None = None) -> str:
+def _git_checked(*args: str, input: str | None = None, env: dict[str, str] | None = None) -> str:
     """Run git and raise `GitError` on a non-zero exit.
 
     The gate commands use this path: a record must never rest on a git call
     that failed without notice.
     """
-    res = subprocess.run(["git", *args], capture_output=True, text=True, check=False, input=input)
+    res = subprocess.run(["git", *args], capture_output=True, text=True, check=False, input=input, env=env)
     if res.returncode != 0:
         detail = res.stderr.strip() or f"exit {res.returncode}"
         raise GitError(f"git {' '.join(args)}: {detail}")
@@ -86,6 +89,39 @@ def rev_parse(ref: str) -> str:
     return _git_checked("rev-parse", "--verify", f"{ref}^{{commit}}").strip()
 
 
+def rev_parse_tree(ref: str) -> str:
+    """The tree SHA `ref` names. A commit names its tree."""
+    return _git_checked("rev-parse", "--verify", f"{ref}^{{tree}}").strip()
+
+
+def worktree_tree() -> str:
+    """The working tree as a tree object: tracked changes and untracked files, but not ignored files.
+
+    This is the tree `git add -A && git commit` would make. It is built in a
+    copy of the index, so the real index is never touched. The copy keeps the
+    stat cache, so `add` rehashes only the files that changed.
+    """
+    index = os.path.abspath(_git_checked("rev-parse", "--git-path", "index").strip())
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = os.path.join(tmp, "index")
+        if os.path.exists(index):
+            _ = shutil.copy2(index, copy)
+        env = {**os.environ, "GIT_INDEX_FILE": copy}
+        # With no pathspec, `add -A` covers the whole tree from any directory.
+        _ = _git_checked("add", "-A", env=env)
+        return _git_checked("write-tree", env=env).strip()
+
+
+def diff_names(a: str, b: str) -> list[str]:
+    """Files that differ between two tree-ishes. Raises when git cannot read either.
+
+    Two-dot, unlike `changed_files`: a three-dot diff needs commits, and given
+    a tree it reads as an empty diff.
+    """
+    out = _git_checked("diff", "--name-only", a, b)
+    return [line for line in out.splitlines() if line]
+
+
 def merge_base(base: str, head: str) -> str:
     """The commit a `base...head` diff starts from. Raises when there is none."""
     return _git_checked("merge-base", base, head).strip()
@@ -94,16 +130,6 @@ def merge_base(base: str, head: str) -> str:
 def rev_list_first_parent(head: str, stop: str) -> list[str]:
     """The commits on `head`'s first-parent line, newest first, that `stop` cannot reach."""
     return _git_checked("rev-list", "--first-parent", head, f"^{stop}").split()
-
-
-def status_porcelain() -> list[str]:
-    """One line per tracked change or untracked file; empty when the tree is clean.
-
-    `--untracked-files` is explicit: a user's `status.showUntrackedFiles = no`
-    would otherwise hide untracked files from the clean-tree check.
-    """
-    out = _git_checked("status", "--porcelain", "--untracked-files=normal")
-    return [line for line in out.splitlines() if line]
 
 
 def config_get(key: str) -> str | None:

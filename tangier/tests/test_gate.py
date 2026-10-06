@@ -112,6 +112,14 @@ class GateCase(unittest.TestCase):
         with contextlib.chdir(self.repo):
             return gate.key(parse_toml(body), "backend", head)
 
+    def tree(self) -> str:
+        """The working tree as a tree object, uncommitted changes included."""
+        with contextlib.chdir(self.repo):
+            return git.worktree_tree()
+
+    def worktree_key(self, body: str = CONFIG) -> str:
+        return self.key(body, head=self.tree())
+
 
 class TestKey(GateCase):
     # SPEC: gate#key-content-only
@@ -141,7 +149,8 @@ class TestKey(GateCase):
         # against HEAD it selects nothing. The key hashes the raw commands.
         with contextlib.chdir(self.repo), contextlib.redirect_stderr(io.StringIO()):
             cfg = parse_toml(CONFIG)
-            plans = [gate.plan(cfg, "backend", base, records=False) for base in (first, "HEAD")]
+            snap = gate.snapshot("HEAD")
+            plans = [gate.plan(cfg, "backend", base, snap, force=True) for base in (first, "HEAD")]
         self.assertNotEqual(plans[0].commands, plans[1].commands)
         self.assertEqual(plans[0].key, plans[1].key)
 
@@ -177,6 +186,64 @@ class TestKey(GateCase):
         self.assertIn("`ghost` matches no tracked file", str(ctx.exception))
 
 
+class TestWorkingTree(GateCase):
+    def names(self, tree: str) -> list[str]:
+        return _git(self.repo, "ls-tree", "-r", "--name-only", tree).split()
+
+    # SPEC: gate#key-working-tree
+    def test_a_clean_tree_is_heads_tree(self) -> None:
+        self.assertEqual(self.tree(), _git(self.repo, "rev-parse", "HEAD^{tree}"))
+
+    # SPEC: gate#key-working-tree
+    def test_the_tree_holds_changes_and_untracked_files_but_not_ignored_files(self) -> None:
+        _write(self.repo, "svc/a.py", "a = 3\n")
+        # Staged, then edited again: the working tree wins over the index.
+        _write(self.repo, "bin/test", "#!/bin/sh\nexit 1\n")
+        _ = _git(self.repo, "add", "bin/test")
+        _write(self.repo, "bin/test", "#!/bin/sh\nexit 0\n")
+        os.remove(os.path.join(self.repo, "docs/notes.md"))
+        _write(self.repo, "scratch.txt", "new\n")
+        _write(self.repo, "debug.log", "ignored\n")
+        status = _git(self.repo, "status", "--porcelain")
+        index = _git(self.repo, "ls-files", "--stage")
+
+        tree = self.tree()
+
+        self.assertEqual(_git(self.repo, "show", f"{tree}:svc/a.py"), "a = 3")
+        self.assertEqual(_git(self.repo, "show", f"{tree}:bin/test"), "#!/bin/sh\nexit 0")
+        self.assertIn("scratch.txt", self.names(tree))
+        self.assertNotIn("docs/notes.md", self.names(tree))
+        self.assertNotIn("debug.log", self.names(tree))
+        # The real index is not touched: staged and unstaged changes stay as they were.
+        self.assertEqual(_git(self.repo, "status", "--porcelain"), status)
+        self.assertEqual(_git(self.repo, "ls-files", "--stage"), index)
+
+    # SPEC: gate#key-working-tree
+    def test_a_dirty_tree_keys_as_the_commit_made_from_it(self) -> None:
+        _write(self.repo, "svc/a.py", "a = 3\n")
+        _write(self.repo, "svc/new.py", "new = 1\n")
+        dirty = self.worktree_key()
+        self.assertNotEqual(dirty, self.key())
+        _ = _git(self.repo, "add", "-A")
+        _ = _git(self.repo, "-c", "user.name=other", "-c", "user.email=o@o", "commit", "-qm", "any message")
+        self.assertEqual(self.key(), dirty)
+
+    # SPEC: gate#key-working-tree
+    def test_a_linked_worktree_uses_its_own_index(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        linked = os.path.join(tmp.name, "linked")
+        _ = _git(self.repo, "worktree", "add", "-q", "--detach", linked)
+        _write(linked, "svc/a.py", "a = 3\n")
+        index = _git(linked, "ls-files", "--stage")
+        with contextlib.chdir(linked):
+            tree = git.worktree_tree()
+        self.assertEqual(_git(linked, "show", f"{tree}:svc/a.py"), "a = 3")
+        self.assertEqual(_git(linked, "ls-files", "--stage"), index)
+        # The main checkout is clean, and keys as its HEAD.
+        self.assertEqual(self.tree(), _git(self.repo, "rev-parse", "HEAD^{tree}"))
+
+
 class DirtyingRunner(RecordingRunner):
     """A runner whose commands leave an untracked file behind."""
 
@@ -190,7 +257,7 @@ class DirtyingRunner(RecordingRunner):
 
 
 class CommittingRunner(RecordingRunner):
-    """A runner whose commands commit, so the tree stays clean and HEAD moves."""
+    """A runner whose commands commit, so HEAD moves and the content does not."""
 
     def __init__(self, root: str) -> None:
         super().__init__()
@@ -205,37 +272,6 @@ class TestRun(GateCase):
     def run_gate(self, *extra: str, runner: Any = None) -> tuple[int, str, str]:
         return self.tangier("gate", "run", "backend", "--base", self.base, *extra, runner=runner)
 
-    # SPEC: gate#run-refuses-dirty-tree
-    def assert_refused(self, *extra: str) -> None:
-        runner = RecordingRunner()
-        code, _, err = self.run_gate(*extra, runner=runner)
-        self.assertEqual(code, 2)
-        self.assertIn("dirty", err)
-        self.assertEqual(runner.calls, [])
-        self.assertEqual(_gate_refs(self.repo), [])
-
-    # SPEC: gate#run-refuses-dirty-tree
-    def test_a_tracked_change_is_refused(self) -> None:
-        _write(self.repo, "svc/a.py", "dirty\n")
-        self.assert_refused()
-
-    # SPEC: gate#run-refuses-dirty-tree
-    def test_an_untracked_file_is_refused(self) -> None:
-        _write(self.repo, "scratch.txt", "dirty\n")
-        self.assert_refused()
-
-    # SPEC: gate#run-refuses-dirty-tree
-    def test_an_untracked_file_is_refused_when_git_status_hides_untracked_files(self) -> None:
-        _ = _git(self.repo, "config", "status.showUntrackedFiles", "no")
-        _write(self.repo, "scratch.txt", "dirty\n")
-        self.assert_refused()
-
-    # SPEC: gate#run-refuses-dirty-tree
-    def test_an_ignored_file_does_not_make_the_tree_dirty(self) -> None:
-        _write(self.repo, "debug.log", "ignored\n")
-        self.assertEqual(self.run_gate()[0], 0)
-        self.assertEqual(len(_gate_refs(self.repo)), 1)
-
     # SPEC: gate#run-stops-at-first-failure
     def test_a_failing_command_stops_the_run_and_writes_no_record(self) -> None:
         runner = RecordingRunner({("bin/test",): Result(3)})
@@ -245,18 +281,18 @@ class TestRun(GateCase):
         self.assertEqual(_gate_refs(self.repo), [])
 
     # SPEC: gate#run-dirty-after
-    def test_a_run_that_dirties_the_tree_writes_no_record(self) -> None:
+    def test_a_run_that_changes_the_tree_writes_no_record(self) -> None:
         code, _, err = self.run_gate(runner=DirtyingRunner(self.repo))
         self.assertEqual(code, 1)
+        self.assertIn("the working tree changed during the run", err)
         self.assertIn("no record was written", err)
         self.assertEqual(_gate_refs(self.repo), [])
 
     # SPEC: gate#run-dirty-after
-    def test_a_run_that_moves_head_writes_no_record(self) -> None:
+    def test_a_run_that_moves_head_over_the_same_content_writes_the_record(self) -> None:
         code, _, err = self.run_gate(runner=CommittingRunner(self.repo))
-        self.assertEqual(code, 1)
-        self.assertIn("moved HEAD", err)
-        self.assertEqual(_gate_refs(self.repo), [])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{self.key()}"])
 
     # SPEC: gate#placeholder-whole-token
     def test_placeholders_become_the_selected_lists(self) -> None:
@@ -286,6 +322,8 @@ class TestRun(GateCase):
                 "gate": "backend",
                 "key": key,
                 "head": _git(self.repo, "rev-parse", "HEAD"),
+                "tree": _git(self.repo, "rev-parse", "HEAD^{tree}"),
+                "dirty": False,
                 "base": self.base,
                 "user": "dev@example.com",
                 "time": "2026-03-01T12:00:00+00:00",
@@ -315,14 +353,80 @@ class TestRun(GateCase):
         self.assertIn("verified", out)
 
     # SPEC: gate#run-read-only
-    def test_read_only_on_a_dirty_tree_runs_and_does_not_read_a_record(self) -> None:
+    def test_read_only_on_a_dirty_tree_reuses_a_matching_record(self) -> None:
+        _write(self.repo, "svc/a.py", "a = 3\n")
         _ = self.run_gate()
-        _write(self.repo, "scratch.txt", "dirty\n")
         runner = RecordingRunner()
-        code, _, err = self.run_gate("--read-only", runner=runner)
+        code, out, _ = self.run_gate("--read-only", runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, [])
+        self.assertIn("verified", out)
+
+    # SPEC: gate#run-records-pass
+    # SPEC: gate#record-contents
+    def test_a_pass_on_a_dirty_tree_records_the_tree_it_tested(self) -> None:
+        _write(self.repo, "svc/new.py", "new = 1\n")
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, 12, 0, tzinfo=UTC)):
+            code, _, err = self.run_gate()
+        self.assertEqual(code, 0)
+        self.assertIn("keying the working tree", err)
+        key = self.worktree_key()
+        self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{key}"])
+        record = json.loads(_git(self.repo, "cat-file", "blob", f"refs/tangier/gates/backend/{key}"))
+        self.assertEqual(
+            record,
+            {
+                "gate": "backend",
+                "key": key,
+                "head": _git(self.repo, "rev-parse", "HEAD"),
+                "tree": self.tree(),
+                "dirty": True,
+                "base": self.base,
+                "user": "dev@example.com",
+                "time": "2026-03-01T12:00:00+00:00",
+                "tangier": tangier.__version__,
+                # The lists hold the untracked file as well as the committed change.
+                "commands": [["bin/test", "--dirs", "svc", "--files", "svc/a.py,svc/new.py"], ["bin/lint"]],
+            },
+        )
+
+    # SPEC: gate#record-reused-after-commit
+    def test_a_pass_on_a_dirty_tree_verifies_the_commit_made_from_it(self) -> None:
+        _write(self.repo, "svc/a.py", "a = 3\n")
+        _write(self.repo, "svc/new.py", "new = 1\n")
+        _ = self.run_gate()
+        _ = _git(self.repo, "add", "-A")
+        _ = _git(self.repo, "-c", "user.name=other", "commit", "-qm", "the tested work, any message")
+        runner = RecordingRunner()
+        code, out, _ = self.run_gate(runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, [])
+        self.assertIn("verified", out)
+
+    # SPEC: gate#record-reused-after-commit
+    def test_a_commit_of_part_of_the_tested_work_runs_again(self) -> None:
+        _write(self.repo, "svc/a.py", "a = 3\n")
+        _write(self.repo, "svc/new.py", "new = 1\n")
+        _ = self.run_gate()
+        tested = self.worktree_key()
+        _ = _git(self.repo, "add", "svc/a.py")
+        _ = _git(self.repo, "commit", "-qm", "half the tested work")
+        # Drop the rest, so the tree is exactly the partial commit.
+        os.remove(os.path.join(self.repo, "svc/new.py"))
+        runner = RecordingRunner()
+        code, _, _ = self.run_gate(runner=runner)
         self.assertEqual(code, 0)
         self.assertEqual(runner.calls, SELECTED)
-        self.assertIn("dirty", err)
+        self.assertEqual(_gate_refs(self.repo), sorted(f"refs/tangier/gates/backend/{k}" for k in (tested, self.key())))
+
+    # SPEC: gate#cli-head-defaults
+    def test_key_and_verified_read_the_working_tree(self) -> None:
+        _ = self.run_gate()
+        _write(self.repo, "svc/a.py", "a = 3\n")
+        self.assertEqual(self.tangier("gate", "key", "backend")[1], f"{self.worktree_key()}\n")
+        self.assertEqual(self.tangier("gate", "key", "backend", "--head", "HEAD")[1], f"{self.key()}\n")
+        self.assertEqual(self.tangier("gate", "verified", "backend")[:2], (1, "unverified\n"))
+        self.assertEqual(self.tangier("gate", "verified", "backend", "--head", "HEAD")[:2], (0, "verified\n"))
 
     # SPEC: gate#run-read-only
     def test_read_only_runs_on_a_miss_and_writes_no_record(self) -> None:
@@ -351,11 +455,14 @@ class TestRun(GateCase):
         # A new record, with the later time, replaces the first.
         self.assertNotEqual(_git(self.repo, "rev-parse", ref), first)
 
-    # SPEC: gate#run-refuses-dirty-tree
     # SPEC: gate#run-force
-    def test_force_refuses_a_dirty_tree(self) -> None:
+    def test_force_on_a_dirty_tree_runs_and_writes_the_record(self) -> None:
         _write(self.repo, "scratch.txt", "dirty\n")
-        self.assert_refused("--force")
+        runner = RecordingRunner()
+        code, _, _ = self.run_gate("--force", runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, SELECTED)
+        self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{self.worktree_key()}"])
 
     # SPEC: gate#run-read-only
     # SPEC: gate#run-force
@@ -462,14 +569,36 @@ class TestNeed(GateCase):
         self.assertEqual(runner.calls, [["bin/test"], ["bin/lint"]])
         self.assertEqual(len(_gate_refs(self.repo)), 1)
 
-    # SPEC: gate#run-refuses-dirty-tree
-    def test_a_dirty_tree_is_refused_before_the_need_test(self) -> None:
+    # SPEC: gate#need-scope-touched
+    def test_an_uncommitted_change_inside_the_scope_runs(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        _write(self.repo, "bin/test", "#!/bin/sh\nexit 0\n")
+        self.assertEqual(self.run_gate()[3].calls, [["bin/test"], ["bin/lint"]])
+
+    # SPEC: gate#need-scope-touched
+    # SPEC: gate#run-not-needed
+    def test_an_untracked_file_outside_the_scope_is_not_needed(self) -> None:
         self.use_config(self.NO_PLACEHOLDER)
         _write(self.repo, "scratch.txt", "dirty\n")
-        code, _, err, runner = self.run_gate()
-        self.assertEqual(code, 2)
-        self.assertIn("dirty", err)
-        self.assertEqual(runner.calls, [])
+        self.assert_not_needed()
+
+    # SPEC: gate#run-reuses-record
+    def test_an_uncommitted_change_outside_the_scope_keeps_heads_record(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        _ = self.run_gate("--force")
+        _write(self.repo, "docs/notes.md", "more notes\n")
+        code, out, _, runner = self.run_gate()
+        self.assertEqual((code, runner.calls), (0, []))
+        self.assertIn("verified", out)
+
+    # SPEC: gate#placeholder-whole-token
+    def test_placeholder_lists_hold_uncommitted_and_untracked_files(self) -> None:
+        self.use_config(CONFIG)
+        _write(self.repo, "svc/a.py", "a = 3\n")
+        _write(self.repo, "svc/new.py", "new = 1\n")
+        self.assertEqual(
+            self.run_gate()[3].calls, [["bin/test", "--dirs", "svc", "--files", "svc/a.py,svc/new.py"], ["bin/lint"]]
+        )
 
     # SPEC: gate#need-unreadable-base-runs
     def test_an_unreadable_base_warns_and_runs(self) -> None:
@@ -545,6 +674,17 @@ class TestComparator(GateCase):
         code, out, runner = self.run_gate()
         self.assertEqual((code, runner.calls), (0, []))
         self.assertIn("verified", out)
+
+    # SPEC: gate#comparator-newest-record
+    def test_a_dirty_tree_diffs_from_heads_record(self) -> None:
+        _ = self.run_gate()
+        _write(self.repo, "other/b.py", "b = 2\n")
+        _, _, runner = self.run_gate()
+        self.assertEqual(runner.calls, OTHER_ONLY)
+        record = json.loads(
+            _git(self.repo, "cat-file", "blob", f"refs/tangier/gates/backend/{self.worktree_key(TWO_ITEMS)}")
+        )
+        self.assertEqual(record["base"], _git(self.repo, "rev-parse", "HEAD"))
 
     # SPEC: gate#comparator-newest-record
     def test_a_record_on_a_commit_that_is_not_an_ancestor_is_ignored(self) -> None:
@@ -686,6 +826,12 @@ class TestRunMany(GateCase):
         self.assertIn("local", err)
         self.assertIn("changed in scope: svc/a.py", err)
         self.assertIn(f"base {recorded[:7]} (record at {recorded[:7]}, local)", out)
+
+    # SPEC: gate#run-debug
+    def test_debug_labels_the_working_tree(self) -> None:
+        _write(self.repo, "svc/a.py", "a = 3\n")
+        _, _, err = self.tangier("gate", "run", "backend", "--dry-run", "--debug", "--base", self.base)
+        self.assertIn(f"working tree ({self.tree()[:7]})", err)
 
 
 class TestStore(GateCase):

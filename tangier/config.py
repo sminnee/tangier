@@ -169,7 +169,7 @@ class TailnetSettings:
 
 @dataclass
 class GateSpec:
-    """`[gate.<name>]` — a set of commands whose pass on a clean tree is recorded.
+    """`[gate.<name>]` — a set of commands whose pass is recorded under a key of the content it tested.
 
     `commands` are split into argv at PARSE time, as `AfterHook` is, so
     `runner.run` never needs a shell. A `{...}` placeholder is a whole token and
