@@ -75,7 +75,7 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
             else "no uncommitted change touches the scope"
         )
         print(f"gate `{name}`: keying the working tree; {what}", file=sys.stderr)
-    p = gate.plan(config, name, args.base, snap, origin, force=args.force)
+    p = gate.plan(config, name, args.base, snap, origin, force=args.force, accept=args.accept)
     if args.debug:
         _print_debug(p)
     if args.dry_run:
@@ -125,10 +125,26 @@ def _print_debug(p: gate.GatePlan) -> None:
     print(f"gate `{p.name}`: comparator walk, newest first", file=err)
     for step in p.trail:
         print(f"  {step.label} {step.key or '(no key)'} {step.where or 'miss'}", file=err)
+        for run, ok in step.runs:
+            print(f"    {_ran_on(run)} ({'accepted' if ok else 'ignored'})", file=err)
     print(f"gate `{p.name}`: effective base {p.effective_base or '(none)'} ({p.how})", file=err)
     print(f"gate `{p.name}`: changed in scope: {', '.join(p.changed) or '(none)'}", file=err)
     for token, items in p.lists.items():
         print(f"gate `{p.name}`: {token}: {','.join(items) or '(empty)'}", file=err)
+
+
+def _ran_on(run: dict[str, object]) -> str:
+    """One line on where and when a run happened: `ci github-actions push refs/heads/main job=e2e <time>`."""
+    runner = run.get("runner")
+    runner = runner if isinstance(runner, dict) else {}
+    if runner.get("kind") == "ci":
+        parts = [runner.get(name) for name in ("kind", "provider", "event", "ref")]
+        if runner.get("job"):
+            parts.append(f"job={runner['job']}")
+    else:
+        where = "@".join(str(part) for part in (run.get("user"), runner.get("host")) if part)
+        parts = [runner.get("kind", "local"), where]
+    return " ".join(str(part) for part in [*parts, run.get("time")] if part)
 
 
 def _run_commands(runner: Runner, spec: GateSpec, commands: list[list[str]]) -> int:
@@ -150,7 +166,7 @@ def cmd_verified(config: Config, args: argparse.Namespace) -> int:
     tree = gate.snapshot(args.head).tree
     # One exact-ref lookup for one gate. A group lists origin's gate refs once for all its members.
     origin = gate.OriginRecords() if len(names) > 1 else None
-    if all(gate.verified(name, gate.key(config, name, tree), origin) for name in names):
+    if all(gate.verified(name, gate.key(config, name, tree), origin, args.accept) for name in names):
         print("verified")
         return 0
     print("unverified")
@@ -173,7 +189,9 @@ def cmd_github_outputs(config: Config, args: argparse.Namespace) -> int:
     # One read of origin for all gates, not one per gate.
     origin = gate.OriginRecords()
     snap = gate.snapshot(args.head)
-    statuses = {name: gate.plan(config, name, args.base, snap, origin) for name in sorted(config.gates)}
+    statuses = {
+        name: gate.plan(config, name, args.base, snap, origin, accept=args.accept) for name in sorted(config.gates)
+    }
     pairs: dict[str, str] = {}
     for name, p in statuses.items():
         _add_status(pairs, gate_output_name(name), p.status)
@@ -220,6 +238,25 @@ def _positive_days(value: str) -> int:
     return days
 
 
+def _accept(value: str) -> gate.Accept:
+    try:
+        return gate.Accept.parse(value)
+    except gate.GateError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
+
+
+def _add_accept(p: argparse.ArgumentParser) -> None:
+    _ = p.add_argument(
+        "--accept",
+        action="append",
+        type=_accept,
+        default=[],
+        metavar="RAN_ON",
+        help="count only runs on this runner: `ci`, `local`, or `field=value,...` over "
+        f"{', '.join(gate.ACCEPT_FIELDS)}; repeat to accept any of several",
+    )
+
+
 def _add_diff_args(p: argparse.ArgumentParser, *, head: bool = True) -> None:
     _ = p.add_argument("--base", default="origin/main")
     if head:
@@ -264,11 +301,13 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _ = rp.add_argument(
         "--debug", action="store_true", help="print the comparator walk and the diff it chose to stderr"
     )
+    _add_accept(rp)
     rp.set_defaults(func=cmd_run)
 
     vp = gsub.add_parser("verified", help="has this gate passed? prints verified/unverified, exits 0/1")
     _ = vp.add_argument("name", help="a gate, or a group, which is verified when every member is")
     _add_head_arg(vp)
+    _add_accept(vp)
     vp.set_defaults(func=cmd_verified)
 
     pp = gsub.add_parser("push", help="push local gate records to origin")
@@ -276,6 +315,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
 
     op = gsub.add_parser("github-outputs", help="emit <gate>-status, -run, -verified and -key as $GITHUB_OUTPUT lines")
     _add_diff_args(op)
+    _add_accept(op)
     op.set_defaults(func=cmd_github_outputs)
 
     xp = gsub.add_parser("prune", help="delete old gate records, on origin and in this clone")

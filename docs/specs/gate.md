@@ -15,7 +15,8 @@ Three risks follow:
   diff-based build that omits the same file fails the same way. The backstop is a nightly full
   build that does not consult gate records.
 - **Forged records.** Anyone with push access can write a gate ref. A record is the author's word,
-  the same trust level as a commit status set by hand.
+  the same trust level as a commit status set by hand. A run's `runner` is self-reported too, so
+  `--accept ci` narrows this risk by convention only: a dev machine can claim to be CI.
 - **Environment drift.** The key covers the gate's `env` table and its scope. It does not cover the
   machine: tool versions, services, or environment variables outside `env`. A local pass and a CI
   pass can differ for those reasons.
@@ -156,6 +157,9 @@ full build covers.
   ancestor is never reached. `[comparator-first-parent]`
 - With no record, the comparator is the merge base, as a run with no records would diff.
   `[comparator-falls-back-to-merge-base]`
+- A record with no run that `--accept` takes is a miss, as if it had never been written. The walk
+  goes on to an older commit, and falls back to the merge base. A record that cannot be read is a
+  miss too, with a warning. `[comparator-ignores-rejected]`
 - A gate with no placeholder checks the working tree only. An older record cannot narrow its
   commands, and if the scope has not changed since that record, the working tree has the same key.
   With no record there, it diffs from the merge base, and does not walk. `[comparator-no-placeholder]`
@@ -216,13 +220,14 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   one run. A record keeps the newest 20 runs. `[record-runs]`
 - A blob with no `runs` is a legacy record. It reads as one run whose runner is `local`: before
   runs were recorded, CI ran `--read-only` and wrote no record. A `format` above 2 is a newer
-  record this tangier cannot read. `[record-legacy]`
+  record this tangier cannot read, so it is a miss, with a warning. `[record-legacy]`
 - `runner.kind` is `ci` when the `CI` variable is `true` or `1`, and `local` otherwise. A local
   runner holds `host`. A CI runner holds `provider`: `github-actions` under GitHub Actions, and
   `unknown` elsewhere. Under GitHub Actions it also holds `event`, `ref`, `repository`, `workflow`,
   `job`, `run_id`, `run_attempt`, `runner_name` and the run's `url`. `[runner-detect]`
 
-  A pull request and a merged branch are one store. `event` and `ref` tell their runs apart.
+  A pull request and a merged branch are one store. `event` and `ref` tell their runs apart, and
+  `--accept` can match on them.
 
 - `gate run` writes a local ref. It needs no network.
 - `gate push` pushes every local gate ref to `origin` with a forced refspec. With no local record,
@@ -232,9 +237,9 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   race, and the loser's runs are then lost. That is the safe direction: the gate runs again. A
   local record that cannot be read takes `origin`'s instead, with a warning. An `origin` record
   that cannot be read is overwritten, with a warning. `[push-merges-runs]`
-- A gate is verified when the local ref exists, or when `origin` holds it. The local check runs
-  first. The first lookup that reaches `origin` fetches its gate refs, in one call, into
-  `refs/tangier/origin-gates/*`, and every later lookup reads that mirror.
+- A gate is verified when the local record holds an accepted run, or when `origin`'s record does.
+  The local check runs first. The first lookup that reaches `origin` fetches its gate refs, in one
+  call, into `refs/tangier/origin-gates/*`, and every later lookup reads that mirror.
   `[verified-local-then-origin]`
 - An `origin` that cannot be read counts as not verified, with a warning on stderr. The gate then
   runs. `[origin-unreachable]`
@@ -251,10 +256,10 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | Command | Behaviour |
 | --- | --- |
 | `gate key <selector>` | Print the key. |
-| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--force`, `--dry-run` and `--debug`. |
-| `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has a record. |
+| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--force`, `--dry-run`, `--debug` and `--accept`. |
+| `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
 | `gate push` | Push local gate records to `origin`. |
-| `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. |
+| `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept`. |
 | `gate prune --older-than <days>` | Delete old gate records, on `origin` and in this clone. |
 
 `gate run` has no `--head`. The commands test the checked-out tree, so the working tree is the only
@@ -268,10 +273,28 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   one. All gates share one read of `origin`. `[run-all]`
 - `--dry-run` prints each gate's status, its comparator as a short SHA with how it was chosen
   (`record at abc1234, local` or `merge base with origin/main`), and the commands a run would
-  execute. It runs nothing and writes nothing. `[run-dry-run]`
+  execute. It runs nothing and writes nothing. When `--accept` rejected a record on the walk, the
+  reason ends with how many, as `(2 record(s) ignored by --accept)`. `[run-dry-run]`
 - `--debug` prints to stderr each commit the comparator walk checked, with its key and `miss`,
-  `local` or `origin`. A dirty working tree shows as `working tree (<tree>)`. It then prints the comparator, the changed files that touch the scope, and
-  each placeholder's list. It combines with `--dry-run`. `[run-debug]`
+  `local` or `origin`. A dirty working tree shows as `working tree (<tree>)`. Under each commit it
+  lists the runs it read, with where and when each ran, and `accepted` or `ignored`. It then prints
+  the comparator, the changed files that touch the scope, and each placeholder's list. It combines
+  with `--dry-run`. `[run-debug]`
+- `--accept` says which runs count. Its value is a bare kind, `ci` or `local`, or comma-separated
+  `field=value` pairs over `kind`, `provider`, `event`, `ref`, `workflow` and `job`. A run is
+  accepted when every named field equals its runner's. The flag repeats, and a run is accepted
+  when any value takes it. With no `--accept`, every run counts. Any other field or kind is an
+  error, exit 2. The filter applies to every gate in the invocation. `[accept-filter]`
+
+  ```sh
+  tangier gate run e2e --accept ci                      # only CI runs count
+  tangier gate run e2e --accept kind=ci,event=push      # only CI runs on merged branches
+  tangier gate run e2e --accept ci --accept local       # any one may match
+  ```
+
+  `--accept` is not a key input: it changes which runs count, not what the content is. With
+  `--accept ci` on a dev machine, a pass still records a `local` run, which does not satisfy the
+  gate under the same filter.
 - When the diff does not need the gate, `gate run` prints ``gate `<name>`: not-needed for this
   diff``, runs nothing, writes no record, and exits 0. The diff includes uncommitted work.
   `[run-not-needed]`

@@ -168,6 +168,13 @@ class GateCase(unittest.TestCase):
     def worktree_key(self, body: str = CONFIG) -> str:
         return self.key(body, head=self.tree())
 
+    def clone_origin(self, origin: str) -> str:
+        """A second clone of `origin`, removed after the test."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        _ = subprocess.run(["git", "clone", "-q", origin, tmp.name], capture_output=True, check=True)
+        return tmp.name
+
 
 class TestKey(GateCase):
     # SPEC: gate#key-content-only
@@ -301,6 +308,41 @@ class TestWorkingTree(GateCase):
         with contextlib.chdir(self.repo), self.assertRaises(gate.GateError) as ctx:
             _ = gate.snapshot()
         self.assertIn("submodule vendored", str(ctx.exception))
+
+
+class TestAccept(GateCase):
+    # SPEC: gate#accept-filter
+    def test_a_run_counts_when_any_accept_value_matches_it(self) -> None:
+        with mock.patch.dict(os.environ, GITHUB_PUSH):
+            self.assertEqual(self.tangier("gate", "run", "backend", "--base", self.base)[0], 0)
+        cases = [
+            ((), "verified"),
+            (("ci",), "verified"),
+            (("local",), "unverified"),
+            (("local", "ci"), "verified"),
+            (("kind=ci,event=push",), "verified"),
+            (("kind=ci,event=pull_request",), "unverified"),
+        ]
+        for values, expected in cases:
+            with self.subTest(accept=values):
+                flags = [arg for value in values for arg in ("--accept", value)]
+                self.assertEqual(self.tangier("gate", "verified", "backend", *flags)[1], f"{expected}\n")
+
+    # SPEC: gate#accept-filter
+    def test_an_unknown_field_or_kind_exits_2(self) -> None:
+        cases = [
+            ("host=mbp", "`host` is not a runner field"),
+            ("kind=robot", "`robot` is not a runner kind"),
+            ("robot", "`robot` is not a runner kind"),
+            ("event=", "names no value"),
+        ]
+        for value, message in cases:
+            with self.subTest(value=value):
+                err = io.StringIO()
+                with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(err):
+                    _ = cli.main(["gate", "verified", "backend", "--accept", value])
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn(message, err.getvalue())
 
 
 class TestRanOn(unittest.TestCase):
@@ -445,7 +487,8 @@ class TestRun(GateCase):
         ref = f"refs/tangier/gates/backend/{self.key()}"
         legacy = {"gate": "backend", "key": self.key(), "head": "abc", "time": "2026-03-01T00:00:00+00:00"}
         _put_blob(self.repo, ref, json.dumps(legacy))
-        self.assertEqual(self.tangier("gate", "verified", "backend")[:2], (0, "verified\n"))
+        self.assertEqual(self.tangier("gate", "verified", "backend", "--accept", "local")[:2], (0, "verified\n"))
+        self.assertEqual(self.tangier("gate", "verified", "backend", "--accept", "ci")[:2], (1, "unverified\n"))
         # A new run joins it.
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
             self.assertEqual(self.run_gate("--force")[0], 0)
@@ -453,6 +496,26 @@ class TestRun(GateCase):
         self.assertEqual(runs[0], {"head": "abc", "time": "2026-03-01T00:00:00+00:00", "runner": {"kind": "local"}})
         self.assertEqual((runs[1]["time"], runs[1]["runner"]), ("2026-03-02T00:00:00+00:00", LOCAL_RAN_ON))
         self.assertEqual(len(runs), 2)
+
+    # SPEC: gate#comparator-ignores-rejected
+    def test_an_unreadable_local_record_is_a_miss_and_is_replaced(self) -> None:
+        ref = f"refs/tangier/gates/backend/{self.key()}"
+        _put_blob(self.repo, ref, json.dumps({"format": 2, "runs": "x"}))
+        runner = RecordingRunner()
+        code, _, err = self.run_gate(runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, SELECTED)
+        self.assertIn(f"warning: {ref} counts as absent", err)
+        self.assertIn(f"warning: replaced {ref}", err)
+        self.assertEqual([run["runner"] for run in _runs(self.repo, ref)], [LOCAL_RAN_ON])
+
+    # SPEC: gate#record-legacy
+    def test_a_newer_record_format_is_a_miss(self) -> None:
+        ref = f"refs/tangier/gates/backend/{self.key()}"
+        _put_blob(self.repo, ref, json.dumps({"format": 3, "runs": []}))
+        code, out, err = self.tangier("gate", "verified", "backend")
+        self.assertEqual((code, out), (1, "unverified\n"))
+        self.assertIn("record format 3 is newer", err)
 
     # SPEC: gate#run-reuses-record
     def test_a_verified_gate_runs_nothing(self) -> None:
@@ -892,12 +955,68 @@ class TestComparator(GateCase):
         origin = make_origin(self, self.repo)
         _ = self.run_gate()
         self.assertEqual(self.tangier("gate", "push")[0], 0)
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        _ = subprocess.run(["git", "clone", "-q", origin, tmp.name], capture_output=True, check=True)
-        _ = _commit(tmp.name, "other/b.py", "b = 2\n")
-        _, _, runner = self.run_gate(cwd=tmp.name)
+        other = self.clone_origin(origin)
+        _ = _commit(other, "other/b.py", "b = 2\n")
+        _, _, runner = self.run_gate(cwd=other)
         self.assertEqual(runner.calls, OTHER_ONLY)
+
+    def run_in_ci(self, *extra: str, cwd: str | None = None) -> None:
+        """Record a CI run at HEAD, as a GitHub Actions job on a push to main would."""
+        with mock.patch.dict(os.environ, GITHUB_PUSH):
+            self.assertEqual(self.run_gate("--force", *extra, cwd=cwd)[0], 0)
+
+    # SPEC: gate#comparator-ignores-rejected
+    def test_accept_ignores_a_local_run_and_walks_to_an_older_ci_run(self) -> None:
+        self.run_in_ci()
+        in_ci = _git(self.repo, "rev-parse", "HEAD")
+        _ = _commit(self.repo, "other/b.py", "b = 2\n")
+        _ = self.run_gate()
+        # Without `--accept`, the local run at HEAD verifies the gate.
+        self.assertIn("gate `backend`: verified", self.run_gate("--dry-run")[1])
+        _, out, _ = self.run_gate("--accept", "ci", "--dry-run")
+        self.assertIn(f"record at {in_ci[:7]}, local", out)
+        self.assertIn("1 record(s) ignored by --accept", out)
+        _, _, runner = self.run_gate("--accept", "ci")
+        self.assertEqual(runner.calls, OTHER_ONLY)
+        # The local pass joins the local run, and still does not satisfy `--accept ci`.
+        self.assertEqual(self.record()["runner"]["kind"], "local")
+        self.assertIn("gate `backend`: required", self.run_gate("--accept", "ci", "--dry-run")[1])
+
+    # SPEC: gate#comparator-ignores-rejected
+    def test_accept_with_only_local_runs_falls_back_to_the_merge_base(self) -> None:
+        _ = self.run_gate()
+        _ = _commit(self.repo, "other/b.py", "b = 2\n")
+        _, _, runner = self.run_gate("--accept", "ci")
+        self.assertEqual(runner.calls, BOTH)
+
+    # SPEC: gate#comparator-ignores-rejected
+    def test_accept_reads_the_runs_of_a_record_on_origin(self) -> None:
+        origin = make_origin(self, self.repo)
+        self.run_in_ci()
+        in_ci = _git(self.repo, "rev-parse", "HEAD")
+        _ = self.run_gate("--force")
+        self.assertEqual(self.tangier("gate", "push")[0], 0)
+        other = self.clone_origin(origin)
+        _ = _commit(other, "other/b.py", "b = 2\n")
+        _, out, _ = self.run_gate("--accept", "ci", "--dry-run", cwd=other)
+        self.assertIn(f"record at {in_ci[:7]}, origin", out)
+        _, _, runner = self.run_gate("--accept", "kind=ci,event=push", cwd=other)
+        self.assertEqual(runner.calls, OTHER_ONLY)
+        _, _, runner = self.run_gate("--accept", "kind=ci,event=pull_request", "--read-only", cwd=other)
+        self.assertEqual(runner.calls, BOTH)
+
+    # SPEC: gate#run-debug
+    def test_debug_marks_each_run_accepted_or_ignored(self) -> None:
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
+            self.run_in_ci()
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
+            _ = self.run_gate("--force")
+        code, out, _ = self.run_gate("--accept", "ci", "--dry-run", "--debug")
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "    ci github-actions push refs/heads/main job=backend 2026-03-01T00:00:00+00:00 (accepted)\n", out
+        )
+        self.assertIn(f"    local dev@example.com@{socket.gethostname()} 2026-03-02T00:00:00+00:00 (ignored)\n", out)
 
     # SPEC: gate#run-force
     def test_force_diffs_from_the_merge_base(self) -> None:
@@ -1105,10 +1224,7 @@ class TestStore(GateCase):
         self.origin = make_origin(self, self.repo)
 
     def clone(self) -> str:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        _ = subprocess.run(["git", "clone", "-q", self.origin, tmp.name], capture_output=True, check=True)
-        return tmp.name
+        return self.clone_origin(self.origin)
 
     def origin_refs(self) -> list[str]:
         return _git(self.origin, "for-each-ref", "--format=%(refname)", "refs/tangier").split()
@@ -1287,6 +1403,22 @@ class TestStore(GateCase):
         self.assertEqual(code, 0)
         self.assertIn(f"kept origin's {ref}", err)
         self.assertEqual([run["runner"] for run in _runs(self.origin, ref)], [LOCAL_RAN_ON])
+
+    # SPEC: gate#comparator-ignores-rejected
+    def test_an_unreadable_record_on_origin_is_a_miss(self) -> None:
+        _put_blob(self.repo, f"refs/tangier/gates/backend/{self.key()}", "not json", remote="origin")
+        code, out, err = self.tangier("gate", "verified", "backend", cwd=self.clone())
+        self.assertEqual((code, out), (1, "unverified\n"))
+        self.assertIn("so it counts as absent", err)
+
+    # SPEC: gate#github-outputs
+    # SPEC: gate#accept-filter
+    def test_github_outputs_counts_only_accepted_runs(self) -> None:
+        _ = self.record_and_push(datetime.now(UTC))
+        args = ("gate", "github-outputs", "--base", self.base)
+        other = self.clone()
+        self.assertIn("backend-status=verified\n", self.tangier(*args, cwd=other)[1])
+        self.assertIn("backend-status=required\n", self.tangier(*args, "--accept", "ci", cwd=other)[1])
 
     # SPEC: gate#prune-by-record-time
     def test_prune_rejects_a_limit_below_one_day(self) -> None:
