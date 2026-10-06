@@ -558,36 +558,87 @@ def verified(name: str, key: str, origin: OriginRecords | None = None, accept: S
     return lookup(name, key, origin, accept)[0]
 
 
-def push() -> int:
-    """Push every local gate ref to origin, after merging origin's runs into it. Returns how many there were.
+# How many fetch, merge and push attempts `sync` makes before it gives up on a racing origin.
+SYNC_ATTEMPTS = 3
 
-    See `docs/specs/gate.md#store`. An unreadable local record takes origin's
-    instead, so it never overwrites a readable one.
+
+@dataclass
+class Synced:
+    """How many gate refs `sync` pushed as they were, pulled from origin, and merged and pushed. Each counts once."""
+
+    pushed: int
+    pulled: int
+    merged: int
+
+
+def sync() -> Synced:
+    """Sync every gate record with origin: pull origin's, merge the runs, push only what changed.
+
+    Each pushed ref carries a lease, and a rejected push starts over, up to
+    `SYNC_ATTEMPTS` times. See `docs/specs/gate.md#store`.
     """
-    local = git.for_each_ref(REF_PREFIX)
-    if not local:
-        return 0
+    before = _local_refs()
+    for _ in range(SYNC_ATTEMPTS):
+        try:
+            pushed = _sync_once()
+        except git.PushRejected:
+            continue
+        # A ref whose local record changed took runs from origin. A retry can change it more than once.
+        after = _local_refs()
+        changed = {ref for ref, sha in after.items() if sha != before.get(ref)}
+        return Synced(pushed=len(pushed - changed), pulled=len(changed - pushed), merged=len(pushed & changed))
+    raise GateError(f"{REMOTE}'s gate records kept changing; run `gate push` again")
+
+
+def _local_refs() -> dict[str, str]:
+    return {ref: sha for sha, ref in git.for_each_ref(REF_PREFIX)}
+
+
+def _sync_once() -> set[str]:
+    """One fetch, merge and leased push. Returns the refs it pushed.
+
+    Raises `git.PushRejected` when origin moved since the fetch.
+    """
     fetch_origin()
-    theirs = {ref: sha for sha, ref in git.for_each_ref(ORIGIN_MIRROR_PREFIX)}
-    for sha, ref in local:
-        other = theirs.get(ORIGIN_MIRROR_PREFIX + ref[len(REF_PREFIX) :])
-        if other is None or other == sha:
+    mine = _local_refs()
+    theirs = {REF_PREFIX + ref[len(ORIGIN_MIRROR_PREFIX) :]: sha for sha, ref in git.for_each_ref(ORIGIN_MIRROR_PREFIX)}
+    # Each ref to push, mapped to the SHA origin must still hold, or "" for a ref origin lacks.
+    leases: dict[str, str] = {}
+    for ref in sorted(mine.keys() | theirs.keys()):
+        sha, other = mine.get(ref), theirs.get(ref)
+        if sha == other:
             continue
-        try:
-            mine = read_runs(sha)
-        except GateError as e:
-            print(f"warning: kept {REMOTE}'s {ref}, because the local one is unreadable: {e}", file=sys.stderr)
-            git.update_ref(ref, other)
+        if other is None:
+            leases[ref] = ""
             continue
-        try:
-            runs = merge_runs(mine, read_runs(other))
-        except GateError as e:
-            print(f"warning: pushed {ref} without origin's runs: {e}", file=sys.stderr)
-            continue
-        name, _, key = ref[len(REF_PREFIX) + 1 :].rpartition("/")
-        git.update_ref(ref, _write_blob(name, key, runs))
-    git.push(REMOTE, [f"+{REF_PREFIX}/*:{REF_PREFIX}/*"])
-    return len(local)
+        result = other if sha is None else _reconciled(ref, sha, other)
+        if result != sha:
+            git.update_ref(ref, result)
+        if result != other:
+            leases[ref] = other
+    if leases:
+        git.push(REMOTE, [f"{ref}:{ref}" for ref in leases], leases=leases, atomic=True)
+    return set(leases)
+
+
+def _reconciled(ref: str, sha: str, other: str) -> str:
+    """The record to keep at `ref`, given the local record `sha` and origin's `other`: both their runs.
+
+    An unreadable local record yields origin's, so it never overwrites a readable
+    one. An unreadable origin record yields the local one, which then replaces it.
+    """
+    try:
+        mine = read_runs(sha)
+    except GateError as e:
+        print(f"warning: kept {REMOTE}'s {ref}, because the local one is unreadable: {e}", file=sys.stderr)
+        return other
+    try:
+        runs = merge_runs(mine, read_runs(other))
+    except GateError as e:
+        print(f"warning: {REMOTE}'s {ref} is unreadable, so the local one replaces it: {e}", file=sys.stderr)
+        return sha
+    name, _, key = ref[len(REF_PREFIX) + 1 :].rpartition("/")
+    return _write_blob(name, key, runs)
 
 
 @dataclass
@@ -603,8 +654,8 @@ def prune(older_than_days: int) -> Pruned:
     blob and carries no other date. A ref that is not a readable record is left
     alone, with a warning.
 
-    The local records go too because `push` sends every local ref: an old one
-    left here would put its pruned ref back on origin.
+    The local records go too because `sync` pushes every local ref that origin
+    lacks: an old one left here would put its pruned ref back on origin.
     """
     fetch_origin()
     cutoff = now() - timedelta(days=older_than_days)

@@ -56,7 +56,7 @@ tangier deploy --render uat                # the manifests a deploy would apply
 tangier deploy uat                         # migrate, apply, wait, roll back on failure
 tangier tailnet check uat                  # why can't I reach the cluster?
 tangier gate run test-backend              # run the gate, and record a pass
-tangier gate push                          # let CI find the record
+tangier gate push                          # sync records with origin, so CI finds them
 ```
 
 `--config` defaults to `pipeline.toml`, overridable with `$TANGIER_CONFIG`.
@@ -137,7 +137,7 @@ then re-tests only what changed since its last pass. With no record, it diffs fr
 
 tangier decides whether that diff needs the gate. A gate is needed when a changed file is one of
 its scope's key inputs and, for a gate with placeholders, at least one list is non-empty. A gate
-the diff does not need does no work. So a pre-push hook runs every gate, then pushes the records:
+the diff does not need does no work. So a pre-push hook runs every gate, then syncs the records with origin:
 
 ```sh
 tangier gate run --all || exit 1     # each gate: "not-needed", "verified", or a run
@@ -377,7 +377,7 @@ bin/test                  # stdlib unittest, no dependencies; one Python, any tr
 tangier gate run test     # the suite on 3.11, 3.12 and 3.13, one member each; needs uv
 tangier gate run lint     # lint.check and lint.format
 tangier gate run no-dependencies  # no declared dependency, and no third-party import
-tangier gate push         # before the PR push, so CI reuses the passes
+tangier gate push         # sync records with origin before the PR push, so CI reuses the passes
 ```
 
 Releases are a maintainer step, not part of the everyday loop. `bin/release v0.2.0` tags a version

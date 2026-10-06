@@ -12,10 +12,10 @@ skips the run. When a case below is not covered, read `docs/specs/gate.md` in th
    others, so read every failure in the output.
 3. Commit exactly the work that passed. The commit reuses the record, so the gate does not run
    again. A commit of only part of the work keys differently and needs a new run.
-4. Run `tangier gate push`. It needs network access to `origin`.
+4. Run `tangier gate push`. It syncs the records with `origin`, so it needs network access to
+   `origin`.
 
-Done when `gate run --all` exits 0 on the committed tree and `gate push` reports the records it
-pushed.
+Done when `gate run --all` exits 0 on the committed tree and `gate push` exits 0.
 
 ## Selectors and groups
 

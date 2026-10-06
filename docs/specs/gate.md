@@ -230,13 +230,18 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   `--accept` can match on them.
 
 - `gate run` writes a local ref. It needs no network.
-- `gate push` pushes every local gate ref to `origin` with a forced refspec. With no local record,
-  it does nothing and exits 0. `[push]`
-- Before it pushes, `gate push` fetches `origin`'s gate refs and merges each one's runs into the
-  local record at the same ref, so a push keeps the runs other clones pushed. Two pushes can still
-  race, and the loser's runs are then lost. That is the safe direction: the gate runs again. A
-  local record that cannot be read takes `origin`'s instead, with a warning. An `origin` record
-  that cannot be read is overwritten, with a warning. `[push-merges-runs]`
+- `gate push` syncs the gate records with `origin`. It fetches `origin`'s gate refs, then pushes
+  only the refs that differ, in one atomic push. With nothing to sync, it pushes nothing and exits
+  0. `[push]`
+- A record that only `origin` holds is written to the local ref. `[push-pulls]`
+- When both hold a record at the same ref, `gate push` merges their runs into the local record,
+  and pushes it unless `origin`'s record already holds every run. A local record that cannot be
+  read takes `origin`'s instead, with a warning. An `origin` record that cannot be read is
+  overwritten, with a warning. `[push-merges-runs]`
+- Each pushed ref carries a lease on the SHA the fetch saw, or on the ref being absent. When
+  another clone pushed after the fetch, the push is rejected, and `gate push` fetches and merges
+  again. So a race never overwrites another clone's runs. After 3 rejected attempts it exits 2,
+  and this sync has written nothing to `origin`. `[push-retries-on-race]`
 - A gate is verified when the local record holds an accepted run, or when `origin`'s record does.
   The local check runs first. The first lookup that reaches `origin` fetches its gate refs, in one
   call, into `refs/tangier/origin-gates/*`, and every later lookup reads that mirror.
@@ -258,7 +263,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | `gate key <selector>` | Print the key. |
 | `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--force`, `--dry-run`, `--debug` and `--accept`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
-| `gate push` | Push local gate records to `origin`. |
+| `gate push` | Sync gate records with `origin`: pull, merge runs, push. |
 | `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept`. |
 | `gate prune --older-than <days>` | Delete old gate records, on `origin` and in this clone. |
 
