@@ -1,6 +1,22 @@
 # tangier's own gates. `tangier gate run <name>` runs one and records the pass;
 # CI runs the same command. See `docs/specs/gate.md`.
 
+# Cheap gates first, so `gate run --all --fail-fast` stops before the slow test gates.
+[gate.lint]
+scope = ["gate-inputs"]
+
+[gate.lint.check]
+cmd = "ruff check ."
+
+[gate.lint.format]
+cmd = "ruff format --check ."
+
+# tangier runs on bare runners with no pip install, so the dependency list must
+# stay empty and no module may import a third-party package.
+[gate.no-dependencies]
+cmd = "python3 -I -S bin/check-no-dependencies"
+scope = ["gate-inputs", "no-dependencies-inputs"]
+
 # One member for each supported Python: 3.11 is the floor (tomllib), and 3.12
 # is what a bare GitHub runner provides. Each member keeps its own record, so
 # one version's pass is recorded even when another version fails.
@@ -18,21 +34,6 @@ cmd = "uv run --no-project --python 3.12 python -m unittest discover -s tangier 
 
 [gate.test.py313]
 cmd = "uv run --no-project --python 3.13 python -m unittest discover -s tangier -p test_*.py -t ."
-
-[gate.lint]
-scope = ["gate-inputs"]
-
-[gate.lint.check]
-cmd = "ruff check ."
-
-[gate.lint.format]
-cmd = "ruff format --check ."
-
-# tangier runs on bare runners with no pip install, so the dependency list must
-# stay empty and no module may import a third-party package.
-[gate.no-dependencies]
-cmd = "python3 -I -S bin/check-no-dependencies"
-scope = ["gate-inputs", "no-dependencies-inputs"]
 
 [no-dependencies-inputs]
 paths = ["bin/check-no-dependencies"]
