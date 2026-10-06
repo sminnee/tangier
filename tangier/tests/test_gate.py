@@ -54,6 +54,8 @@ scope = ["svc", "inputs"]
 FILES = {
     "pipeline.toml": CONFIG,
     "svc/a.py": "a = 1\n",
+    # In no diff: only `--full` puts it in `--files`.
+    "svc/b.py": "b = 1\n",
     "bin/test": "#!/bin/sh\n",
     "docs/notes.md": "notes\n",
     ".gitignore": "*.log\n",
@@ -63,6 +65,8 @@ FILES = {
 NOTHING_SELECTED = [["bin/test", "--dirs", "", "--files", ""], ["bin/lint"]]
 # The gate's commands for `GateCase`'s diff, which changes `svc/a.py`.
 SELECTED = [["bin/test", "--dirs", "svc", "--files", "svc/a.py"], ["bin/lint"]]
+# The gate's commands under `--full`: every item, and every file the file-set's globs match.
+FULL = [["bin/test", "--dirs", "svc", "--files", "svc/a.py,svc/b.py"], ["bin/lint"]]
 
 
 def _git(root: str, *args: str) -> str:
@@ -219,7 +223,7 @@ class TestKey(GateCase):
         with contextlib.chdir(self.repo), contextlib.redirect_stderr(io.StringIO()):
             cfg = parse_toml(CONFIG)
             snap = gate.snapshot("HEAD")
-            plans = [gate.plan(cfg, "backend", base, snap, force=True) for base in (first, "HEAD")]
+            plans = [gate.plan(cfg, "backend", base, snap) for base in (first, "HEAD")]
         self.assertNotEqual(plans[0].commands, plans[1].commands)
         self.assertEqual(plans[0].key, plans[1].key)
 
@@ -505,7 +509,7 @@ class TestRun(GateCase):
             mock.patch.dict(os.environ, GITHUB_PUSH),
             mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)),
         ):
-            code, out, _ = self.run_gate("--force")
+            code, out, _ = self.run_gate("--full")
         self.assertEqual(code, 0)
         self.assertIn(f"recorded as {ref} (ci)", out)
         self.assertEqual(
@@ -518,7 +522,7 @@ class TestRun(GateCase):
         ref = f"refs/tangier/gates/backend/{self.key()}"
         for day in range(1, gate.MAX_RUNS + 3):
             with mock.patch.object(gate, "now", return_value=datetime(2026, 3, day, tzinfo=UTC)):
-                _ = self.run_gate("--force")
+                _ = self.run_gate("--full")
         runs = _runs(self.repo, ref)
         self.assertEqual(len(runs), gate.MAX_RUNS)
         self.assertEqual(runs[0]["time"][:10], "2026-03-03")
@@ -532,7 +536,7 @@ class TestRun(GateCase):
         self.assertEqual(self.tangier("gate", "verified", "backend", "--accept", "ci")[:2], (1, "unverified\n"))
         # A new run joins it.
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
-            self.assertEqual(self.run_gate("--force")[0], 0)
+            self.assertEqual(self.run_gate("--full")[0], 0)
         runs = _runs(self.repo, ref)
         self.assertEqual(runs[0], {"head": "abc", "time": "2026-03-01T00:00:00+00:00", "runner": {"kind": "local"}})
         self.assertEqual((runs[1]["time"], runs[1]["runner"]), ("2026-03-02T00:00:00+00:00", LOCAL_RAN_ON))
@@ -694,46 +698,49 @@ class TestRun(GateCase):
         code, _, _ = self.run_gate("--read-only", runner=DirtyingRunner(self.repo))
         self.assertEqual(code, 0)
 
-    # SPEC: gate#run-force
-    def test_force_runs_a_verified_gate_and_writes_the_record(self) -> None:
+    # SPEC: gate#run-full
+    def test_full_runs_a_verified_gate_and_writes_the_record(self) -> None:
         ref = f"refs/tangier/gates/backend/{self.key()}"
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
             _ = self.run_gate()
         first = _git(self.repo, "rev-parse", ref)
         runner = RecordingRunner()
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
-            code, _, _ = self.run_gate("--force", runner=runner)
+            code, _, _ = self.run_gate("--full", runner=runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.calls, SELECTED)
+        self.assertEqual(runner.calls, FULL)
         # A new record, with the later time, replaces the first.
         self.assertNotEqual(_git(self.repo, "rev-parse", ref), first)
 
-    # SPEC: gate#run-force
-    def test_force_on_a_dirty_tree_runs_and_writes_the_record(self) -> None:
-        _write(self.repo, "scratch.txt", "dirty\n")
+    # SPEC: gate#run-full
+    def test_full_on_a_dirty_tree_runs_and_writes_the_record(self) -> None:
+        # An untracked test file joins the complete file-set: `--full` reads the working tree.
+        _write(self.repo, "svc/new.py", "new = 1\n")
         runner = RecordingRunner()
-        code, _, _ = self.run_gate("--force", runner=runner)
+        code, _, _ = self.run_gate("--full", runner=runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.calls, SELECTED)
+        self.assertEqual(
+            runner.calls, [["bin/test", "--dirs", "svc", "--files", "svc/a.py,svc/b.py,svc/new.py"], ["bin/lint"]]
+        )
         self.assertEqual(_gate_refs(self.repo), [f"refs/tangier/gates/backend/{self.worktree_key()}"])
 
     # SPEC: gate#run-read-only
-    # SPEC: gate#run-force
-    def test_read_only_with_force_runs_on_a_dirty_tree_and_writes_nothing(self) -> None:
+    # SPEC: gate#run-full
+    def test_read_only_with_full_runs_on_a_dirty_tree_and_writes_nothing(self) -> None:
         _write(self.repo, "scratch.txt", "dirty\n")
         runner = RecordingRunner()
-        code, _, _ = self.run_gate("--read-only", "--force", runner=runner)
+        code, _, _ = self.run_gate("--read-only", "--full", runner=runner)
         self.assertEqual(code, 0)
-        self.assertEqual(runner.calls, SELECTED)
+        self.assertEqual(runner.calls, FULL)
         self.assertEqual(_gate_refs(self.repo), [])
 
     # SPEC: gate#run-read-only
-    # SPEC: gate#run-force
-    def test_read_only_with_force_ignores_an_existing_record(self) -> None:
+    # SPEC: gate#run-full
+    def test_read_only_with_full_ignores_an_existing_record(self) -> None:
         _ = self.run_gate()
         runner = RecordingRunner()
-        _ = self.run_gate("--read-only", "--force", runner=runner)
-        self.assertEqual(runner.calls, SELECTED)
+        _ = self.run_gate("--read-only", "--full", runner=runner)
+        self.assertEqual(runner.calls, FULL)
 
     # SPEC: gate#unknown-gate
     def test_an_unknown_gate_is_an_error(self) -> None:
@@ -813,11 +820,11 @@ class TestNeed(GateCase):
         _ = _commit(self.repo, "svc/data.txt", "data\n")
         self.assertEqual(self.run_gate()[3].calls, [["bin/test", "--dirs", "svc", "--files", ""], ["bin/lint"]])
 
-    # SPEC: gate#run-force
-    def test_force_runs_a_gate_that_is_not_needed(self) -> None:
+    # SPEC: gate#run-full
+    def test_full_runs_a_gate_that_is_not_needed(self) -> None:
         self.use_config(self.NO_PLACEHOLDER)
         _ = _commit(self.repo, "docs/notes.md", "more notes\n")
-        code, _, _, runner = self.run_gate("--force")
+        code, _, _, runner = self.run_gate("--full")
         self.assertEqual(code, 0)
         self.assertEqual(runner.calls, [["bin/test"], ["bin/lint"]])
         self.assertEqual(len(_gate_refs(self.repo)), 1)
@@ -838,7 +845,7 @@ class TestNeed(GateCase):
     # SPEC: gate#run-reuses-record
     def test_an_uncommitted_change_outside_the_scope_keeps_heads_record(self) -> None:
         self.use_config(self.NO_PLACEHOLDER)
-        _ = self.run_gate("--force")
+        _ = self.run_gate("--full")
         _write(self.repo, "docs/notes.md", "more notes\n")
         code, out, _, runner = self.run_gate()
         self.assertEqual((code, runner.calls), (0, []))
@@ -872,6 +879,8 @@ TWO_ITEMS = CONFIG.replace('scope = ["svc", "inputs"]', 'scope = ["svc", "other"
 OTHER_ONLY = [["bin/test", "--dirs", "other", "--files", ""], ["bin/lint"]]
 # The gate's commands for the whole branch, from `self.base`.
 BOTH = [["bin/test", "--dirs", "other,svc", "--files", "svc/a.py"], ["bin/lint"]]
+# The gate's commands under `--full`.
+FULL_TWO_ITEMS = [["bin/test", "--dirs", "other,svc", "--files", "svc/a.py,svc/b.py"], ["bin/lint"]]
 
 
 class TestComparator(GateCase):
@@ -1009,7 +1018,7 @@ class TestComparator(GateCase):
     def run_in_ci(self, *extra: str, cwd: str | None = None) -> None:
         """Record a CI run at HEAD, as a GitHub Actions job on a push to main would."""
         with mock.patch.dict(os.environ, GITHUB_PUSH):
-            self.assertEqual(self.run_gate("--force", *extra, cwd=cwd)[0], 0)
+            self.assertEqual(self.run_gate("--full", *extra, cwd=cwd)[0], 0)
 
     # SPEC: gate#comparator-ignores-rejected
     def test_accept_ignores_a_local_run_and_walks_to_an_older_ci_run(self) -> None:
@@ -1040,7 +1049,7 @@ class TestComparator(GateCase):
         origin = make_origin(self, self.repo)
         self.run_in_ci()
         in_ci = _git(self.repo, "rev-parse", "HEAD")
-        _ = self.run_gate("--force")
+        _ = self.run_gate("--full")
         self.assertEqual(self.tangier("gate", "push")[0], 0)
         other = self.clone_origin(origin)
         _ = _commit(other, "other/b.py", "b = 2\n")
@@ -1062,7 +1071,7 @@ class TestComparator(GateCase):
             mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)),
             _taking(245.0),
         ):
-            _ = self.run_gate("--force")
+            _ = self.run_gate("--full")
         code, out, _ = self.run_gate("--accept", "ci", "--dry-run", "--debug")
         self.assertEqual(code, 0)
         self.assertIn(
@@ -1072,12 +1081,20 @@ class TestComparator(GateCase):
             f"    local dev@example.com@{socket.gethostname()} 2026-03-02T00:00:00+00:00 4m05s (ignored)\n", out
         )
 
-    # SPEC: gate#run-force
-    def test_force_diffs_from_the_merge_base(self) -> None:
-        _ = self.run_gate()
-        _ = _commit(self.repo, "other/b.py", "b = 2\n")
-        _, _, runner = self.run_gate("--force")
-        self.assertEqual(runner.calls, [["bin/test", "--dirs", "other,svc", "--files", "svc/a.py"], ["bin/lint"]])
+    # SPEC: gate#run-full
+    def test_full_fills_every_list_from_the_whole_tree(self) -> None:
+        # The diff from HEAD is empty, as on a push to main or a nightly, yet every list is complete.
+        code, _, runner = self.run_gate("--full", base="HEAD")
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.calls, FULL_TWO_ITEMS)
+
+    # SPEC: gate#run-full
+    def test_full_needs_no_merge_base(self) -> None:
+        # A shallow checkout with no `origin/main` still fills every list, with no warning.
+        code, out, runner = self.run_gate("--full", base="origin/main")
+        self.assertEqual(code, 0)
+        self.assertNotIn("merge base", out)
+        self.assertEqual(runner.calls, FULL_TWO_ITEMS)
 
 
 class TestRunMany(GateCase):
@@ -1348,10 +1365,29 @@ class TestStore(GateCase):
             out, f"backend-status=not-needed\nbackend-run=false\nbackend-verified=false\nbackend-key={key}\n"
         )
 
+    # SPEC: gate#run-full
+    def test_github_outputs_full_marks_every_gate_and_group_required(self) -> None:
+        # The same empty diff, and a record at HEAD: `--full` reads neither.
+        second = CONFIG + '[gate.lint.style]\ncmd = "bin/lint"\nscope = "svc"\n'
+        _ = _commit(self.repo, "pipeline.toml", second)
+        self.assertEqual(self.tangier("gate", "run", "--all", "--base", "HEAD", "--full")[0], 0)
+        self.assertIn("backend-status=verified\n", self.tangier("gate", "github-outputs", "--base", "HEAD")[1])
+        _, out, _ = self.tangier("gate", "github-outputs", "--base", "HEAD", "--full")
+        with contextlib.chdir(self.repo):
+            cfg = parse_toml(second)
+            keys = {name: gate.key(cfg, name, "HEAD") for name in ("backend", "lint.style")}
+        self.assertEqual(
+            out,
+            f"backend-status=required\nbackend-run=true\nbackend-verified=false\nbackend-key={keys['backend']}\n"
+            f"lint-style-status=required\nlint-style-run=true\nlint-style-verified=false\n"
+            f"lint-style-key={keys['lint.style']}\n"
+            "lint-status=required\nlint-run=true\nlint-verified=false\n",
+        )
+
     # SPEC: gate#status-values
     def test_a_record_at_head_is_verified_before_the_need_test(self) -> None:
         # The same empty diff, but HEAD's content has a record.
-        self.assertEqual(self.tangier("gate", "run", "backend", "--base", "HEAD", "--force")[0], 0)
+        self.assertEqual(self.tangier("gate", "run", "backend", "--base", "HEAD", "--full")[0], 0)
         _, out, _ = self.tangier("gate", "github-outputs", "--base", "HEAD")
         self.assertIn("backend-status=verified\n", out)
 
@@ -1410,7 +1446,7 @@ class TestStore(GateCase):
     def test_prune_keeps_a_record_whose_newest_run_is_recent(self) -> None:
         key = self.record_and_push(datetime(2026, 1, 1, tzinfo=UTC))
         with mock.patch.object(gate, "now", return_value=datetime(2026, 2, 20, tzinfo=UTC)):
-            self.assertEqual(self.tangier("gate", "run", "backend", "--base", self.base, "--force")[0], 0)
+            self.assertEqual(self.tangier("gate", "run", "backend", "--base", self.base, "--full")[0], 0)
         # The local record holds origin's run and a new one, so it goes as it is.
         self.assertEqual(
             self.tangier("gate", "push")[1], "synced gate records with origin: pushed 1, pulled 0, merged 0\n"
@@ -1441,7 +1477,7 @@ class TestStore(GateCase):
     def run_on(self, cwd: str, day: int) -> None:
         """Record a local pass in `cwd`, at 2026-03-`day`."""
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, day, tzinfo=UTC)), _taking(1.0):
-            code, _, err = self.tangier("gate", "run", "backend", "--base", self.base, "--force", cwd=cwd)
+            code, _, err = self.tangier("gate", "run", "backend", "--base", self.base, "--full", cwd=cwd)
         self.assertEqual(code, 0, err)
 
     # SPEC: gate#push
@@ -1458,7 +1494,7 @@ class TestStore(GateCase):
             code, _, err = self.tangier("gate", "run", "backend", "--base", self.base, cwd=other)
         self.assertEqual(code, 0, err)
         self.assertEqual(self.tangier("gate", "push", cwd=other)[0], 0)
-        # Forced: without `--accept`, origin's CI run already verifies the gate.
+        # Full: without `--accept`, origin's CI run already verifies the gate.
         self.run_on(self.repo, 2)
         self.assertEqual(
             self.tangier("gate", "push")[1], "synced gate records with origin: pushed 0, pulled 0, merged 1\n"

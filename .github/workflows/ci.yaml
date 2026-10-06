@@ -26,21 +26,21 @@ jobs:
           # A pull request reuses a gate record. Any other event is the full
           # build that does not consult records.
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
           python3 -m tangier gate run test.py311 "${flags[@]}"
       - name: Run test.py312
         env:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
           python3 -m tangier gate run test.py312 "${flags[@]}"
       - name: Run test.py313
         env:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
           python3 -m tangier gate run test.py313 "${flags[@]}"
       - name: CLI smoke check
         run: python3 -m tangier --help
@@ -56,7 +56,7 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
           python3 -m tangier gate run no-dependencies "${flags[@]}"
 
   lint:
@@ -72,14 +72,14 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
           python3 -m tangier gate run lint.check "${flags[@]}"
       - name: Run lint.format
         env:
           EVENT: ${{ github.event_name }}
         run: |
           flags=(--read-only)
-          if [ "$EVENT" != pull_request ]; then flags+=(--force); fi
+          if [ "$EVENT" != pull_request ]; then flags+=(--full); fi
           python3 -m tangier gate run lint.format "${flags[@]}"
 
   lint-actions:

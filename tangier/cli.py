@@ -7,7 +7,7 @@ import os
 import sys
 
 from tangier.commands import changemap_cmds, deploy_cmds, gate_cmds, image_cmds, tailnet_cmds
-from tangier.commands.args import add_diff_args
+from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, ConfigError, read_config
 from tangier.deploy import DeployError
 from tangier.gate import GateError
@@ -111,6 +111,7 @@ def _add_changemap_parser(sub: argparse._SubParsersAction) -> None:
     _ = ip.add_argument("name", help="items name (e.g. `unittest`, `e2e`)")
     add_diff_args(ip)
     _add_no_expand(ip)
+    add_full(ip)
     ip.set_defaults(func=changemap_cmds.cmd_items)
 
     li = cmsub.add_parser(
@@ -123,6 +124,7 @@ def _add_changemap_parser(sub: argparse._SubParsersAction) -> None:
     ep = cmsub.add_parser("explain", help="show modified tags, dependents, and resulting CI invocations")
     add_diff_args(ep)
     _add_no_expand(ep)
+    add_full(ep)
     _ = ep.add_argument(
         "--files",
         action="append",
@@ -137,6 +139,7 @@ def _add_changemap_parser(sub: argparse._SubParsersAction) -> None:
     )
     add_diff_args(bm)
     _add_no_expand(bm)
+    add_full(bm)
     bm.set_defaults(func=changemap_cmds.cmd_build_matrix)
 
     gp = cmsub.add_parser(
@@ -145,6 +148,7 @@ def _add_changemap_parser(sub: argparse._SubParsersAction) -> None:
     )
     add_diff_args(gp)
     _add_no_expand(gp)
+    add_full(gp)
     gp.set_defaults(func=changemap_cmds.cmd_github_outputs)
 
 
