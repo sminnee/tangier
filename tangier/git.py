@@ -100,7 +100,17 @@ def worktree_tree() -> str:
     This is the tree `git add -A && git commit` would make. It is built in a
     copy of the index, so the real index is never touched. The copy keeps the
     stat cache, so `add` rehashes only the files that changed.
+
+    A submodule enters the tree as its checked-out commit only, so changes
+    inside it would be tested but not keyed. That raises, as the old
+    clean-tree rule refused it.
     """
+    dirty_submodules = _dirty_submodules()
+    if dirty_submodules:
+        raise GitError(
+            f"submodule {', '.join(dirty_submodules)} has uncommitted changes, which a key cannot describe. "
+            "Commit them inside the submodule first"
+        )
     index = os.path.abspath(_git_checked("rev-parse", "--git-path", "index").strip())
     with tempfile.TemporaryDirectory() as tmp:
         copy = os.path.join(tmp, "index")
@@ -110,6 +120,30 @@ def worktree_tree() -> str:
         # With no pathspec, `add -A` covers the whole tree from any directory.
         _ = _git_checked("add", "-A", env=env)
         return _git_checked("write-tree", env=env).strip()
+
+
+def _dirty_submodules() -> list[str]:
+    """Submodules with modified or untracked content inside them.
+
+    In `--porcelain=v2`, a changed entry's third field is `S<c><m><u>` for a
+    submodule: `m` is `M` for modified content, `u` is `U` for untracked files.
+    `GIT_OPTIONAL_LOCKS=0` keeps `status` from refreshing the real index.
+    """
+    out = _git_checked(
+        "status",
+        "--porcelain=v2",
+        "--untracked-files=no",
+        "--ignore-submodules=none",
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+    )
+    dirty: list[str] = []
+    for line in out.splitlines():
+        kind, _, rest = line.partition(" ")
+        # The path is the last field, after 7 fields on a `1` line and 9 on a `2` (rename) line.
+        fields = rest.split(" ", {"1": 7, "2": 9}.get(kind, 0))
+        if kind in ("1", "2") and fields[1].startswith("S") and fields[1][2:] != "..":
+            dirty.append(fields[-1].split("\t")[0])
+    return dirty
 
 
 def diff_names(a: str, b: str) -> list[str]:

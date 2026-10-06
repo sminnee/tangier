@@ -71,7 +71,8 @@ record can serve as a [comparator](#comparator).
   moves it. `[key-content-only]`
 - The working tree keys as the tree `git add -A && git commit` would make: tracked changes and
   untracked files count, and ignored files do not. A clean tree keys as `HEAD`. Keying it does not
-  touch the index. `[key-working-tree]`
+  touch the index. A submodule enters the tree as its checked-out commit, so uncommitted changes
+  inside a submodule are an error. `[key-working-tree]`
 - The raw commands are inputs, with each placeholder unresolved. The key does not read `--base`,
   so two runs at the same head with different bases share a key. A changed command moves the key.
   `[key-commands]`
