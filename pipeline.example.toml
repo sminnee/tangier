@@ -85,6 +85,10 @@ touched = true
 # --- Gates ---------------------------------------------------------------------
 
 # Commands run without a shell. A placeholder becomes a list from the diff.
+[gate]
+# `tangier gate sync` deletes a record whose newest run is older than this.
+# prune-after-days = 90
+
 [gate.test-backend]
 cmd   = "bin/test --dirs {unittest-items} --files {unittest-files}"
 scope = ["api", "worker", "backend-inputs"]

@@ -211,6 +211,8 @@ class Config:
     after: AfterHook | None = None
     tailnet: TailnetSettings = field(default_factory=TailnetSettings)
     gates: dict[str, GateSpec] = field(default_factory=dict)
+    # `[gate] prune-after-days`. See docs/specs/gate.md#config.
+    gate_prune_after_days: int = 90
 
 
 # ---------------------------------------------------------------------------
@@ -475,14 +477,19 @@ def gate_groups(cfg: Config) -> dict[str, list[str]]:
     return groups
 
 
-def _parse_gates(path: str, body: dict[str, Any]) -> dict[str, GateSpec]:
+def _parse_gates(path: str, body: dict[str, Any]) -> tuple[dict[str, GateSpec], int]:
     """Parse `[gate]`: a table with `cmd` is a gate, and a table without one is a group of gates.
 
-    A group's `env` and `scope` are merged into each member here, so every
-    later reader sees one resolved `GateSpec`.
+    The one scalar is `prune-after-days`, returned beside the gates. A group's
+    `env` and `scope` are merged into each member here, so every later reader
+    sees one resolved `GateSpec`.
     """
     out: dict[str, GateSpec] = {}
+    prune_after_days = Config.gate_prune_after_days
     for name, spec in body.items():
+        if not isinstance(spec, dict):
+            prune_after_days = _parse_prune_after_days(path, name, spec)
+            continue
         section = f"gate.{name}"
         _check_gate_name(path, section, name)
         spec = _require_table(path, section, spec)
@@ -513,7 +520,18 @@ def _parse_gates(path: str, body: dict[str, Any]) -> dict[str, GateSpec]:
                 )
             out[f"{name}.{member}"] = _parse_gate(path, member_section, value, name, group_env, group_scope)
     _check_gate_output_names(path, out)
-    return out
+    return out, prune_after_days
+
+
+def _parse_prune_after_days(path: str, name: str, value: object) -> int:
+    """`[gate] prune-after-days`: at least 1, since less would put the cutoff in the future and prune every record."""
+    if name != "prune-after-days":
+        raise ConfigError(
+            f"{path}: unknown field `{name}` on `[gate]` (allowed: prune-after-days, or a `[gate.<name>]` table)"
+        )
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(f"{path}: `[gate].prune-after-days` must be a whole number of days, 1 or more")
+    return value
 
 
 def _check_gate_name(path: str, section: str, name: str) -> None:
@@ -925,7 +943,7 @@ def read_config(path: str) -> Config:
         elif key == "tailnet":
             cfg.tailnet = _parse_tailnet(path, table)
         elif key == "gate":
-            cfg.gates = _parse_gates(path, table)
+            cfg.gates, cfg.gate_prune_after_days = _parse_gates(path, table)
 
     # --- B. Merge and validate tags ---------------------------------------
     merged: dict[str, Any] = dict(bare_tags)

@@ -581,6 +581,32 @@ class TestGate(unittest.TestCase):
                     _ = parse_toml(_gate(body))
                 self.assertIn(expected, str(ctx.exception))
 
+    # SPEC: gate#prune-after-days
+    def test_prune_after_days_defaults_to_90(self) -> None:
+        self.assertEqual(parse_toml(_gate('cmd = "bin/test"\nscope = "svc"\n')).gate_prune_after_days, 90)
+
+    # SPEC: gate#prune-after-days
+    def test_prune_after_days_is_read_beside_the_gate_tables(self) -> None:
+        cfg = parse_toml(
+            _GATE_TAGS + '[gate]\nprune-after-days = 30\n[gate.backend]\ncmd = "bin/test"\nscope = "svc"\n'
+        )
+        self.assertEqual(cfg.gate_prune_after_days, 30)
+        self.assertEqual(list(cfg.gates), ["backend"])
+
+    # SPEC: gate#prune-after-days
+    def test_prune_after_days_must_be_a_day_or_more(self) -> None:
+        # Less than a day would put the cutoff in the future and prune every record.
+        for value in ("0", "-1", "1.5", '"30"', "true"):
+            with self.subTest(value), self.assertRaises(ConfigError) as ctx:
+                _ = parse_toml(_GATE_TAGS + f"[gate]\nprune-after-days = {value}\n")
+            self.assertIn("prune-after-days` must be a whole number of days", str(ctx.exception))
+
+    # SPEC: gate#prune-after-days
+    def test_any_other_scalar_in_gate_is_an_unknown_field(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            _ = parse_toml(_GATE_TAGS + "[gate]\nprune-after = 30\n")
+        self.assertIn("unknown field `prune-after` on `[gate]`", str(ctx.exception))
+
     # SPEC: gate#config-table
     def test_a_gate_name_must_be_usable_in_a_ref(self) -> None:
         with self.assertRaises(ConfigError) as ctx:
