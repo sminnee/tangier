@@ -29,7 +29,7 @@ from tangier.config import (
 )
 
 REF_PREFIX = "refs/tangier/gates"
-# Where `prune` mirrors origin's gate refs, apart from this clone's own records.
+# Where a fetch mirrors origin's gate refs, apart from this clone's own records.
 ORIGIN_MIRROR_PREFIX = "refs/tangier/origin-gates"
 REMOTE = "origin"
 
@@ -489,7 +489,7 @@ def _mirror(ref: str) -> str:
     return ORIGIN_MIRROR_PREFIX + ref[len(REF_PREFIX) :]
 
 
-def fetch_origin(pattern: str = f"{REF_PREFIX}/*") -> None:
+def fetch_origin(pattern: str) -> None:
     """Mirror origin's gate refs that match `pattern` under `ORIGIN_MIRROR_PREFIX`.
 
     The fetch prunes, so a mirrored ref that origin no longer has goes too.
@@ -570,67 +570,134 @@ def verified(name: str, key: str, origin: OriginRecords | None = None, accept: S
     return lookup(name, key, origin, accept)[0]
 
 
-# How many fetch, merge and push attempts `sync` makes before it gives up on a racing origin.
+# How many fetch, merge and push attempts `publish` and `sync` make before they give up on a racing origin.
 SYNC_ATTEMPTS = 3
 
 
 @dataclass
 class Synced:
-    """How many gate refs `sync` pushed as they were, pulled from origin, and merged and pushed. Each counts once."""
+    """How many gate refs a publish or sync pushed as they were, pulled from origin, merged and pushed, and pruned.
+
+    Each ref counts once.
+    """
 
     pushed: int
     pulled: int
     merged: int
+    pruned: int
 
 
-def sync() -> Synced:
-    """Sync every gate record with origin: pull origin's, merge the runs, push only what changed.
+def publish(refs: set[str]) -> Synced:
+    """Pull origin's gate records, then push only `refs`: the records a `gate run` wrote.
 
-    Each pushed ref carries a lease, and a rejected push starts over, up to
-    `SYNC_ATTEMPTS` times. See `docs/specs/gate.md#store`.
+    The first attempt pulls every record. A rejected push retries on the gates
+    of `refs` alone, up to `SYNC_ATTEMPTS` times. See `docs/specs/gate.md#store`.
     """
     before = _local_refs()
+    patterns = [f"{REF_PREFIX}/*"]
     for _ in range(SYNC_ATTEMPTS):
+        leases: dict[str, str] = {}
+        for pattern in patterns:
+            leases.update(_reconcile(pattern, None)[0])
+        wanted = {ref: sha for ref, sha in leases.items() if ref in refs}
         try:
-            pushed = _sync_once()
+            _push(wanted, set())
+        except git.PushRejected:
+            # A pattern, not the exact ref: a fetch of an exact ref that origin lacks fails.
+            patterns = sorted({ref.rpartition("/")[0] + "/*" for ref in refs})
+            continue
+        return _counted(before, set(wanted), set())
+    raise GateError(f"{REMOTE}'s gate records kept changing")
+
+
+def sync(prune_after_days: int) -> Synced:
+    """Sync every gate record with origin: pull, merge runs, push what changed, and prune expired records.
+
+    See `docs/specs/gate.md#store`.
+    """
+    before = _local_refs()
+    pruned: set[str] = set()
+    for _ in range(SYNC_ATTEMPTS):
+        leases, expired = _reconcile(f"{REF_PREFIX}/*", now() - timedelta(days=prune_after_days))
+        pruned |= expired
+        try:
+            _push(leases, expired)
         except git.PushRejected:
             continue
-        # A ref whose local record changed took runs from origin. A retry can change it more than once.
-        after = _local_refs()
-        changed = {ref for ref, sha in after.items() if sha != before.get(ref)}
-        return Synced(pushed=len(pushed - changed), pulled=len(changed - pushed), merged=len(pushed & changed))
-    raise GateError(f"{REMOTE}'s gate records kept changing; run `gate push` again")
+        # A retry can pull back a record an earlier attempt deleted, because origin's copy gained a fresh run.
+        return _counted(before, set(leases), pruned - _local_refs().keys())
+    raise GateError(f"{REMOTE}'s gate records kept changing; run `gate sync` again")
+
+
+def _push(leases: dict[str, str], deletes: set[str]) -> None:
+    """One leased, atomic push of each ref in `leases`: the local record, or a delete for a ref in `deletes`."""
+    if leases:
+        refspecs = [f":{ref}" if ref in deletes else f"{ref}:{ref}" for ref in leases]
+        git.push(REMOTE, refspecs, leases=leases, atomic=True)
+
+
+def _counted(before: dict[str, str], pushed: set[str], pruned: set[str]) -> Synced:
+    # A ref whose local record changed took runs from origin. A retry can change it more than once.
+    after = _local_refs()
+    changed = {ref for ref in before.keys() | after.keys() if after.get(ref) != before.get(ref)} - pruned
+    pushed -= pruned
+    return Synced(
+        pushed=len(pushed - changed), pulled=len(changed - pushed), merged=len(pushed & changed), pruned=len(pruned)
+    )
 
 
 def _local_refs() -> dict[str, str]:
     return {ref: sha for sha, ref in git.for_each_ref(REF_PREFIX)}
 
 
-def _sync_once() -> set[str]:
-    """One fetch, merge and leased push. Returns the refs it pushed.
+def _reconcile(pattern: str, cutoff: datetime | None) -> tuple[dict[str, str], set[str]]:
+    """Fetch origin's refs matching `pattern` and resolve each against the local ref.
 
-    Raises `git.PushRejected` when origin moved since the fetch.
+    Writes the resolved record locally: pulled, merged, or deleted when its
+    newest run is older than `cutoff`. Returns each ref whose resolved state
+    differs from origin's, mapped to the SHA origin held ("" if absent): the
+    push to make. Also returns the refs it found expired, whose push is a
+    delete. A record only this clone holds that has expired is dropped, not
+    pushed.
     """
-    fetch_origin()
-    mine = _local_refs()
-    theirs = {REF_PREFIX + ref[len(ORIGIN_MIRROR_PREFIX) :]: sha for sha, ref in git.for_each_ref(ORIGIN_MIRROR_PREFIX)}
-    # Each ref to push, mapped to the SHA origin must still hold, or "" for a ref origin lacks.
+    fetch_origin(pattern)
+    prefix = pattern.removesuffix("/*")
+    mine = {ref: sha for sha, ref in git.for_each_ref(prefix)}
+    theirs = {REF_PREFIX + ref[len(ORIGIN_MIRROR_PREFIX) :]: sha for sha, ref in git.for_each_ref(_mirror(prefix))}
     leases: dict[str, str] = {}
+    expired: set[str] = set()
     for ref in sorted(mine.keys() | theirs.keys()):
         sha, other = mine.get(ref), theirs.get(ref)
-        if sha == other:
+        if sha == other and cutoff is None:
             continue
-        if other is None:
-            leases[ref] = ""
+        result = _reconciled(ref, sha, other) if sha and other and sha != other else sha or other or ""
+        if cutoff is not None and _expired(ref, result, cutoff):
+            if sha is not None:
+                git.delete_ref(ref)
+            # Leased on origin's SHA, so a record that gained a fresh run since the fetch is not deleted.
+            if other is not None:
+                leases[ref] = other
+            expired.add(ref)
             continue
-        result = other if sha is None else _reconciled(ref, sha, other)
         if result != sha:
             git.update_ref(ref, result)
         if result != other:
-            leases[ref] = other
-    if leases:
-        git.push(REMOTE, [f"{ref}:{ref}" for ref in leases], leases=leases, atomic=True)
-    return set(leases)
+            leases[ref] = other or ""
+    return leases, expired
+
+
+def _expired(ref: str, sha: str, cutoff: datetime) -> bool:
+    """Whether the record's newest run is older than `cutoff`.
+
+    Age is the run's own `time`, not a ref or commit date: a record is a blob
+    and carries no other date. A record that cannot be read is kept, with a
+    warning.
+    """
+    try:
+        return max(datetime.fromisoformat(str(run["time"])) for run in read_runs(sha)) < cutoff
+    except (GateError, KeyError, ValueError, TypeError) as e:
+        print(f"warning: skipped {ref}: {e}", file=sys.stderr)
+        return False
 
 
 def _reconciled(ref: str, sha: str, other: str) -> str:
@@ -651,48 +718,3 @@ def _reconciled(ref: str, sha: str, other: str) -> str:
         return sha
     name, _, key = ref[len(REF_PREFIX) + 1 :].rpartition("/")
     return _write_blob(name, key, runs)
-
-
-@dataclass
-class Pruned:
-    origin: list[str]
-    local: list[str]
-
-
-def prune(older_than_days: int) -> Pruned:
-    """Delete gate refs whose newest run is older than the limit, on origin and in this clone.
-
-    Age is the run's own `time`, not a ref or commit date: a record is a
-    blob and carries no other date. A ref that is not a readable record is left
-    alone, with a warning.
-
-    The local records go too because `sync` pushes every local ref that origin
-    lacks: an old one left here would put its pruned ref back on origin.
-    """
-    fetch_origin()
-    cutoff = now() - timedelta(days=older_than_days)
-    on_origin = _expired(ORIGIN_MIRROR_PREFIX, cutoff)
-    if on_origin:
-        git.push(REMOTE, [f":{ref}" for ref in on_origin])
-    local = _expired(REF_PREFIX, cutoff)
-    for ref in local:
-        git.delete_ref(ref)
-    return Pruned(origin=on_origin, local=local)
-
-
-def _expired(prefix: str, cutoff: datetime) -> list[str]:
-    """The gate refs whose newest run is older than `cutoff`, read from the refs under `prefix`.
-
-    Each is returned under its `REF_PREFIX` name, which is the name on origin
-    for a mirrored ref.
-    """
-    old: list[str] = []
-    for sha, found in git.for_each_ref(prefix):
-        ref = REF_PREFIX + found[len(prefix) :]
-        try:
-            newest = max(datetime.fromisoformat(str(run["time"])) for run in read_runs(sha))
-            if newest < cutoff:
-                old.append(ref)
-        except (GateError, KeyError, ValueError, TypeError) as e:
-            print(f"warning: skipped {ref}: {e}", file=sys.stderr)
-    return old
