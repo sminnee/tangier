@@ -68,6 +68,14 @@ class TestTomlReader(unittest.TestCase):
             _ = parse_toml('[unittest-files]\nfiles = true\npaths = ["a/**"]\nexclude = "a/gen.py"\n')
         self.assertIn("exclude", str(ctx.exception))
 
+    # SPEC: changemap#file-set-field
+    def test_tag_fields_on_files_table_raise(self) -> None:
+        # A file-set is never selected, so each of these would be silently ignored.
+        for field in ("sha = true", "touched = true", 'depends = "a"', 'unittest_items = "a"'):
+            with self.subTest(field=field), self.assertRaises(ConfigError) as ctx:
+                _ = parse_toml(f'[a]\npaths = "a/**"\nsha = true\n[unittest-files]\nfiles = true\n{field}\n')
+            self.assertIn(field.split(" ")[0], str(ctx.exception))
+
     # SPEC: changemap#unknown-field-raises
     def test_unknown_field_raises(self) -> None:
         with self.assertRaises(ConfigError) as ctx:

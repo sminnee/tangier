@@ -617,6 +617,10 @@ def _parse_tag(cfg: Config, path: str, tag: str, body: dict[str, Any], raw_depen
         # diff, so there is nothing for `exclude` to subtract from.
         if "exclude" in body:
             raise ConfigError(f"{path}: `exclude` is not supported on the `files = true` table `[{tag}]`")
+        # A file-set is never selected, so a tag field here would be silently ignored.
+        for k in body:
+            if k not in ("files", "paths"):
+                raise ConfigError(f"{path}: `{k}` is a tag field, not supported on the `files = true` table `[{tag}]`")
         cfg.file_sets[tag] = _coerce_str_or_list(path, tag, "paths", body["paths"]) if "paths" in body else []
         return
     # paths is optional; tags with only `depends` are valid aggregators.
