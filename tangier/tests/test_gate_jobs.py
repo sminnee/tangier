@@ -212,10 +212,7 @@ class TestRun(JobCase):
 
     # SPEC: gate#job-run-waits
     def test_ctrl_c_cancels_the_job(self) -> None:
-        runner = SleeperRunner(self)
-        # The wait's first sleep is interrupted. Cancel's own sleeps are not.
-        with mock.patch.object(runner, "sleep", side_effect=[KeyboardInterrupt, *[None] * 20]):
-            code, _, err = self.run_gates("lint", runner=runner)
+        code, _, err = self.run_gates("lint", runner=InterruptedSleeper(self))
         self.assertEqual(code, 130)
         self.assertIn("cancelled job 1", err)
         self.assertEqual(self.job().state, "cancelled")
@@ -464,6 +461,19 @@ class RealSleep(RecordingRunner):
     def sleep(self, seconds: float) -> None:
         super().sleep(seconds)
         Subprocess().sleep(0.05)
+
+
+class InterruptedSleeper(RealSleep, SleeperRunner):
+    """A job that runs until cancelled, whose waiter is stopped by Ctrl-C at the first poll.
+
+    Cancel's polls after that sleep for real, as in `RealSleep`.
+    """
+
+    def sleep(self, seconds: float) -> None:
+        first = not self.slept
+        super().sleep(seconds)
+        if first:
+            raise KeyboardInterrupt
 
 
 class TestCancel(JobCase):
