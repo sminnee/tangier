@@ -12,16 +12,16 @@ tangier gate run no-dependencies  # no declared dependency, and no third-party i
 Each `gate run` publishes its passes to `origin`, so CI reuses them. If it warns, run
 `tangier gate sync` before the PR push.
 
-Releases are a maintainer step, not part of the everyday loop. `bin/release v0.2.0` tags a version
-and moves the `@v0` alias that the Actions pin. It:
+To release, bump `version` in both `pyproject.toml` and `tangier/__init__.py` in a PR, move the
+`tangier@X.Y.Z` pins in `README.md` and `skills/tangier/reference/github-actions.md`, and merge it.
+When CI passes on `main`, `.github/workflows/release.yaml` publishes the version to PyPI, tags
+`vX.Y.Z`, and moves the `@v0` alias that the Actions pin. Moving the alias ships to every consumer
+at once, so the version PR is the deliberate act. `bin/release-plan [<commit>]` shows whether a
+commit releases.
 
-- refuses a dirty tree, a HEAD that is not `origin/main`, and a tag that differs from the
-  `pyproject.toml` version;
-- runs the tests;
-- pushes nothing.
-
-Pushing the version tag publishes it to PyPI through `.github/workflows/release.yaml`. The workflow
-uses trusted publishing, so the repo holds no PyPI token. Register the publisher once on pypi.org:
+A failed release is fixed by re-running the workflow. Every step is idempotent, and the release job
+plans again before it publishes, so a stale re-run releases nothing. The workflow uses
+trusted publishing, so the repo holds no PyPI token. Register the publisher once on pypi.org:
 project `tangier`, repository `sminnee/tangier`, workflow `release.yaml`, environment `pypi`.
 
 `skills/tangier/` is the agent skill; the README shows how to link it. Link it from the checkout

@@ -136,8 +136,6 @@ jobs:
           test "$count" -gt 0 || { echo "::error::extracted no run bodies — the regex has drifted"; exit 1; }
           echo "shellchecking $count run bodies, plus bin/"
           find "$RUNNER_TEMP/sc" -name '*.sh' -print0 | xargs -0 shellcheck
-          # bin/ is otherwise ungated, and it holds the release script that
-          # force-moves the alias every consumer pins. `parity-check` is not in
-          # the list: it has a pre-existing SC2015 that predates this gate, and
-          # cleaning it belongs in its own change rather than here.
-          shellcheck bin/release bin/test
+          # bin/ is otherwise ungated, and bin/release-plan decides when @v0 moves.
+          # `parity-check` is excluded until its pre-existing SC2015 is fixed.
+          shellcheck bin/release-plan bin/test
