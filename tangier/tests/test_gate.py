@@ -243,6 +243,17 @@ class TestWorkingTree(GateCase):
         # The main checkout is clean, and keys as its HEAD.
         self.assertEqual(self.tree(), _git(self.repo, "rev-parse", "HEAD^{tree}"))
 
+    # SPEC: gate#key-working-tree
+    def test_changes_inside_a_submodule_raise(self) -> None:
+        sub = make_git_repo(self, {"lib.py": "x = 1\n"})
+        _ = _git(self.repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "vendored")
+        _ = _git(self.repo, "commit", "-qm", "add a submodule")
+        self.assertEqual(self.tree(), _git(self.repo, "rev-parse", "HEAD^{tree}"))
+        _write(self.repo, "vendored/lib.py", "x = 2\n")
+        with contextlib.chdir(self.repo), self.assertRaises(gate.GateError) as ctx:
+            _ = gate.snapshot()
+        self.assertIn("submodule vendored", str(ctx.exception))
+
 
 class DirtyingRunner(RecordingRunner):
     """A runner whose commands leave an untracked file behind."""
