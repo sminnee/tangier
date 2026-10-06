@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
+import re
 import shlex
 import sys
 import time
+from datetime import datetime, timedelta
 
-from tangier import gate, git, ranon
+import tangier
+from tangier import gate, git, jobs, ranon
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs
@@ -60,17 +64,35 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
     Once every gate has run, the records this invocation wrote are published
     to origin. A failed publish is a warning: the records stay local, and the
     exit code is still the gates'.
+
+    Outside CI the gates run in a background job, and this waits for it up to
+    `--timeout`. See `docs/specs/gate.md#jobs`.
     """
+    if args.job_dir:
+        return _run_as_job(config, args)
     names = _selected(config, args)
+    if _in_background(args):
+        return _start_job(config, args, names)
+    return _run_inline(config, args, names, jobs.Reporter())
+
+
+def _in_background(args: argparse.Namespace) -> bool:
+    """Whether `gate run` starts a job: not in CI, and not for `--dry-run`. See `[job-inline-ci]`."""
+    return not (args.dry_run or ranon.detect()["kind"] == "ci")
+
+
+def _run_inline(config: Config, args: argparse.Namespace, names: list[str], reporter: jobs.Reporter) -> int:
     # One read of origin for all gates, and none when every record is local.
     origin = gate.OriginRecords()
     first = 0
     written: set[str] = set()
     for i, name in enumerate(names):
         try:
-            code, ref = _run_one(config, args, name, origin)
+            code, ref = _run_one(config, args, name, origin, reporter)
         except (gate.GateError, git.GitError) as e:
+            # Printed first, so the gate's slice of the job log holds the error.
             print(f"error: {e}", file=sys.stderr)
+            reporter.finished(name, "error", 2, line=f"gate `{name}`: error: {e}")
             code, ref = 2, None
         first = first or code
         if ref:
@@ -78,6 +100,10 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
         if first and args.fail_fast:
             if rest := names[i + 1 :]:
                 print(f"--fail-fast: not run: {', '.join(rest)}", file=sys.stderr)
+            for skipped in rest:
+                reporter.finished(
+                    skipped, "cancelled", jobs.CANCELLED_CODE, line=f"gate `{skipped}`: not run (--fail-fast)"
+                )
             break
     if written:
         try:
@@ -87,6 +113,70 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
         else:
             _print_synced(synced, quiet=True)
     return first
+
+
+def _run_as_job(config: Config, args: argparse.Namespace) -> int:
+    """The job process: the inline run, reporting to the job directory, then `done`.
+
+    A gate still unfinished when `done` is written, after an unexpected error, ends `error`.
+    """
+    code = 2
+    try:
+        code = _run_inline(config, args, _selected(config, args), jobs.JobReporter(args.job_dir))
+    except gate.GateError as e:
+        print(f"error: {e}", file=sys.stderr)
+    finally:
+        sys.stdout.flush()
+        jobs.finish(args.job_dir, code)
+    return code
+
+
+def _start_job(config: Config, args: argparse.Namespace, names: list[str]) -> int:
+    """Start a job for `names`, then wait for it as `gate wait` does. Ctrl-C cancels it."""
+    runner = _runner(args)
+    snap = gate.snapshot()
+    keys = {name: _key_or_blank(config, name, snap.tree) for name in names}
+    # `-m tangier` from the package this process runs, whatever the job's cwd and sys.path.
+    package_root = os.path.dirname(os.path.dirname(os.path.abspath(tangier.__file__)))
+    pythonpath = os.pathsep.join(p for p in (package_root, os.environ.get("PYTHONPATH")) if p)
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": pythonpath}
+    with jobs.lock():
+        job = jobs.create(args.argv, args.base, snap, keys)
+        try:
+            alive = jobs.hold_alive(job)
+            try:
+                jobs.set_pid(job, runner.spawn(_job_argv(args.argv, job.dir), log=job.log, env=env, pass_fds=(alive,)))
+            finally:
+                os.close(alive)
+        except KeyboardInterrupt:
+            return _cancel_started(job, runner)
+    print(f"job {job.id}: {', '.join(names)} ({job.commit_label})", flush=True)
+    try:
+        return _wait(config, [job], None, args.timeout, runner, run=True)
+    except KeyboardInterrupt:
+        return _cancel_started(job, runner)
+
+
+def _job_argv(argv: list[str], job_dir: str) -> list[str]:
+    """The job process's command: this one, with `--job-dir` straight after `run`, ahead of any `--`."""
+    at = argv.index("run", argv.index("gate")) + 1
+    return [sys.executable, "-m", "tangier", *argv[:at], "--job-dir", job_dir, *argv[at:]]
+
+
+def _cancel_started(job: jobs.Job, runner: Runner) -> int:
+    """Cancel the job `gate run` started, unless it finished first."""
+    if not jobs.cancel(jobs.load(job.dir), runner):
+        return _exit_code(jobs.load(job.dir), None, run=True)
+    print(f"cancelled job {job.id}", file=sys.stderr)
+    return jobs.CANCELLED_CODE
+
+
+def _key_or_blank(config: Config, name: str, tree: str) -> str:
+    """The gate's key at job start. A gate that cannot be keyed fails in the job, which says why."""
+    try:
+        return gate.key(config, name, tree)
+    except gate.GateError:
+        return ""
 
 
 def _selected(config: Config, args: argparse.Namespace) -> list[str]:
@@ -99,7 +189,9 @@ def _selected(config: Config, args: argparse.Namespace) -> list[str]:
     return gate.select_all(config, args.name)
 
 
-def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.OriginRecords) -> tuple[int, str | None]:
+def _run_one(
+    config: Config, args: argparse.Namespace, name: str, origin: gate.OriginRecords, reporter: jobs.Reporter
+) -> tuple[int, str | None]:
     """Plan one gate, then run it unless it is verified or not needed.
 
     Returns its exit code, and the ref it wrote or None.
@@ -107,6 +199,15 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
     Each gate takes its own snapshot, because an earlier gate's commands can
     change the tree. `--full` reads no record and no diff.
     """
+
+    def finished(
+        state: str, code: int, line: str, *, ref: str | None = None, err: bool = False
+    ) -> tuple[int, str | None]:
+        print(line, file=sys.stderr if err else sys.stdout)
+        reporter.finished(name, state, code, line=line, ref=ref)
+        return code, ref
+
+    offset = reporter.offset()
     snap = gate.snapshot()
     if snap.dirty:
         touched = gate.uncommitted_in_scope(config, name, snap)
@@ -117,41 +218,333 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
         )
         print(f"gate `{name}`: keying the working tree; {what}", file=sys.stderr)
     p = gate.plan(config, name, args.base, snap, origin, full=args.full, accept=args.accept)
+    reporter.started(name, p.key, offset)
     if args.debug:
         _print_debug(p)
     if args.dry_run:
         _print_plan(p)
         return 0, None
     if p.status == "not-needed":
-        print(f"gate `{name}`: not-needed for this diff ({p.reason})")
-        return 0, None
+        return finished("not-needed", 0, f"gate `{name}`: not-needed for this diff ({p.reason})")
     if p.status == "verified":
-        print(f"gate `{name}`: verified ({p.reason}), nothing to run")
-        return 0, None
+        return finished("verified", 0, f"gate `{name}`: verified ({p.reason}), nothing to run")
 
     start = clock()
     code = _run_commands(_runner(args), gate.spec_for(config, name), p.commands)
     duration = clock() - start
     if code != 0:
-        print(f"gate `{name}`: failed in {_took(duration)} (exit {code})")
-        return code, None
+        return finished("failed", code, f"gate `{name}`: failed in {_took(duration)} (exit {code})")
     if args.read_only:
-        print(f"gate `{name}`: passed in {_took(duration)}, no record written (--read-only)")
-        return 0, None
+        return finished("passed", 0, f"gate `{name}`: passed in {_took(duration)}, no record written (--read-only)")
     # The key is content only, so a moved HEAD over the same tree is fine. A
     # changed tree is not: the commands did not test what the key describes.
     after = gate.snapshot().tree
     if after != snap.tree:
-        print(
+        return finished(
+            "unrecorded",
+            1,
             f"gate `{name}`: passed in {_took(duration)}, but the working tree changed during the run "
             f"(tree {snap.tree[:7]}, now {after[:7]}), so no record was written",
-            file=sys.stderr,
+            err=True,
         )
-        return 1, None
     ran_on = ranon.detect()
     ref = gate.write_record(p, ran_on, duration)
-    print(f"gate `{name}`: passed in {_took(duration)}, recorded as {ref} ({ran_on['kind']})")
-    return 0, ref
+    return finished(
+        "passed", 0, f"gate `{name}`: passed in {_took(duration)}, recorded as {ref} ({ran_on['kind']})", ref=ref
+    )
+
+
+# How often the wait loop reads the job, and how many reads apart it re-keys the tree to look for drift.
+POLL = 1
+DRIFT_EVERY = 5
+# The exit code of a wait that timed out with the job still running.
+STILL_RUNNING = 3
+
+
+def _wait(
+    config: Config,
+    waiting: list[jobs.Job],
+    names: list[str] | None,
+    timeout: int | None,
+    runner: Runner,
+    *,
+    run: bool = False,
+) -> int:
+    """Wait until each job is done, or the gates in `names` are, or `timeout` seconds pass.
+
+    On a terminal the job log streams. Anywhere else only each gate's result
+    prints, with the tail of a failure, which keeps an agent's context small.
+    Elapsed time advances off the value handed to `runner.sleep`, never a real
+    clock, as in `deploy_cmds._wait_for_rollout`.
+    """
+    stream = sys.stdout.isatty()
+    printed: dict[int, int] = {job.id: 0 for job in waiting}
+    reported: set[tuple[int, str]] = set()
+    drift_warned: set[tuple[int, str]] = set()
+    elapsed = 0
+    polls = 0
+    while True:
+        now = [_reload(job) for job in waiting]
+        for job in now:
+            if stream:
+                printed[job.id] = _stream_log(job, printed[job.id], whole=_settled(job, names))
+            else:
+                _report_results(job, _among(job, names), reported)
+        if polls % DRIFT_EVERY == 0:
+            _warn_drift(config, now, drift_warned)
+        polls += 1
+        if all(_settled(job, names) for job in now):
+            for job in now:
+                if stream and job.state == "died":
+                    print(f"job {job.id} died: its process is gone, and it wrote no result")
+            return max(_exit_code(job, names, run=run) for job in now)
+        if timeout is not None and elapsed >= timeout:
+            for job in now:
+                if not _settled(job, names):
+                    _print_still_running(job)
+            return STILL_RUNNING
+        runner.sleep(POLL)
+        elapsed += POLL
+
+
+def _reload(job: jobs.Job) -> jobs.Job:
+    found = jobs.find(job.id)
+    if found is None:
+        raise gate.GateError(f"job {job.id} was deleted while waiting for it")
+    return found
+
+
+def _among(job: jobs.Job, names: list[str] | None) -> list[jobs.GateState]:
+    """The job's gates that `names` selects, or all of them."""
+    return [g for g in job.gates if names is None or g.name in names]
+
+
+def _settled(job: jobs.Job, names: list[str] | None) -> bool:
+    return job.state != "running" or all(g.finished for g in _among(job, names))
+
+
+def _exit_code(job: jobs.Job, names: list[str] | None, *, run: bool) -> int:
+    """0 when every selected gate passed, was verified or was not needed, and 1 otherwise.
+
+    `run` gives the job's own exit code, as an inline run does, except that 3
+    would read as still running, so it becomes 1.
+    """
+    if run and names is None and job.code is not None:
+        return 1 if job.code == STILL_RUNNING else job.code
+    return 0 if all(job.effective(g) in jobs.OK for g in _among(job, names)) else 1
+
+
+def _stream_log(job: jobs.Job, start: int, *, whole: bool) -> int:
+    """Print the log from `start` on, and return where the next read starts.
+
+    Until `whole`, it stops at the last full line, so no character is split across two reads.
+    """
+    with open(job.log, "rb") as fh:
+        _ = fh.seek(start)
+        data = fh.read()
+    if not whole:
+        data = data[: data.rfind(b"\n") + 1]
+    _ = sys.stdout.write(data.decode(errors="replace"))
+    _ = sys.stdout.flush()
+    return start + len(data)
+
+
+def _report_results(job: jobs.Job, gates: list[jobs.GateState], reported: set[tuple[int, str]]) -> None:
+    """Print each gate's result once, when it is first seen finished. A died job's log tail prints once."""
+    died = False
+    for g in gates:
+        state = job.effective(g)
+        if state not in jobs.FINISHED or (job.id, g.name) in reported:
+            continue
+        reported.add((job.id, g.name))
+        if state == "died":
+            print(f"gate `{g.name}`: died: the job process is gone, and it wrote no result")
+            died = True
+            continue
+        print(g.line or f"gate `{g.name}`: {state}")
+        if state not in jobs.OK and state != "cancelled":
+            # The output ends with the line just printed.
+            _print_tail(jobs.tail(jobs.output(job, g.name).removesuffix(f"{g.line}\n")), job.log)
+    if died:
+        _print_tail(jobs.log_tail(job), job.log)
+
+
+def _print_tail(text: str, log: str) -> None:
+    if text:
+        print("  | " + text.replace("\n", "\n  | "))
+    print(f"  log: {os.path.relpath(log)}")
+
+
+def _warn_drift(config: Config, now: list[jobs.Job], warned: set[tuple[int, str]]) -> None:
+    """Warn, once per gate, when a running gate's key no longer matches the working tree."""
+    if not any(job.current() for job in now):
+        return
+    try:
+        _, keys = jobs.current_keys(config, [g.name for job in now for g in job.gates])
+    except gate.GateError:
+        return
+    for job in now:
+        for name in jobs.drifted(job, keys):
+            if (job.id, name) not in warned:
+                warned.add((job.id, name))
+                print(
+                    f"warning: gate `{name}`: the working tree changed since it started, so its pass will not be "
+                    "recorded",
+                    file=sys.stderr,
+                )
+
+
+def _print_still_running(job: jobs.Job) -> None:
+    current = job.current()
+    what = f"{current.name} ({_duration(current.started, None)})" if current and current.started else "starting"
+    print(f"still running in background: {what}. Run `tangier gate wait --job {job.id}` or `tangier gate status`.")
+
+
+def _duration(start: str | None, end: str | None) -> str:
+    """How long a gate ran, as `_took` gives it. Without `end`, up to now."""
+    if start is None:
+        return ""
+    finish = datetime.fromisoformat(end) if end else gate.now()
+    return _took(max(0.0, (finish - datetime.fromisoformat(start)).total_seconds()))
+
+
+def _ago(when: str) -> str:
+    seconds = max(0, int((gate.now() - datetime.fromisoformat(when)).total_seconds()))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size * (2 if unit == "d" else 1):
+            return f"{seconds // size}{unit} ago"
+    return f"{seconds}s ago"
+
+
+def _jobs_named(ids: list[int] | None) -> list[jobs.Job]:
+    """The listed jobs, or the latest one. A missing job is an error."""
+    if ids is None:
+        latest = jobs.latest()
+        if latest is None:
+            raise gate.GateError("no gate job in this worktree")
+        return [latest]
+    found = []
+    for job_id in ids:
+        job = jobs.find(job_id)
+        if job is None:
+            raise gate.GateError(f"no job {job_id} in this worktree (pruned?)")
+        found.append(job)
+    return found
+
+
+def cmd_wait(config: Config, args: argparse.Namespace) -> int:
+    """Wait for a job, or for some of its gates. Exits 0 passed, 1 failed, 2 usage, 3 still running."""
+    waiting = _jobs_named(args.job)
+    names = gate.select_all(config, args.name) if args.name else None
+    if names is not None:
+        missing = [n for n in names if not any(g.name == n for job in waiting for g in job.gates)]
+        if missing:
+            ids = ", ".join(str(job.id) for job in waiting)
+            raise gate.GateError(f"gate {', '.join(missing)} is not in job {ids}")
+    try:
+        return _wait(config, waiting, names, args.timeout, _runner(args))
+    except KeyboardInterrupt:
+        print("stopped waiting; the job carries on", file=sys.stderr)
+        return jobs.CANCELLED_CODE
+
+
+def cmd_status(config: Config, args: argparse.Namespace) -> int:
+    """Each recent job and its gates, newest first, with what no longer applies to the working tree. Exits 0."""
+    missing: list[int] = []
+    if args.job is not None:
+        shown = []
+        for job_id in args.job:
+            job = jobs.find(job_id)
+            if job is None:
+                missing.append(job_id)
+            else:
+                shown.append(job)
+    else:
+        every = jobs.all_jobs()
+        cutoff = gate.now() - args.since
+        shown = [j for j in every if j.state == "running" or datetime.fromisoformat(j.started) >= cutoff]
+        if not shown and every:
+            shown = [every[0]]
+    try:
+        tree, keys = jobs.current_keys(config, sorted({g.name for job in shown for g in job.gates}))
+    except gate.GateError:
+        tree, keys = None, None
+    if args.json:
+        data: list[dict[str, object]] = [_job_json(job, tree, keys) for job in shown]
+        data += [{"id": job_id, "state": "not-found"} for job_id in missing]
+        print(json.dumps(data, indent=2))
+        return 0
+    if not shown and not missing:
+        print("no jobs")
+    for job in shown:
+        _print_job(job, tree, keys)
+    for job_id in missing:
+        print(f"job {job_id}: not found (pruned?)")
+    return 0
+
+
+def _print_job(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | None) -> None:
+    state = job.state
+    when = f"started {_ago(job.started)}" if state == "running" else _ago(job.started)
+    stale = "  stale" if tree is not None and state != "running" and tree != job.tree else ""
+    print(f"job {job.id:<3} {state:<9} {job.commit_label:<14} {when}{stale}")
+    width = max((len(g.name) for g in job.gates), default=0)
+    for g in job.gates:
+        gstate = job.effective(g)
+        label = f"failed({g.code})" if gstate == "failed" else gstate
+        notes = []
+        if keys is not None and gstate == "running" and keys.get(g.name) != g.key:
+            notes.append("worktree changed since start: will not be recorded")
+        if keys is not None and gstate != "died" and jobs.stale(g, keys):
+            notes.append("stale")
+        if gstate not in (*jobs.OK, "running", "pending", "cancelled"):
+            notes.append(f"log: {os.path.relpath(job.log)}")
+        took = _duration(g.started, g.ended) if gstate != "pending" else ""
+        line = f"  {g.name:<{width}}  {g.key[:8] or '-':<8}  {label:<11} {took:<6}  {'  '.join(notes)}"
+        print(line.rstrip())
+
+
+def _job_json(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | None) -> dict[str, object]:
+    state = job.state
+    return {
+        "id": job.id,
+        "state": state,
+        "pid": job.pid,
+        "head": job.head,
+        "tree": job.tree,
+        "dirty": job.dirty,
+        "base": job.base,
+        "started": job.started,
+        "code": job.code,
+        "stale": tree is not None and state != "running" and tree != job.tree,
+        "log": job.log,
+        "gates": [
+            {
+                "name": g.name,
+                "key": g.key,
+                "state": job.effective(g),
+                "code": g.code,
+                "started": g.started,
+                "ended": g.ended,
+                "ref": g.ref,
+                "stale": keys is not None and jobs.stale(g, keys),
+                "drift": keys is not None and job.effective(g) == "running" and keys.get(g.name) != g.key,
+            }
+            for g in job.gates
+        ],
+    }
+
+
+def cmd_cancel(config: Config, args: argparse.Namespace) -> int:
+    """Stop a running job. Its unfinished gates become `cancelled`."""
+    del config
+    (job,) = _jobs_named(None if args.job is None else [args.job])
+    if job.state != "running":
+        print(f"job {job.id} is not running ({job.state})")
+        return 0
+    jobs.cancel(job, _runner(args))
+    print(f"cancelled job {job.id}")
+    return 0
 
 
 def _took(seconds: float) -> str:
@@ -284,6 +677,44 @@ def _group_status(statuses: list[str]) -> str:
     return "not-needed"
 
 
+def _timeout(value: str) -> int | None:
+    """Seconds to wait, 0 or more, or `none` to wait until the job is done."""
+    if value == "none":
+        return None
+    seconds = int(value)
+    if seconds < 0:
+        raise argparse.ArgumentTypeError("must be 0 or more, or `none`")
+    return seconds
+
+
+def _job_ids(value: str) -> list[int]:
+    """A comma-separated list of job numbers."""
+    try:
+        return [int(part) for part in value.split(",")]
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"`{value}` is not a comma-separated list of job numbers") from e
+
+
+def _since(value: str) -> timedelta:
+    """An age as a number and a unit: `90s`, `30m`, `8h` or `2d`."""
+    m = re.fullmatch(r"(\d+)([smhd])", value)
+    if not m:
+        raise argparse.ArgumentTypeError("use a number and a unit, as in `30m`, `8h` or `2d`")
+    unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[m.group(2)]
+    return timedelta(**{unit: int(m.group(1))})
+
+
+def _add_timeout(p: argparse.ArgumentParser) -> None:
+    _ = p.add_argument(
+        "--timeout",
+        type=_timeout,
+        default=60,
+        metavar="SECONDS",
+        help="how long to wait before leaving the job running and exiting 3; `none` waits until it is done "
+        "(default: 60)",
+    )
+
+
 def _accept(value: str) -> gate.Accept:
     try:
         return gate.Accept.parse(value)
@@ -342,7 +773,36 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "--debug", action="store_true", help="print the comparator walk and the diff it chose to stderr"
     )
     _add_accept(rp)
+    _add_timeout(rp)
+    # The job process: run inline and report to this job directory.
+    _ = rp.add_argument("--job-dir", default=None, help=argparse.SUPPRESS)
     rp.set_defaults(func=cmd_run)
+
+    wp = gsub.add_parser(
+        "wait", help="wait for a gate job; exits 0 passed, 1 failed, 2 usage or no such job, 3 still running"
+    )
+    _ = wp.add_argument("name", nargs="*", help="wait only for these gates or groups")
+    _ = wp.add_argument("--job", type=_job_ids, default=None, metavar="N[,N...]", help="the jobs (default: the latest)")
+    _add_timeout(wp)
+    wp.set_defaults(func=cmd_wait)
+
+    sp = gsub.add_parser("status", help="recent gate jobs, their gates, and which results are stale")
+    _ = sp.add_argument(
+        "--job", type=_job_ids, default=None, metavar="N[,N...]", help="exactly these jobs, whatever their age"
+    )
+    _ = sp.add_argument(
+        "--since",
+        type=_since,
+        default=timedelta(hours=8),
+        metavar="AGE",
+        help="jobs started this recently (default: 8h)",
+    )
+    _ = sp.add_argument("--json", action="store_true", help="print the jobs as JSON, with full keys and record refs")
+    sp.set_defaults(func=cmd_status)
+
+    cp = gsub.add_parser("cancel", help="stop a running gate job")
+    _ = cp.add_argument("--job", type=int, default=None, metavar="N", help="the job (default: the latest)")
+    cp.set_defaults(func=cmd_cancel)
 
     vp = gsub.add_parser("verified", help="has this gate passed? prints verified/unverified, exits 0/1")
     _ = vp.add_argument("name", help="a gate, or a group, which is verified when every member is")

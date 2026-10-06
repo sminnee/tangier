@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None, *, runner: Runner | None = None) -> int:
     """Run one command. `runner` replaces the subprocess seam, for tests."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # The arguments as given, so a gate job can run the same command again.
+    args.argv = list(sys.argv[1:] if argv is None else argv)
     if runner is not None:
         args.runner = runner
     if not getattr(args, "func", None):
