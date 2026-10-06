@@ -698,16 +698,23 @@ def _recorded_by(p: gate.GatePlan) -> str:
     parts = [str(runner.get("kind") or "local")]
     if isinstance(head, str) and head:
         parts.append(f"`{head[:7]}`")
+    # Records come from origin, and a workflow or job name is free text, so neither may break the row.
     if runner.get("kind") == "ci":
-        where = " / ".join(str(runner[name]) for name in ("workflow", "job") if runner.get(name))
+        where = _cell(" / ".join(str(runner[name]) for name in ("workflow", "job") if runner.get(name)))
         url = runner.get("url")
         if where and url:
-            where = f"[{where}]({url})"
+            text = where.replace("[", "\\[").replace("]", "\\]")
+            where = f"[{text}]({_cell(str(url))})"
     else:
-        where = str(runner.get("host") or "")
+        where = _cell(str(runner.get("host") or ""))
     if where:
         parts.append(where)
     return " · ".join(parts)
+
+
+def _cell(text: str) -> str:
+    """`text` safe inside a markdown table cell."""
+    return text.replace("|", "\\|").replace("\n", " ")
 
 
 def _add_status(pairs: dict[str, str], prefix: str, status: str) -> None:

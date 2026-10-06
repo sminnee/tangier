@@ -1724,6 +1724,13 @@ class TestStore(GateCase):
         _, out, _ = self.tangier("gate", "github-outputs", "--base", self.base, "--summary")
         self.assertIn("| `backend` | verified | local · `abc` |\n", out)
 
+    # SPEC: gate#github-outputs-summary
+    def test_summary_escapes_a_pipe_in_a_job_name(self) -> None:
+        with mock.patch.dict(os.environ, {**GITHUB_PUSH, "GITHUB_JOB": "a|b [x]"}):
+            _ = self.record_and_push(datetime(2026, 3, 1, tzinfo=UTC))
+        _, out, _ = self.tangier("gate", "github-outputs", "--base", self.base, "--summary")
+        self.assertIn(r"[CI / a\|b \[x\]](https://github.com/org/repo/actions/runs/123) |", out)
+
     # SPEC: gate#origin-unreachable
     def test_an_unreachable_origin_is_not_verified(self) -> None:
         _ = _git(self.repo, "remote", "set-url", "origin", os.path.join(self.origin, "gone"))
