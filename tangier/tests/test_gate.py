@@ -1244,6 +1244,50 @@ class TestStore(GateCase):
             self.assertEqual(self.tangier("gate", "prune", "--older-than", "30")[0], 0)
         self.assertEqual(self.origin_refs(), [f"refs/tangier/gates/backend/{key}"])
 
+    # SPEC: gate#push-merges-runs
+    # SPEC: gate#record-runs
+    def test_push_keeps_the_runs_already_on_origin_once_each(self) -> None:
+        other = self.clone()
+        with (
+            mock.patch.dict(os.environ, GITHUB_PUSH),
+            mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)),
+        ):
+            code, _, err = self.tangier("gate", "run", "backend", "--base", self.base, cwd=other)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.tangier("gate", "push", cwd=other)[0], 0)
+        # Forced: without `--accept`, origin's CI run already verifies the gate.
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 2, tzinfo=UTC)):
+            _ = self.tangier("gate", "run", "backend", "--base", self.base, "--force")
+        self.assertEqual(self.tangier("gate", "push")[0], 0)
+        # A second push from each clone sends runs origin already holds.
+        self.assertEqual(self.tangier("gate", "push", cwd=other)[0], 0)
+        self.assertEqual(self.tangier("gate", "push")[0], 0)
+        runs = _runs(self.origin, f"refs/tangier/gates/backend/{self.key()}")
+        self.assertEqual(
+            [(run["time"], run["runner"]) for run in runs],
+            [("2026-03-01T00:00:00+00:00", GITHUB_PUSH_RAN_ON), ("2026-03-02T00:00:00+00:00", LOCAL_RAN_ON)],
+        )
+
+    # SPEC: gate#push-merges-runs
+    def test_push_overwrites_an_unreadable_record_on_origin(self) -> None:
+        ref = f"refs/tangier/gates/backend/{self.key()}"
+        _put_blob(self.repo, ref, "not json", remote="origin")
+        _ = self.tangier("gate", "run", "backend", "--base", self.base)
+        code, _, err = self.tangier("gate", "push")
+        self.assertEqual(code, 0)
+        self.assertIn(f"pushed {ref} without origin's runs", err)
+        self.assertEqual([run["runner"] for run in _runs(self.origin, ref)], [LOCAL_RAN_ON])
+
+    # SPEC: gate#push-merges-runs
+    def test_push_keeps_origins_record_over_an_unreadable_local_one(self) -> None:
+        ref = f"refs/tangier/gates/backend/{self.key()}"
+        _ = self.record_and_push(datetime(2026, 3, 1, tzinfo=UTC))
+        _put_blob(self.repo, ref, "not json")
+        code, _, err = self.tangier("gate", "push")
+        self.assertEqual(code, 0)
+        self.assertIn(f"kept origin's {ref}", err)
+        self.assertEqual([run["runner"] for run in _runs(self.origin, ref)], [LOCAL_RAN_ON])
+
     # SPEC: gate#prune-by-record-time
     def test_prune_rejects_a_limit_below_one_day(self) -> None:
         # A negative limit would put the cutoff in the future and delete every record.

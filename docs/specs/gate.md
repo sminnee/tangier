@@ -225,9 +225,13 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   A pull request and a merged branch are one store. `event` and `ref` tell their runs apart.
 
 - `gate run` writes a local ref. It needs no network.
-- `gate push` pushes every local gate ref to `origin` with a forced refspec. Two people can record
-  the same key with different blobs. The last writer wins, and both blobs mean the same pass. With
-  no local record, `gate push` does nothing and exits 0. `[push]`
+- `gate push` pushes every local gate ref to `origin` with a forced refspec. With no local record,
+  it does nothing and exits 0. `[push]`
+- Before it pushes, `gate push` fetches `origin`'s gate refs and merges each one's runs into the
+  local record at the same ref, so a push keeps the runs other clones pushed. Two pushes can still
+  race, and the loser's runs are then lost. That is the safe direction: the gate runs again. A
+  local record that cannot be read takes `origin`'s instead, with a warning. An `origin` record
+  that cannot be read is overwritten, with a warning. `[push-merges-runs]`
 - A gate is verified when the local ref exists, or when `origin` holds it. The local check runs
   first. The first lookup that reaches `origin` fetches its gate refs, in one call, into
   `refs/tangier/origin-gates/*`, and every later lookup reads that mirror.

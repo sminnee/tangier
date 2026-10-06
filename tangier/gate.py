@@ -483,15 +483,35 @@ def verified(name: str, key: str, origin: OriginRecords | None = None) -> str | 
 
 
 def push() -> int:
-    """Push every local gate ref to origin. Returns how many there were.
+    """Push every local gate ref to origin, after merging origin's runs into it. Returns how many there were.
 
-    Forced: two people can record the same key with different blobs. The last
-    writer wins, and both blobs mean the same pass.
+    See `docs/specs/gate.md#store`. An unreadable local record takes origin's
+    instead, so it never overwrites a readable one.
     """
-    count = len(git.for_each_ref(REF_PREFIX))
-    if count:
-        git.push(REMOTE, [f"+{REF_PREFIX}/*:{REF_PREFIX}/*"])
-    return count
+    local = git.for_each_ref(REF_PREFIX)
+    if not local:
+        return 0
+    fetch_origin()
+    theirs = {ref: sha for sha, ref in git.for_each_ref(ORIGIN_MIRROR_PREFIX)}
+    for sha, ref in local:
+        other = theirs.get(ORIGIN_MIRROR_PREFIX + ref[len(REF_PREFIX) :])
+        if other is None or other == sha:
+            continue
+        try:
+            mine = read_runs(sha)
+        except GateError as e:
+            print(f"warning: kept {REMOTE}'s {ref}, because the local one is unreadable: {e}", file=sys.stderr)
+            git.update_ref(ref, other)
+            continue
+        try:
+            runs = merge_runs(mine, read_runs(other))
+        except GateError as e:
+            print(f"warning: pushed {ref} without origin's runs: {e}", file=sys.stderr)
+            continue
+        name, _, key = ref[len(REF_PREFIX) + 1 :].rpartition("/")
+        git.update_ref(ref, _write_blob(name, key, runs))
+    git.push(REMOTE, [f"+{REF_PREFIX}/*:{REF_PREFIX}/*"])
+    return len(local)
 
 
 @dataclass
