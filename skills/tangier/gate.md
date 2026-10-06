@@ -5,11 +5,11 @@ skips a gate whose record matches. Flags and outputs are in [reference/cli.md](r
 
 ## Before a PR push
 
-1. Run `tangier gate run --all`. It keys the working tree, uncommitted work included. Each gate
-   prints `verified`, `not-needed`, or runs its commands. When the project has
+1. Run `tangier gate run --all --fail-fast`. It keys the working tree, uncommitted work included.
+   Each gate prints `verified`, `not-needed`, or runs its commands. When the project has
    [CI-only gates](#ci-only-gates), name the other gates instead.
-2. When a gate fails, fix the cause and run that gate again. A failing gate does not stop the
-   others, so read every failure in the output.
+2. When a gate fails, fix the cause and run step 1 again. Gates that passed are verified and do
+   not run again, unless the fix touched their scope.
 3. Commit exactly the work that passed. The commit reuses the record. A commit of only part of the
    work keys differently and needs a new run.
 4. Run `tangier gate push`. It syncs the records with `origin`, so it needs network access to
@@ -26,6 +26,8 @@ When the repo has a pre-push hook that runs the gates, such as `bin/pre-push-gat
 every member. While you work, run the narrowest selector that covers what you changed. Its pass is
 recorded, and the commit of that work reuses it.
 `tangier gate list` shows the configured gates and groups.
+`gate run --all` runs gates in config order, so list cheap gates, such as lint and format,
+before slow ones.
 
 ## CI-only gates
 
