@@ -3,7 +3,7 @@ name: Release
 # Publish to PyPI when an exact version tag is pushed. The `v0`
 # alias does not match `v*.*.*`, so moving it publishes nothing.
 #
-# Trusted publishing, so the repo holds no PyPI token. README § Development has the setup.
+# Trusted publishing, so the repo holds no PyPI token. CONTRIBUTING.md has the setup.
 
 on:
   push:

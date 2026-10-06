@@ -1,15 +1,21 @@
 ---
 name: tangier
-description: Work with tangier, the pipeline.toml CI and deploy toolkit. Use in a repo with a pipeline.toml before a PR push, when running or choosing its gates (`[gate.*]` tables), or when a gate runs that you expected to be verified.
+description: Work with tangier, which makes monorepo CI run only what a change needs. Use in a repo with a pipeline.toml when editing pipeline.toml (tags, depends, items, gates, images), writing or changing a CI workflow that calls tangier, adding tangier to a repo, running gates before a PR push, building or tagging images, or when a gate runs that you expected to be verified.
 ---
 
 # tangier
 
-tangier reads one `pipeline.toml` and answers CI questions from it: which parts a diff touches,
-which image tags to build and deploy, and which gates have already passed.
+tangier reads one `pipeline.toml` that maps a monorepo into tags. From a diff it works out which
+tests, gates and image builds a change needs, and skips gates that already passed locally.
 
 Run tangier the way the project's own instructions or CI workflow do: `tangier`, `uvx
 tangier@<version>`, or `python3 -m tangier`. `tangier <command> --help` lists each command's flags.
 
-When the repo's `pipeline.toml` has `[gate.*]` tables, read [gate.md](gate.md) before a PR push,
-before running or choosing gates, and when a gate runs that you expected to be verified.
+| Task | Read |
+| --- | --- |
+| Push a branch, or run, choose or debug gates | [gate.md](gate.md) |
+| Add tangier to a repo, or add or change a tag, items list, gate or image | [setup.md](setup.md) |
+| Write or change a CI workflow, including a nightly or a deploy | [ci.md](ci.md) |
+| Look up a `pipeline.toml` key | [reference/pipeline-toml.md](reference/pipeline-toml.md) |
+| Look up a command, flag, output name or exit code | [reference/cli.md](reference/cli.md) |
+| Copy the canonical workflow, or an action's inputs | [reference/github-actions.md](reference/github-actions.md) |
