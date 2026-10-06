@@ -6,11 +6,15 @@ import argparse
 import os
 import shlex
 import sys
+import time
 
 from tangier import gate, ranon
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs
 from tangier.runner import Runner, Subprocess
+
+# The run clock. Tests patch this.
+clock = time.monotonic
 
 
 def _runner(args: argparse.Namespace) -> Runner:
@@ -88,7 +92,9 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
         print(f"gate `{name}`: verified ({p.reason}), nothing to run")
         return 0
 
+    start = clock()
     code = _run_commands(_runner(args), gate.spec_for(config, name), p.commands)
+    duration = clock() - start
     if code != 0:
         return code
     if args.read_only:
@@ -105,7 +111,7 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
         )
         return 1
     ran_on = ranon.detect()
-    ref = gate.write_record(p, ran_on)
+    ref = gate.write_record(p, ran_on, duration)
     print(f"gate `{name}`: passed, recorded as {ref} ({ran_on['kind']})")
     return 0
 

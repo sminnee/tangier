@@ -206,6 +206,7 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   | `base` | The comparator the run diffed from, or `null` when there was none. |
   | `user` | `git config user.email`, or `unknown`. |
   | `time` | ISO 8601, UTC. |
+  | `duration` | Seconds the commands took, to 0.1 s. Runs that older tangier versions wrote have none. |
   | `tangier` | The tangier version. |
   | `commands` | The resolved commands. |
   | `runner` | Where the run happened. See below. |

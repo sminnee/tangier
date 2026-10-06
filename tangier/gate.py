@@ -395,8 +395,8 @@ def ref_for(name: str, key: str) -> str:
     return f"{REF_PREFIX}/{name}/{key}"
 
 
-def write_record(plan: GatePlan, runner: Mapping[str, str]) -> str:
-    """Record a pass of the planned gate, run on `runner`, in the local ref. Returns the ref.
+def write_record(plan: GatePlan, runner: Mapping[str, str], duration: float) -> str:
+    """Record a pass of the planned gate, run on `runner` in `duration` seconds, in the local ref. Returns the ref.
 
     The run joins the runs already at the ref. A local ref that is not a
     readable record is replaced, with a warning.
@@ -408,6 +408,7 @@ def write_record(plan: GatePlan, runner: Mapping[str, str]) -> str:
         "base": plan.effective_base,
         "user": git.config_get("user.email") or "unknown",
         "time": now().isoformat(timespec="seconds"),
+        "duration": round(duration, 1),
         "tangier": __version__,
         "commands": plan.commands,
         "runner": dict(runner),
