@@ -24,6 +24,9 @@ Three risks follow:
 ## Config
 
 ```toml
+[gate]
+prune-after-days = 90
+
 [gate.test-backend]
 cmd   = ["bin/test --dirs {unittest-items} --files {unittest-files}", "bin/lint"]
 env   = { TEST_DB_REQUIRED = "1" }
@@ -34,6 +37,9 @@ scope = ["core", "backend-gate-inputs"]
 paths = ["uv.lock", "pyproject.toml", "bin/test", "pipeline.toml"]
 ```
 
+- `[gate] prune-after-days` is how old a record's newest run may be before `gate sync` prunes it.
+  It is a whole number of days, 1 or more, and defaults to 90. It is the one scalar `[gate]`
+  takes: any other is an unknown field. `[prune-after-days]`
 - `[gate.<name>]` takes `cmd`, `env` and `scope` only. `cmd` and `scope` are required and
   non-empty, and each accepts a bare string for one entry. `env` is a table of strings. The name
   uses letters, digits, `-` and `_`, and does not start with `-`, because it becomes a ref
