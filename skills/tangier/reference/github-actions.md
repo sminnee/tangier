@@ -82,7 +82,8 @@ jobs:
           FULL: ${{ steps.scope.outputs.full }}
         run: |
           # shellcheck disable=SC2086
-          uvx "$TANGIER" gate github-outputs $FULL
+          # --summary writes a table of every gate's status to the step summary.
+          uvx "$TANGIER" gate github-outputs --summary $FULL
       - name: Builds
         id: builds
         env:
