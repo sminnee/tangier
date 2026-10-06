@@ -20,8 +20,8 @@ scope = ["smartypants", "test-backend-inputs"]
 - **Key.** A pass is recorded under a key: a hash of the raw commands, the `env` table and the
   content of the `scope` packages. Commit SHAs and history are not inputs, so a rebase that leaves
   the scope alone keeps the record.
-- **Record.** A record is a git ref, `refs/tangier/gates/<gate>/<key>`. `gate push` syncs records
-  with `origin`, and CI reads them with `contents: read`.
+- **Record.** A record is a git ref, `refs/tangier/gates/<gate>/<key>`. `gate run` publishes
+  the records it writes to `origin`, and CI reads them with `contents: read`.
 - **Comparator.** A run diffs from the newest commit on the branch that has a record, or from the
   merge base. On a long branch, each run then re-tests only what changed since the last pass.
 - **Need.** A gate whose diff touches none of its scope, or whose placeholder lists are all empty,
@@ -32,12 +32,19 @@ runs anything.
 
 ## The local loop
 
-Run every gate, then push the records:
+Run every gate:
 
 ```sh
 tangier gate run --all     # each gate: verified, not-needed, or a run
-tangier gate push          # sync records with origin, so CI finds them
 ```
+
+Once its gates have run, `gate run` pulls `origin`'s records and pushes the ones it wrote, so CI
+finds them. When `origin` cannot be reached or refuses the push, it warns, keeps the records local,
+and still exits with the gates' result. `tangier gate sync` then sends them.
+
+`gate sync` also pulls every record, merges runs and prunes. A record expires when its newest run
+is older than `[gate] prune-after-days`, 90 by default. `gate sync` then deletes it locally and on
+`origin`.
 
 Gates the diff does not touch cost nothing, so a pre-push hook can run them all. askastro's
 `bin/pre-push-gates`:
@@ -48,7 +55,6 @@ set -e
 for gate in lint-backend test-backend test-frontend test-frontend-units; do
   tangier gate run "$gate"
 done
-tangier gate push
 ```
 
 `gate run` keys the working tree, uncommitted work included. A pass before a commit is reused by
@@ -92,7 +98,7 @@ that needs it.
 ## CI-only gates
 
 Some gates cannot run on a dev machine: they need CI services, secrets or hardware. CI runs them,
-records the pass and pushes it. `--accept ci` makes only CI runs count, so a local run of the same
+records the pass and publishes it. `--accept ci` makes only CI runs count, so a local run of the same
 content does not verify the gate. See [GitHub Actions](5-github-actions.md#ci-only-gates).
 
 ## What voids a record

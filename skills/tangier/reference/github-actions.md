@@ -235,7 +235,7 @@ jobs:
 ### A CI-only gate
 
 A gate that only CI can run writes its own record. It takes no `--read-only`, accepts only CI runs,
-and needs `contents: write` to push the record:
+and needs `contents: write` to publish the record:
 
 ```yaml
   e2e-gate:
@@ -254,28 +254,30 @@ and needs `contents: write` to push the record:
       - run: |
           # shellcheck disable=SC2086
           uvx "$TANGIER" gate run e2e --accept ci $FULL
-          uvx "$TANGIER" gate push
 ```
 
 Run it on every event, not behind a `-run` output. It needs the plan only for `full`. `gate github-outputs` applies one
 `--accept` to every gate, so without `--accept ci` there it counts local runs of this gate.
 
-### Pruning records
+### Syncing records
+
+`gate sync` deletes records whose newest run is older than `[gate] prune-after-days`. A monthly
+run keeps them pruned when nobody syncs by hand:
 
 ```yaml
-name: Prune gate records
+name: Sync gate records
 on:
   schedule:
     - cron: "0 15 1 * *"
 permissions:
   contents: write
 jobs:
-  prune:
+  sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uvx tangier@0.2.1 gate prune --older-than 30
+      - run: uvx tangier@0.2.1 gate sync
 ```
 
 ## Checkout depth

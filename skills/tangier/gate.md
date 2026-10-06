@@ -12,10 +12,11 @@ skips a gate whose record matches. Flags and outputs are in [reference/cli.md](r
    not run again, unless the fix touched their scope.
 3. Commit exactly the work that passed. The commit reuses the record. A commit of only part of the
    work keys differently and needs a new run.
-4. Run `tangier gate push`. It syncs the records with `origin`, so it needs network access to
-   `origin`.
+4. `gate run` publishes its passes to `origin`. When any `gate run` printed `warning: gate records
+   stay local`, run `tangier gate sync`. It needs network access to `origin`.
 
-Done when `gate run --all` exits 0 on the committed tree and `gate push` exits 0.
+Done when `gate run --all` exits 0 on the committed tree, and every `gate run` that warned
+`gate records stay local` has been followed by a `gate sync` that exited 0.
 
 When the repo has a pre-push hook that runs the gates, such as `bin/pre-push-gates`, a plain
 `git push` does steps 1 and 4.
@@ -31,8 +32,9 @@ before slow ones.
 
 ## CI-only gates
 
-A CI-only gate needs CI services, secrets or hardware. Its CI job runs `gate run <gate> --accept
-ci`. The CI workflow or the project's instructions name these gates.
+A CI-only gate needs CI services, secrets or hardware, so only CI runs it. Its CI job runs
+`gate run <gate> --accept ci`, and only a CI run verifies it. CI publishes its own records. The CI
+workflow or the project's instructions name these gates.
 
 - Do not run a CI-only gate locally. A local pass records a `local` run, which does not count.
 - To see whether CI has covered your content, run `tangier gate run <gate> --accept ci --dry-run`.
