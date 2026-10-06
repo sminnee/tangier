@@ -283,9 +283,10 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   reason ends with how many, as `(2 record(s) ignored by --accept)`. `[run-dry-run]`
 - `--debug` prints to stderr each commit the comparator walk checked, with its key and `miss`,
   `local` or `origin`. A dirty working tree shows as `working tree (<tree>)`. Under each commit it
-  lists the runs it read, with where and when each ran, and `accepted` or `ignored`. It then prints
-  the comparator, the changed files that touch the scope, and each placeholder's list. It combines
-  with `--dry-run`. `[run-debug]`
+  lists the runs it read, with where and when each ran, how long it took, and `accepted` or
+  `ignored`. A run with no `duration` shows no time taken. It then prints the comparator, the
+  changed files that touch the scope, and each placeholder's list. It combines with `--dry-run`.
+  `[run-debug]`
 - `--accept` says which runs count. Its value is a bare kind, `ci` or `local`, or comma-separated
   `field=value` pairs over `kind`, `provider`, `event`, `ref`, `workflow` and `job`. A run is
   accepted when every named field equals its runner's. The flag repeats, and a run is accepted
