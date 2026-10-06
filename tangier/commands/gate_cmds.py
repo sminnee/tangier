@@ -96,24 +96,33 @@ def _run_one(config: Config, args: argparse.Namespace, name: str, origin: gate.O
     code = _run_commands(_runner(args), gate.spec_for(config, name), p.commands)
     duration = clock() - start
     if code != 0:
+        print(f"gate `{name}`: failed in {_took(duration)} (exit {code})")
         return code
     if args.read_only:
-        print(f"gate `{name}`: passed, no record written (--read-only)")
+        print(f"gate `{name}`: passed in {_took(duration)}, no record written (--read-only)")
         return 0
     # The key is content only, so a moved HEAD over the same tree is fine. A
     # changed tree is not: the commands did not test what the key describes.
     after = gate.snapshot().tree
     if after != snap.tree:
         print(
-            f"gate `{name}`: passed, but the working tree changed during the run "
+            f"gate `{name}`: passed in {_took(duration)}, but the working tree changed during the run "
             f"(tree {snap.tree[:7]}, now {after[:7]}), so no record was written",
             file=sys.stderr,
         )
         return 1
     ran_on = ranon.detect()
     ref = gate.write_record(p, ran_on, duration)
-    print(f"gate `{name}`: passed, recorded as {ref} ({ran_on['kind']})")
+    print(f"gate `{name}`: passed in {_took(duration)}, recorded as {ref} ({ran_on['kind']})")
     return 0
+
+
+def _took(seconds: float) -> str:
+    """A run's length: `12.3s` under a minute, `4m05s` from a minute up."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, rest = divmod(round(seconds), 60)
+    return f"{minutes}m{rest:02d}s"
 
 
 def _print_plan(p: gate.GatePlan) -> None:
