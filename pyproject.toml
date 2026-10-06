@@ -1,7 +1,7 @@
 [project]
 name = "tangier"
-version = "0.2.0"
-description = "Content-addressed CI/deploy pipeline toolkit: change mapping, image tagging, kustomize deploys"
+version = "0.2.1"
+description = "Smart CI for monorepos: change-scoped tests, local gate reuse, content-addressed package builds"
 readme = "README.md"
 requires-python = ">=3.11"
 # Non-negotiable: tangier runs on GitHub Actions runners without setup-python,
