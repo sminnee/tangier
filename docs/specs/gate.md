@@ -304,7 +304,10 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | --- | --- |
 | `gate list` | Print every gate and group. |
 | `gate key [<selector>]` | Print the key. With no selector, print `<name> <key>` for every gate. |
-| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug` and `--accept`. |
+| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept` and `--timeout`. Outside CI the gates run as a [job](#jobs). |
+| `gate wait [<selector> ...]` | Wait for a job, or for some of its gates. Takes `--job` and `--timeout`. |
+| `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since` and `--json`. |
+| `gate cancel` | Stop a running job. Takes `--job`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
 | `gate sync` | Sync gate records with `origin`: pull, merge runs, push, and prune expired records. |
 | `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept` and `--full`. |
@@ -398,3 +401,59 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
 - The status is one word, checked in this order: `verified` when the keyed content has a record,
   `not-needed` when the diff from the comparator does not need the gate, and `required`
   otherwise. A CI job runs the gate when the status is `required`. `[status-values]`
+## Jobs
+
+`gate run --all` can take many minutes, and an agent's shell kills a command at its tool timeout.
+So `gate run` starts a job that outlives the shell, then waits for it. A short run prints the
+same result lines and exit code as an inline run. A long one leaves the job running and says how
+to pick it up.
+
+- `gate run` starts a job and prints `job <n>: <gate>, <gate> (<sha>[+dirty])`. It then waits as
+  `gate wait --job <n> --timeout <seconds>` does. `--timeout` defaults to 60, `0` returns at once,
+  and `none` waits until the job is done. A job that finishes in time prints each gate's result
+  and exits with the code an inline run would give, except that 3 becomes 1. A job still running
+  at the timeout prints ``still running in background: <gate> (<time>). Run `tangier gate wait
+  --job <n>` or `tangier gate status`.`` and exits 3. A Ctrl-C in `gate run` cancels the job and exits 130. A
+  killed `gate run` or `gate wait` leaves it running. `[job-run-waits]`
+- On a terminal, `gate run` and `gate wait` stream the job log. Elsewhere they print each gate's
+  result line, and for a failure the last 30 lines of its output and the log path.
+- The job publishes the records it wrote once its gates are done, as an inline run does. Each gate's
+  output is its own slice of the job log, so a failure's tail never holds the publish's output. With
+  `--fail-fast`, the gates not run end `cancelled`.
+- In CI, by `[runner-detect]`, and with `--dry-run`, `gate run` runs inline, with no
+  job. CI has no tool timeout and wants a streamed log, and a dry run runs nothing.
+  `[job-inline-ci]`
+- One job runs at a time in a worktree. `gate run` exits 2 while one is running, and names it with
+  the `wait` and `cancel` commands to run. Two jobs on one tree would fight over its ports,
+  databases and caches. `[job-one-per-worktree]`
+- `gate wait` waits for the latest job, or for the comma-separated `--job` list. Selectors wait
+  only for those gates, so `gate wait lint` returns once `lint` is done. It exits 0 when every
+  gate it waited for passed, was verified or was not needed, 1 when one failed, was not recorded,
+  ended in error, was cancelled or died, 2 for a usage error or no such job, and 3 when the
+  timeout ran out. Several jobs give the worst code. A Ctrl-C stops waiting, leaves the job
+  running, and exits 130. `[wait-exit-codes]`
+- `gate status` prints one block per job, newest first: each job from the last `--since`
+  (default `8h`) and each running job. The latest job always shows. `--job 12,14` shows exactly
+  those jobs, and a missing one prints `job 9: not found (pruned?)`. The job line holds its
+  state and its commit, `<sha>[+dirty]`. Each gate line holds the gate's key, short, its state
+  and how long it ran. The key identifies the result, as the record ref does. `--json` gives the
+  full keys and each pass's record ref. It exits 0. `[job-status]`
+- A finished job is `stale` when the working tree differs from the tree it keyed. A gate result
+  is `stale` when the gate's key for the working tree differs from the key it ran against. A
+  stale result does not apply to the work in hand. `[job-stale]`
+- A running gate whose key no longer matches the working tree gets `worktree changed since
+  start: will not be recorded` in `status`, and a warning in `wait`. By `[run-dirty-after]` its
+  pass then writes no record, and the gate ends `unrecorded`. `[job-drift]`
+- A job whose process is gone without a result has `died`, and `wait` prints the tail of its log
+  once. This covers a reboot and a `kill -9`. The job process holds a lock on its job's `alive`
+  file for as long as it lives, so a pid the OS has since reused cannot pass for the job.
+  `[job-died]`
+- A job lives in `<git-dir>/tangier/jobs/<n>/`: `job.json`, `gates.json`, `output.log`, `alive`,
+  and `done`, written last. The git directory is per worktree, so `git worktree remove` deletes it,
+  and no job file is in the keyed tree. Each new job deletes finished jobs older than 24 hours,
+  then the oldest finished jobs while the logs pass 50 MB. The newest 5 jobs and a running job
+  always stay. `[job-prune]`
+- `gate cancel` sends SIGTERM to the job's process group, and SIGKILL 10 seconds later. Its
+  unfinished gates become `cancelled`. It exits 0, and says so when the job is not running. A gate
+  command that starts its own session, as a daemon does, escapes the signal, so it must clean up
+  after itself. `[cancel]`
