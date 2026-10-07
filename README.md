@@ -75,7 +75,8 @@ Read the guide in order to learn tangier:
 1. [Map your app](docs/guide/1-map-your-app.md): tags, `depends`, ignore-by-default.
 2. [Selective tests](docs/guide/2-selective-tests.md): items lists, runners, file-sets, touched
    flags.
-3. [Gates](docs/guide/3-gates.md): record a local pass, and skip it in CI.
+3. [Gates](docs/guide/3-gates.md): record a local pass, skip it in CI, and report pass rates and
+   failing tests with `gate stats`.
 4. [Packages and builds](docs/guide/4-packages-and-builds.md): content-hash versions and images.
 5. [GitHub Actions](docs/guide/5-github-actions.md): the plan job, gate jobs, builds and the
    nightly.

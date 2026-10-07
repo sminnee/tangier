@@ -143,6 +143,7 @@ member. An unknown selector exits 2.
 | `gate key [<selector>]` | `--head` | Print the key. A group, or no selector, prints `<name> <key>` per gate, and nothing when any gate fails closed. | 0, or 2 when a scope entry matches no file |
 | `gate verified <selector>` | `--head`, `--accept` | Print `verified` or `unverified`. A group needs every member. | 0 verified, 1 unverified |
 | `gate sync` | | Sync gate and failure records with `origin`: pull, merge runs, push, and delete records whose newest run is older than `[gate] prune-after-days`, locally and on `origin`. Makes 3 attempts against a racing `origin`. | 0, or 2 |
+| `gate stats [<selector>...]` | `--since` (default `30d`), `--ci` or `--local`, `--top N` (default 20), `--no-fetch`, `--json` | Fetch every pass and failure record, then print each gate's runs, pass rate, median and p90 time for passes and failures, median load per CPU and flaky keys, then the tests and files that failed most. A flaky key gave both a pass and a failure. | 0 |
 | `gate github-outputs` | `--base`, `--head`, `--accept`, `--full`, `--summary` | Each gate's and group's status. | 0 |
 
 ### `gate run` flags

@@ -13,9 +13,10 @@ import sys
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from typing import Any
 
 import tangier
-from tangier import gate, git, jobs, junit, ranon
+from tangier import gate, git, jobs, junit, ranon, stats
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs, write_summary
@@ -775,6 +776,99 @@ def cmd_sync(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stats(config: Config, args: argparse.Namespace) -> int:
+    """How each gate's runs went: pass rate, durations, load, flaky keys, and the tests and files that fail most.
+
+    Reads every pass and failure record, local and origin's. See `docs/specs/gate.md#stats`.
+    """
+    runs = [
+        stats.Run(name, key, store is gate.GATES, run)
+        for store, name, key, records in gate.every_run(fetch=not args.no_fetch)
+        for run in records
+    ]
+    if args.name:
+        names = gate.select_all(config, args.name)
+    else:
+        # Every configured gate, then any gate that only old records name.
+        names = [*config.gates, *sorted({run.gate for run in runs} - config.gates.keys())]
+    kind = "ci" if args.ci else "local" if args.local else None
+    data = stats.aggregate(runs, names, since=gate.now() - args.since, kind=kind, top=args.top)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    _print_stats(data, args.since, config.gate_prune_after_days)
+    return 0
+
+
+def _print_stats(data: dict[str, Any], since: timedelta, prune_after_days: int) -> None:
+    who = {"ci": "CI runs", "local": "local runs", None: "all runs"}[data["kind"]]
+    print(f"gate runs in the last {_age(since)} ({who})")
+    print()
+    header = ["gate", "runs", "pass", "fail", "rate", "pass p50/p90", "fail p50/p90", "load/cpu", "flaky"]
+    rows = [header]
+    for row in data["gates"]:
+        rate = row["pass_rate"]
+        load = row["load_per_cpu"]
+        rows.append(
+            [
+                row["gate"],
+                str(row["runs"]),
+                str(row["passed"]),
+                str(row["failed"]),
+                "-" if rate is None else f"{rate:.0%}",
+                _spread_text(row["duration"]["passed"]),
+                _spread_text(row["duration"]["failed"]),
+                "-" if load is None else f"{load:.2f}",
+                str(row["flaky_keys"]),
+            ]
+        )
+    widths = [max(len(r[i]) for r in rows) for i in range(len(header))]
+    for r in rows:
+        cells = [r[0].ljust(widths[0]), *(cell.rjust(width) for cell, width in zip(r[1:], widths[1:], strict=True))]
+        print("  ".join(cells).rstrip())
+    if data["top_tests"]:
+        print()
+        print("top failing tests")
+        for t in data["top_tests"]:
+            name = ".".join(part for part in (t["classname"], t["test"]) if part) or "(unnamed)"
+            parts = [f"{t['count']:>4}  {name}"]
+            if t["file"]:
+                parts.append(f"({t['file']})")
+            parts.append(", ".join(t["gates"]))
+            if t["types"]:
+                parts.append(", ".join(t["types"]))
+            if t["last_seen"]:
+                parts.append(f"last {_ago(t['last_seen'])}")
+            print("  ".join(parts))
+    if data["top_files"]:
+        print()
+        print("top failing files")
+        for f in data["top_files"]:
+            last = f"  last {_ago(f['last_seen'])}" if f["last_seen"] else ""
+            print(f"{f['count']:>4}  {f['file']}  {', '.join(f['gates'])}{last}")
+    print()
+    print(
+        f"A record keeps its newest {gate.MAX_RUNS} runs per key, and `gate sync` prunes it after "
+        f"{prune_after_days} days. A verified or not-needed gate ran nothing, so it is not counted."
+    )
+
+
+def _spread_text(spread: dict[str, float | None]) -> str:
+    median, p90 = spread["median"], spread["p90"]
+    if median is None or p90 is None:
+        return "-"
+    return f"{jobs.took(median)} / {jobs.took(p90)}"
+
+
+def _age(age: timedelta) -> str:
+    """`30d`, `8h`, `30m` or `90s`: the largest unit that divides `age`."""
+    seconds = int(age.total_seconds())
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds and seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
 def _print_synced(synced: gate.Synced, *, quiet: bool = False) -> None:
     """The counts, or that nothing moved. `quiet` prints nothing when nothing moved."""
     if synced.pushed or synced.pulled or synced.merged or synced.pruned:
@@ -1015,6 +1109,21 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "sync", help="sync gate records with origin: pull, merge runs, push, and prune expired records"
     )
     sp.set_defaults(func=cmd_sync)
+
+    tp = gsub.add_parser(
+        "stats", help="how gate runs went: pass rates, durations, flaky keys, and the tests that fail most"
+    )
+    _ = tp.add_argument("name", nargs="*", help="only these gates or groups (default: every gate)")
+    _ = tp.add_argument(
+        "--since", type=_since, default=timedelta(days=30), metavar="AGE", help="runs this recent (default: 30d)"
+    )
+    who = tp.add_mutually_exclusive_group()
+    _ = who.add_argument("--ci", action="store_true", help="only runs on CI")
+    _ = who.add_argument("--local", action="store_true", help="only runs on dev machines")
+    _ = tp.add_argument("--top", type=int, default=20, metavar="N", help="list this many failing tests and files")
+    _ = tp.add_argument("--no-fetch", action="store_true", help="read origin's records as the last fetch left them")
+    _ = tp.add_argument("--json", action="store_true", help="print the statistics as JSON")
+    tp.set_defaults(func=cmd_stats)
 
     op = gsub.add_parser("github-outputs", help="emit <gate>-status, -run, -verified and -key as $GITHUB_OUTPUT lines")
     add_diff_args(op)
