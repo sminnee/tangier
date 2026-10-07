@@ -64,16 +64,21 @@ the commit made from exactly that work.
 
 ### Long runs
 
-Outside CI, `gate run` runs the gates in a background job, then waits for it. A short run looks
-the same as a foreground one. When the job outlasts `--timeout` (60 seconds by default), `gate
-run` exits 3 and the job keeps running, so a shell's tool timeout cannot kill it:
+Outside CI, `gate run` runs the gates in a background job, so a shell's tool timeout cannot kill
+them. A plain `gate run` returns once the job starts, with exit 3 and a hint that says how to pick
+it up. `gate run --wait` waits for it, up to an hour, and exits with the gates' code. A second
+`gate run --wait` queues behind a running job:
 
 ```sh
-tangier gate run --all            # job 14: lint.check, test.py311 (a1b2c3d); ... exit 3
-tangier gate wait --job 14        # waits again; 0 passed, 1 failed, 3 still running
+tangier gate run --all            # job 14: lint.check, test.py311 (a1b2c3d); exit 3, still running
+tangier gate wait --job 14        # waits up to an hour; 0 passed, 1 failed, 3 still running
+tangier gate run --all --wait     # starts a job and waits for it
 tangier gate status               # recent jobs, each gate's key and state, and what is stale
 tangier gate cancel               # stop the running job
 ```
+
+When a job prints a load warning, the machine is busier than it has CPUs, so a timeout may come
+from load and not the code.
 
 CI and `--dry-run` run inline, with no job. One job runs at a time in a worktree. Jobs live in the
 worktree's git directory, and old ones are pruned on each new job. See

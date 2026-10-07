@@ -5,8 +5,10 @@ skips a gate whose record matches. Flags and outputs are in [reference/cli.md](r
 
 ## Before a PR push
 
-1. Run `tangier gate run --all --fail-fast`. It keys the working tree, uncommitted work included.
-   Each gate prints `verified`, `not-needed`, or runs its commands. When the project has
+1. Run `tangier gate run --all --fail-fast --wait` as a background shell command, so the tool's
+   foreground time limit does not apply. Its exit code is the gates' result. It keys the working
+   tree, uncommitted work included. Each gate prints `verified`, `not-needed`, or runs its
+   commands. When the project has
    [CI-only gates](#ci-only-gates), name the other gates instead.
 2. When a gate fails, fix the cause and run step 1 again. Gates that passed are verified and do
    not run again, unless the fix touched their scope.
@@ -15,7 +17,7 @@ skips a gate whose record matches. Flags and outputs are in [reference/cli.md](r
 4. `gate run` publishes its passes to `origin`. When any `gate run` printed `warning: gate records
    stay local`, run `tangier gate sync`. It needs network access to `origin`.
 
-Done when `gate run --all` exits 0 on the committed tree, and every `gate run` that warned
+Done when `gate run --all --wait` exits 0 on the committed tree, and every `gate run` that warned
 `gate records stay local` has been followed by a `gate sync` that exited 0.
 
 When the repo has a pre-push hook that runs the gates, such as `bin/pre-push-gates`, a plain
@@ -23,12 +25,16 @@ When the repo has a pre-push hook that runs the gates, such as `bin/pre-push-gat
 
 ## Long runs
 
-Outside CI, `gate run` starts a background job and waits up to `--timeout` seconds, 60 by
-default. A job that outlasts the wait keeps running.
+Outside CI, `gate run` starts a background job. A plain `gate run` returns once the job starts.
+`--wait` waits for it, up to an hour. A killed or timed-out waiter leaves the job running. Only a
+Ctrl-C in `gate run` cancels it.
 
 - Exit 3 means the job is still running. Run the printed `tangier gate wait --job <n>` command,
-  and repeat it while it exits 3. Do not start `gate run` again: a second run exits 2 while the
-  job runs.
+  which waits up to an hour. Do not write a loop around it.
+- A second `gate run --wait` queues behind the running job, then starts its own. A second
+  `gate run` without `--wait` starts nothing and exits 2, with the running job's wait hint.
+- When a gate fails on a timeout, look for a `load average` warning or note first. Load above the
+  CPU count means other work slowed the gate. Rerun when load is lower before you debug the code.
 - Do not edit the worktree while a job runs. A gate whose tree changes under it writes no record.
 - Run `tangier gate status` to see each recent job and its gates. A `stale` result no longer
   matches your working tree. Run the gate again.

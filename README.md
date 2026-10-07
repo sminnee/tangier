@@ -47,7 +47,7 @@ rebuilds their images. A change to `service/lector` runs only lector's tests and
 lector's image. A pre-push hook runs the gates, and `gate run` publishes each pass to `origin`:
 
 ```sh
-tangier gate run --all
+tangier gate run --all --wait
 ```
 
 One CI workflow handles every event: a pull request runs what its diff selects, a push to `main`

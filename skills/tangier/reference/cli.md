@@ -135,8 +135,8 @@ member. An unknown selector exits 2.
 
 | Command | Flags | Behaviour | Exit |
 | --- | --- | --- | --- |
-| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept`, `--timeout` | Run each gate on the working tree, unless it is verified or not needed. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. Outside CI and `--dry-run`, start a job and wait for it. | the first non-zero code, or 3 when the job is still running |
-| `gate wait [<selector>...]` | `--job N[,N...]`, `--timeout SECONDS` (default 60, `none` for no limit) | Wait for the latest job, or the listed jobs, or only the selected gates. Print each result, and the log tail of a failure. | 0 passed, 1 failed, 2 no such job, 3 still running |
+| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept`, `--wait` | Run each gate on the working tree, unless it is verified or not needed. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. Outside CI and `--dry-run`, start a job and return once it starts; `--wait` waits for it, up to an hour. While another job runs, `--wait` queues behind it, and a plain run starts nothing and exits 2. | the first non-zero code, 2 when another job runs, or 3 when the job is still running |
+| `gate wait [<selector>...]` | `--job N[,N...]` | Wait up to an hour for the latest job, or the listed jobs, or only the selected gates. On a terminal, stream the log. Elsewhere, print each gate's start and result and the log tail of a failure. After a failed gate that ran with more load than CPUs, print a load note. | 0 passed, 1 failed, 2 no such job, 3 still running |
 | `gate status` | `--job N[,N...]`, `--since` (default `8h`), `--json` | Print recent jobs, each gate's key and state, and which results are stale. The latest job always shows. | 0 |
 | `gate cancel` | `--job N` | Stop the running job's process group. Unfinished gates become `cancelled`. | 0 |
 | `gate list` | | Print every gate in config order, with a group's members indented under a `<group> (group)` line. | 0 |
@@ -153,7 +153,7 @@ member. An unknown selector exits 2.
 | `--read-only` | Reuse a record, but write none. |
 | `--full` | Skip the need test and every record. Fill each placeholder with its complete list. Needs no merge base. |
 | `--fail-fast` | Stop at the first gate that fails or errors, and name the gates not run on stderr. Exit with that gate's code. In a job, the gates not run end `cancelled`. |
-| `--timeout SECONDS` | How long to wait for the job: 60 by default, `0` to return at once, `none` for no limit. |
+| `--wait` | Wait for the job, up to an hour of wall-clock time, and exit with the gates' code, or 3 if it is still running. Without it, `gate run` returns once the job starts. |
 | `--dry-run` | Print each gate's status, comparator, reason and commands. Run and write nothing. |
 | `--debug` | Print the comparator walk, each run read with how long it took and whether `--accept` took it, the changed files, and each list, to stderr. |
 | `--accept RAN_ON` | Count only runs from this runner: `ci`, `local`, or `field=value,...` over `kind`, `provider`, `event`, `ref`, `workflow` and `job`. Repeats; any match counts. |

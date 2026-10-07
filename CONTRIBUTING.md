@@ -4,9 +4,9 @@
 
 ```sh
 bin/test                  # stdlib unittest, no dependencies; one Python, any tree
-tangier gate run test     # the suite on 3.11, 3.12 and 3.13, one member each; needs uv
-tangier gate run lint     # lint.check and lint.format
-tangier gate run no-dependencies  # no declared dependency, and no third-party import
+tangier gate run test --wait     # the suite on 3.11, 3.12 and 3.13, one member each; needs uv
+tangier gate run lint --wait     # lint.check and lint.format
+tangier gate run no-dependencies --wait  # no declared dependency, and no third-party import
 ```
 
 Each `gate run` publishes its passes to `origin`, so CI reuses them. If it warns, run
