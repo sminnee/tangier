@@ -13,7 +13,7 @@ Each `gate run` publishes its passes to `origin`, so CI reuses them. If it warns
 `tangier gate sync` before the PR push.
 
 To release, bump `version` in both `pyproject.toml` and `tangier/__init__.py` in a PR, move the
-`tangier@X.Y.Z` pins in `README.md` and `skills/tangier/reference/github-actions.md`, and merge it.
+`@vX.Y.Z` example in `skills/tangier/reference/github-actions.md`, and merge it.
 When CI passes on `main`, `.github/workflows/release.yaml` publishes the version to PyPI, tags
 `vX.Y.Z`, and moves the `@v0` alias that the Actions pin. Moving the alias ships to every consumer
 at once, so the version PR is the deliberate act. `bin/release-plan [<commit>]` shows whether a

@@ -25,7 +25,7 @@ Done when each job's `if:` reads only plan outputs and every gate in `pipeline.t
 | --- | --- |
 | The command lives in `[gate.<name>]`. The step is `tangier gate run <name>`. | One definition serves the developer and CI, and the nightly cannot drift. |
 | A job's `if:` reads a plan output and adds no path or tag logic. | tangier already decided. A copy in YAML drifts. |
-| Run tangier as `uvx tangier@<version>`, after `astral-sh/setup-uv`. | A pinned release. An unpinned `git+https` install runs whatever `main` holds, in a job that may have write access. |
+| Run tangier as `uvx tangier`, after `astral-sh/setup-uv`. | The latest PyPI release, which only a merged version bump publishes. A `git+https` install runs whatever `main` holds, in a job that may have write access. |
 | On a pull request, pass `--read-only`, except for a CI-only gate. | CI reuses a record and runs on a miss. A run can leave report files in the tree, and a job that writes no record needs no write token. |
 | On the nightly, pass `--full` to `changemap github-outputs`, `gate github-outputs` and every `gate run`. | `--full` fills every list and reads no record. Without it, a run on `main` has an empty diff and tests nothing. |
 | On a manual run, do what the nightly does. On a push to `main`, run `build-matrix --full`. | `image build --push` skips each tag already published, so only changed images build. |

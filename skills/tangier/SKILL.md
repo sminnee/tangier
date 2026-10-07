@@ -9,7 +9,7 @@ tangier reads one `pipeline.toml` that maps a monorepo into tags. From a diff it
 tests, gates and image builds a change needs, and skips gates that already passed locally.
 
 Run tangier the way the project's own instructions or CI workflow do: `tangier`, `uvx
-tangier@<version>`, or `python3 -m tangier`. `tangier <command> --help` lists each command's flags.
+tangier`, or `python3 -m tangier`. `tangier <command> --help` lists each command's flags.
 
 | Task | Read |
 | --- | --- |
