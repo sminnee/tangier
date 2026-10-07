@@ -304,8 +304,8 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | --- | --- |
 | `gate list` | Print every gate and group. |
 | `gate key [<selector>]` | Print the key. With no selector, print `<name> <key>` for every gate. |
-| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept` and `--timeout`. Outside CI the gates run as a [job](#jobs). |
-| `gate wait [<selector> ...]` | Wait for a job, or for some of its gates. Takes `--job` and `--timeout`. |
+| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept` and `--wait`. Outside CI the gates run as a [job](#jobs). |
+| `gate wait [<selector> ...]` | Wait for a job, or for some of its gates, up to an hour. Takes `--job`. |
 | `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since` and `--json`. |
 | `gate cancel` | Stop a running job. Takes `--job`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
@@ -415,34 +415,58 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
 ## Jobs
 
 `gate run --all` can take many minutes, and an agent's shell kills a command at its tool timeout.
-So `gate run` starts a job that outlives the shell, then waits for it. A short run prints the
-same result lines and exit code as an inline run. A long one leaves the job running and says how
-to pick it up.
+So `gate run` starts a job that outlives the shell. There are two modes and no timeout to choose:
+a plain `gate run` returns once the job starts, and `gate run --wait` blocks until it is done, up
+to an hour.
 
-- `gate run` starts a job and prints `job <n>: <gate>, <gate> (<sha>[+dirty])`. It then waits as
-  `gate wait --job <n> --timeout <seconds>` does. `--timeout` defaults to 60, `0` returns at once,
-  and `none` waits until the job is done. A job that finishes in time prints each gate's result
-  and exits with the code an inline run would give, except that 3 becomes 1. A job still running
-  at the timeout prints ``still running in background: <gate> (<time>). Run `tangier gate wait
-  --job <n>` or `tangier gate status`.`` and exits 3. A Ctrl-C in `gate run` cancels the job and exits 130. A
-  killed `gate run` or `gate wait` leaves it running. `[job-run-waits]`
-- On a terminal, `gate run` and `gate wait` stream the job log. Elsewhere they print each gate's
-  result line, and for a failure the last 30 lines of its output and the log path.
+- `gate run` starts a job, prints `job <n>: <gate>, <gate> (<sha>[+dirty])`, and returns at once.
+  A job still running then prints the [wait hint](#job-wait-hint) and exits 3. `gate run --wait`
+  waits as `gate wait --job <n>` does, up to an hour. A job that finishes in time prints each
+  gate's result and exits with the code an inline run would give, except that 3 becomes 1. A job
+  still running at the hour prints the wait hint and exits 3. The hour is wall-clock time, so slow
+  reads of the job count toward it. A Ctrl-C in `gate run` cancels the job and exits 130. A killed
+  `gate run` or `gate wait` leaves it running: the job runs in its own session, with no time limit
+  of its own. `--timeout <seconds>`, or `none`, overrides the wait; it is hidden from `--help`
+  and kept for scripts that pass it. `[job-run-waits]`
+- Every path that leaves a job running prints the same hint: a plain `gate run`, a wait that
+  reaches the hour, a run that will not start while another job runs, and a waiter stopped by
+  SIGTERM or SIGHUP, which prints `stopped waiting.` first and exits 3. The signal handler only
+  sets a flag, which the wait reads between polls, so a signal never interrupts a job's creation.
+  A signal the caller ignores, as under `nohup`, stays ignored. The hint reads:
+
+  ```
+  job 11 is still running in the background: test (4m05s).
+  Run `tangier gate wait --job 11` to keep waiting (up to an hour; exits 0 if every gate passed, 1 if one failed, 3 if still running).
+  `tangier gate status` shows progress; `tangier gate cancel` stops it.
+  Full output: .git/tangier/jobs/11/output.log
+  ```
+
+  The phase is the running gate and how long it has run, `starting` before the first gate, or
+  `publishing records` once every gate is done. The log path is relative to the current
+  directory. A SIGKILL cannot be caught, and prints nothing. `[job-wait-hint]`
+- On a terminal, `gate run --wait` and `gate wait` stream the job log. Elsewhere they print
+  ``gate `<name>`: started`` when a gate is first seen running, then its result line, and for a
+  failure the last 30 lines of its output and the log path.
 - The job publishes the records it wrote once its gates are done, as an inline run does. Each gate's
   output is its own slice of the job log, so a failure's tail never holds the publish's output. With
   `--fail-fast`, the gates not run end `cancelled`.
 - In CI, by `[runner-detect]`, and with `--dry-run`, `gate run` runs inline, with no
   job. CI has no tool timeout and wants a streamed log, and a dry run runs nothing.
   `[job-inline-ci]`
-- One job runs at a time in a worktree. `gate run` exits 2 while one is running, and names it with
-  the `wait` and `cancel` commands to run. Two jobs on one tree would fight over its ports,
-  databases and caches. `[job-one-per-worktree]`
+- One job runs at a time in a worktree. Two jobs on one tree would fight over its ports,
+  databases and caches. `gate run --wait` started while a job runs prints `job <n> is running:
+  <phase>; waiting for it before starting`, waits for that job quietly, without its results,
+  then starts its own job in the time left of the same hour. A plain `gate run`, or one whose hour
+  runs out first, or one stopped by SIGTERM or SIGHUP while it waits, starts no job: it prints
+  `error: job <n> is running, so this run did not start.` and the running job's wait hint, and
+  exits 2. A Ctrl-C while it waits exits 130 and leaves the running job alone.
+  `[job-one-per-worktree]`
 - `gate wait` waits for the latest job, or for the comma-separated `--job` list. Selectors wait
   only for those gates, so `gate wait lint` returns once `lint` is done. It exits 0 when every
   gate it waited for passed, was verified or was not needed, 1 when one failed, was not recorded,
-  ended in error, was cancelled or died, 2 for a usage error or no such job, and 3 when the
-  timeout ran out. Several jobs give the worst code. A Ctrl-C stops waiting, leaves the job
-  running, and exits 130. `[wait-exit-codes]`
+  ended in error, was cancelled or died, 2 for a usage error or no such job, and 3 when an hour
+  passed with the job still running. Several jobs give the worst code. A Ctrl-C stops waiting,
+  leaves the job running, and exits 130. `[wait-exit-codes]`
 - `gate status` prints one block per job, newest first: each job from the last `--since`
   (default `8h`) and each running job. The latest job always shows. `--job 12,14` shows exactly
   those jobs, and a missing one prints `job 9: not found (pruned?)`. The job line holds its
