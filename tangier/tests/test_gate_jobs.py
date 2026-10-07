@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest import mock
 
-from tangier import cli, gate, jobs
+from tangier import cli, gate, git, jobs, ranon
 from tangier.commands import gate_cmds
 from tangier.runner import Result, Subprocess
 from tangier.tests.support import RecordingRunner, make_git_repo
@@ -123,6 +123,11 @@ class JobCase(unittest.TestCase):
         for var in ("CI", "GITHUB_ACTIONS", "GITHUB_OUTPUT"):
             _ = os.environ.pop(var, None)
         self.lag = 0.0
+        # A quiet machine, whatever this one's load: `TestLoad` patches its own.
+        for name, value in (("getloadavg", (1.0, 1.0, 1.0)), ("cpu_count", 10)):
+            patcher = mock.patch.object(os, name, return_value=value)
+            _ = patcher.start()
+            self.addCleanup(patcher.stop)
         # A stop signal that no handler catches records itself here, rather than ending the test run.
         self.uncaught: list[int] = []
         for sig in (signal.SIGTERM, signal.SIGHUP):
@@ -565,7 +570,8 @@ class TestStatus(JobCase):
 
     # SPEC: gate#job-status
     def test_status_json_has_full_keys_and_record_refs(self) -> None:
-        _ = self.run_gates("lint")
+        with mock.patch.object(ranon, "load", return_value={"load": 2.5, "cpus": 8}):
+            _ = self.run_gates("lint")
         self.edit()
         _, out, _ = self.tangier("gate", "status", "--json")
         (data,) = json.loads(out)
@@ -592,6 +598,7 @@ class TestStatus(JobCase):
                         "state": "passed",
                         "code": 0,
                         "ref": f"refs/tangier/gates/lint/{key}",
+                        "load": {"load": 2.5, "cpus": 8},
                         "stale": True,
                         "drift": False,
                     }
@@ -716,6 +723,69 @@ class TestPrune(JobCase):
         with mock.patch.object(jobs, "MAX_LOG_BYTES", 650):
             _ = self.run_gates("lint")
         self.assertEqual(self.job_ids(), [8, 7, 6, 5, 4, 3, 2])
+
+
+class TestLoad(JobCase):
+    def loaded(self, load: float) -> contextlib.ExitStack:
+        stack = contextlib.ExitStack()
+        _ = stack.enter_context(mock.patch.object(os, "getloadavg", return_value=(load, 1.0, 1.0)))
+        _ = stack.enter_context(mock.patch.object(os, "cpu_count", return_value=10))
+        return stack
+
+    # SPEC: gate#record-contents
+    # SPEC: gate#run-load
+    def test_a_pass_records_the_load_it_ran_under(self) -> None:
+        with self.loaded(4.26):
+            _ = self.run_gates("lint", "--wait")
+        with contextlib.chdir(self.repo):
+            (run,) = gate.read_runs(git.rev_parse_ref(self.job().gate("lint").ref or ""))
+        self.assertEqual(run["load"], {"load": 4.3, "cpus": 10})
+        self.assertEqual(self.job().gate("lint").load, {"load": 4.3, "cpus": 10})
+
+    # SPEC: gate#run-load
+    def test_a_load_above_the_cpu_count_warns_at_start_and_after_a_failure(self) -> None:
+        runner = InProcessRunner({("bin/lint",): Result(4)}, prints={"bin/lint": "timed out"})
+        with self.loaded(84.2):
+            code, out, err = self.run_gates("lint", "--wait", runner=runner)
+        self.assertEqual(code, 4)
+        self.assertIn("warning: load average 84.2 on 10 CPUs; timeouts may come from load, not the code\n", err)
+        self.assertIn("  | timed out\n", out)
+        self.assertIn(
+            "note: load average was 84.2 on 10 CPUs during this gate; if the failures are timeouts, rerun when "
+            "load is lower\n",
+            err,
+        )
+
+    # SPEC: gate#run-load
+    def test_a_passing_gate_under_load_gets_the_warning_but_no_note(self) -> None:
+        with self.loaded(84.2):
+            _, _, err = self.run_gates("lint", "--wait")
+        self.assertIn("warning: load average 84.2", err)
+        self.assertNotIn("note:", err)
+
+    # SPEC: gate#run-load
+    def test_a_terminal_gets_the_note_once(self) -> None:
+        with self.loaded(84.2):
+            _ = self.run_gates("lint", runner=InProcessRunner({("bin/lint",): Result(4)}))
+        err = io.StringIO()
+        with contextlib.chdir(self.repo), contextlib.redirect_stdout(Terminal()), contextlib.redirect_stderr(err):
+            _ = cli.main(["gate", "wait"], runner=RecordingRunner())
+        self.assertEqual(err.getvalue().count("note: load average was 84.2 on 10 CPUs"), 1)
+
+    # SPEC: gate#run-load
+    def test_a_load_equal_to_the_cpu_count_says_nothing(self) -> None:
+        with self.loaded(10.0):
+            _, _, err = self.run_gates("lint", "--wait", runner=InProcessRunner({("bin/lint",): Result(4)}))
+        self.assertNotIn("load average", err)
+
+    # SPEC: gate#run-load
+    def test_no_load_average_leaves_load_out_of_the_record(self) -> None:
+        with mock.patch.object(os, "getloadavg", side_effect=OSError):
+            _ = self.run_gates("lint", "--wait")
+        with contextlib.chdir(self.repo):
+            (run,) = gate.read_runs(git.rev_parse_ref(self.job().gate("lint").ref or ""))
+        self.assertNotIn("load", run)
+        self.assertIsNone(self.job().gate("lint").load)
 
 
 class TestEndToEnd(JobCase):
