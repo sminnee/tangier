@@ -9,8 +9,9 @@ tangier gate run lint --wait     # lint.check and lint.format
 tangier gate run no-dependencies --wait  # no declared dependency, and no third-party import
 ```
 
-Each `gate run` publishes its passes to `origin`, so CI reuses them. If it warns, run
-`tangier gate sync` before the PR push.
+Each `gate run` publishes its passes and failures to `origin`, so CI reuses the passes. If it
+warns, run `tangier gate sync` before the PR push. When `pipeline.toml` uses a field the installed
+tangier does not know yet, run the checkout's own: `python3 -m tangier gate run ...`.
 
 To release, bump `version` in both `pyproject.toml` and `tangier/__init__.py` in a PR, move the
 `@vX.Y.Z` example in `skills/tangier/reference/github-actions.md`, and merge it.

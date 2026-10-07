@@ -23,20 +23,25 @@ scope = ["gate-inputs", "no-dependencies-inputs"]
 #
 # `python`, not `bin/test`: `uv run` resolves `python` to the requested version,
 # but `bin/test` calls `python3`, which another interpreter on PATH can shadow.
+# `bin/unittest-junit` is `unittest discover` that also writes the JUnit report
+# `gate stats` reads.
 [gate.test]
 scope = ["gate-inputs"]
 
 [gate.test.py311]
-cmd = "uv run --no-project --python 3.11 python -m unittest discover -s tangier -p test_*.py -t ."
+cmd = "uv run --no-project --python 3.11 python bin/unittest-junit build/junit-py311.xml -s tangier -p test_*.py -t ."
+junit = "build/junit-py311.xml"
 
 [gate.test.py312]
-cmd = "uv run --no-project --python 3.12 python -m unittest discover -s tangier -p test_*.py -t ."
+cmd = "uv run --no-project --python 3.12 python bin/unittest-junit build/junit-py312.xml -s tangier -p test_*.py -t ."
+junit = "build/junit-py312.xml"
 
 [gate.test.py313]
-cmd = "uv run --no-project --python 3.13 python -m unittest discover -s tangier -p test_*.py -t ."
+cmd = "uv run --no-project --python 3.13 python bin/unittest-junit build/junit-py313.xml -s tangier -p test_*.py -t ."
+junit = "build/junit-py313.xml"
 
 [no-dependencies-inputs]
 paths = ["bin/check-no-dependencies"]
 
 [gate-inputs]
-paths = ["tangier/**", "pyproject.toml", "pipeline.toml", "bin/release-plan"]
+paths = ["tangier/**", "pyproject.toml", "pipeline.toml", "bin/release-plan", "bin/unittest-junit"]
