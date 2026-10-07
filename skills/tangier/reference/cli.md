@@ -172,7 +172,8 @@ Each gate prints one of:
 - the commands' output, then ``passed in <time>, recorded as <ref> (local|ci)``, ``passed in <time>, no record written (--read-only)``, or ``failed in <time> (exit <code>)``.
 
 A failed run writes a failure record, `refs/tangier/failures/<gate>/<key>`, and publishes it. It
-never verifies a gate. `--read-only` and `--dry-run` write none.
+never verifies a gate. `--read-only` and `--dry-run` write none. A gate with `junit = "<path>"`
+deletes that file before its commands run, then reads it.
 
 `gate run` exits 1 without a record when the working tree changed during the run. A gate with a
 placeholder exits 2 when `--base` has no merge base and no record covers the tree; `--full` avoids

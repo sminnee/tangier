@@ -40,10 +40,15 @@ paths = ["uv.lock", "pyproject.toml", "bin/test", "pipeline.toml"]
 - `[gate] prune-after-days` is how old a record's newest run may be before `gate sync` prunes it.
   It is a whole number of days, 1 or more, and defaults to 90. It is the one scalar `[gate]`
   takes: any other is an unknown field. `[prune-after-days]`
-- `[gate.<name>]` takes `cmd`, `env` and `scope` only. `cmd` and `scope` are required and
+- `[gate.<name>]` takes `cmd`, `env`, `scope` and `junit` only. `cmd` and `scope` are required and
   non-empty, and each accepts a bare string for one entry. `env` is a table of strings. The name
   uses letters, digits, `-` and `_`, and does not start with `-`, because it becomes a ref
   component. A table without `cmd` is a [group](#groups). `[config-table]`
+- `junit` is the path, relative to the repo root, where the commands write a JUnit XML report. It
+  is optional, and must be a non-empty string. It is not a key input: where the report goes does
+  not change what is tested. Put it under a path git ignores. Otherwise, writing it changes the
+  working tree, and by `[run-dirty-after]` a pass is not recorded. See
+  [Reports](#reports). `[junit-config]`
 - Each command is split into arguments at parse time and runs without a shell. Shell operators and
   command substitution are rejected, as for `[deploy] after`. `[cmd-no-shell]`
 - A placeholder is a whole argument: `{<name>-items}` for an items list, `{<group>}` for a
@@ -299,7 +304,8 @@ A failed run is recorded too, so `gate stats` can report on it. It never verifie
 - A run whose commands exit non-zero adds a run to the record at
   `refs/tangier/failures/<gate>/<key>`. The key is the one the plan computed before the run,
   whatever the commands left behind. The record has the pass record's shape: `format`, `gate`,
-  `key` and `runs`. Each run holds the pass fields, plus `code`, the exit code. `gate run`
+  `key` and `runs`. Each run holds the pass fields, plus `code`, the exit code. When the gate's
+  report was read, it also holds `junit` and `failures`, as in [Reports](#reports). `gate run`
   writes no gate record for a failed run. `--read-only` and `--dry-run` write no failure record
   either. `[failure-record]`
 - Failure records have their own namespace, because tangier 0.2 reads any run under
@@ -317,6 +323,33 @@ A failed run is recorded too, so `gate stats` can report on it. It never verifie
 | --- | --- | --- |
 | `refs/tangier/gates/<gate>/<key>` | passes, which verify a gate | `refs/tangier/origin-gates/*` |
 | `refs/tangier/failures/<gate>/<key>` | failed runs, for `gate stats` | `refs/tangier/origin-failures/*` |
+
+### Reports
+
+A gate with `junit` set has its JUnit XML report read after each run.
+
+- Before the commands run, `gate run` deletes any file at the `junit` path. So a report the
+  commands did not write is never read as theirs. `[junit-stale]`
+- After the run, the report gives the counts `{tests, failures, errors, skipped}`. They come from
+  counting the `<testcase>` elements, not from a suite's own attributes, which tools fill in
+  unevenly. A pass and a failure each keep the counts as `junit`. A failure also keeps
+  `failures`: one entry per test case with a `<failure>` or `<error>`, in report order. The root
+  may be `<testsuites>` or `<testsuite>`, and suites may nest. `[junit-report]`
+
+  | Field | From | Example (pytest) | Example (ruff) |
+  | --- | --- | --- | --- |
+  | `suite` | the nearest `<testsuite name>` | `pytest` | `src/app.py` |
+  | `classname` | `<testcase classname>` | `tests.test_api.TestLogin` | `src/app.py` |
+  | `test` | `<testcase name>` | `test_bad_password` | `org.ruff.F401` |
+  | `file` | `<testcase file>`, else `suite` when it holds a `/` or is one name with a source-code extension, as `app.py`, else absent | `tests/test_api.py` | `src/app.py` |
+  | `line` | `<testcase line>`, when it is a number | `42` | `3` |
+  | `outcome` | `failure` or `error`: the child element, `failure` first | `failure` | `failure` |
+  | `type` | the child's `type` attribute: an exception class or a rule code, when present | `AssertionError` | `F401` |
+
+  The `message` attribute and the body text are not kept. The job log holds the detail.
+- `failures` keeps the first 100 entries. The counts still cover every test case. `[junit-cap]`
+- A missing report, one that does not parse, or one whose root is not a suite is a warning on
+  stderr. The run is still recorded, without `junit` and `failures`. `[junit-unreadable]`
 
 A ref outside `refs/heads` and `refs/tags` triggers no workflow and no branch rule. Reading it needs
 `contents: read` only.

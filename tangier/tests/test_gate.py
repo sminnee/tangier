@@ -2027,6 +2027,199 @@ class TestStore(GateCase):
         self.assertIn("backend-status=required\n", self.tangier(*args, "--accept", "ci", cwd=other)[1])
 
 
+# The `backend` gate, writing a JUnit report to an ignored path.
+JUNIT_CONFIG = CONFIG.replace('scope = ["svc", "inputs"]', 'scope = ["svc", "inputs"]\njunit = "build/junit.xml"')
+JUNIT_REPORT = """\
+<testsuites><testsuite name="unittest">
+<testcase classname="svc.test_a.TestA" name="test_ok"/>
+<testcase classname="svc.test_a.TestA" name="test_two" file="svc/test_a.py" line="7">
+<failure type="AssertionError" message="1 != 2">Traceback...</failure></testcase>
+<testcase classname="svc.test_a.TestA" name="test_skip"><skipped/></testcase>
+</testsuite></testsuites>
+"""
+
+
+class ReportingRunner(RecordingRunner):
+    """A runner whose first command writes `report`, `JUNIT_REPORT` by default, unless `report` is None."""
+
+    def __init__(
+        self, root: str, responses: dict[tuple[str, ...], Any] | None = None, report: str | None = JUNIT_REPORT
+    ) -> None:
+        super().__init__(responses)
+        self.root = root
+        self.report = report
+        # Whether the report was there when each command started.
+        self.found: list[bool] = []
+
+    def run(self, argv: list[str], **kwargs: Any) -> Result:
+        path = os.path.join(self.root, "build", "junit.xml")
+        self.found.append(os.path.exists(path))
+        if len(self.calls) == 0 and self.report is not None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _write(self.root, "build/junit.xml", self.report)
+        return super().run(argv, **kwargs)
+
+
+class TestFailures(GateCase):
+    """Failed runs, recorded under `refs/tangier/failures`, and the JUnit report each run reads."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        _ = _commit(self.repo, ".gitignore", "*.log\nbuild/\n")
+        _ = _commit(self.repo, "pipeline.toml", JUNIT_CONFIG)
+        self.origin = make_origin(self, self.repo)
+        patcher = mock.patch.object(gate, "now", return_value=datetime(2026, 3, 10, tzinfo=UTC))
+        _ = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.failure = f"refs/tangier/failures/backend/{self.key(JUNIT_CONFIG)}"
+
+    def run_gate(self, *extra: str, code: int = 3, report: str = JUNIT_REPORT) -> tuple[int, str, str]:
+        runner = ReportingRunner(self.repo, {("bin/lint",): Result(code)}, report)
+        with _taking(2.0):
+            return self.tangier("gate", "run", "backend", "--base", self.base, *extra, runner=runner)
+
+    def origin_refs(self) -> list[str]:
+        return _git(self.origin, "for-each-ref", "--format=%(refname)", "refs/tangier").split()
+
+    def fail_on(self, cwd: str, day: int) -> None:
+        """Record a failure in `cwd`, at 2026-03-`day`, and keep it local until a `gate sync`."""
+        runner = ReportingRunner(cwd, {("bin/lint",): Result(3)})
+        with (
+            mock.patch.object(gate, "publish", side_effect=gate.GateError("offline")),
+            mock.patch.object(gate, "now", return_value=datetime(2026, 3, day, tzinfo=UTC)),
+        ):
+            code, _, err = self.tangier("gate", "run", "backend", "--base", self.base, "--full", runner=runner, cwd=cwd)
+        self.assertEqual(code, 3, err)
+
+    # SPEC: gate#failure-record
+    # SPEC: gate#junit-report
+    def test_a_failed_run_writes_a_failure_record_and_no_gate_record(self) -> None:
+        code, out, err = self.run_gate()
+        self.assertEqual(code, 3, err)
+        self.assertIn("gate `backend`: failed in 2.0s (exit 3)", out)
+        self.assertEqual(_gate_refs(self.repo), [])
+        (run,) = _runs(self.repo, self.failure)
+        head = _git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(
+            run,
+            {
+                "head": head,
+                "tree": _git(self.repo, "rev-parse", "HEAD^{tree}"),
+                "dirty": False,
+                "base": self.base,
+                "user": "dev@example.com",
+                "time": "2026-03-10T00:00:00+00:00",
+                "duration": 2.0,
+                "tangier": tangier.__version__,
+                "commands": SELECTED,
+                "runner": LOCAL_RAN_ON,
+                "load": LOAD,
+                "code": 3,
+                "junit": {"tests": 3, "failures": 1, "errors": 0, "skipped": 1},
+                "failures": [
+                    {
+                        "suite": "unittest",
+                        "classname": "svc.test_a.TestA",
+                        "test": "test_two",
+                        "file": "svc/test_a.py",
+                        "line": 7,
+                        "outcome": "failure",
+                        "type": "AssertionError",
+                    }
+                ],
+            },
+        )
+        record = json.loads(_git(self.repo, "cat-file", "blob", self.failure))
+        self.assertEqual((record["format"], record["gate"], record["key"]), (2, "backend", self.key(JUNIT_CONFIG)))
+
+    # SPEC: gate#failure-record
+    def test_a_failure_is_keyed_as_planned_whatever_the_commands_leave_behind(self) -> None:
+        runner = DirtyingRunner(self.repo)
+        runner.responses[("bin/lint",)] = Result(3)
+        code, _, _ = self.tangier("gate", "run", "backend", "--base", self.base, runner=runner)
+        self.assertEqual(code, 3)
+        self.assertEqual(_git(self.repo, "for-each-ref", "--format=%(refname)", "refs/tangier/failures"), self.failure)
+
+    # SPEC: gate#junit-config
+    def test_the_report_path_is_not_a_key_input(self) -> None:
+        self.assertNotEqual(JUNIT_CONFIG, CONFIG)
+        self.assertEqual(self.key(JUNIT_CONFIG), self.key(CONFIG))
+
+    # SPEC: gate#failure-not-verified
+    def test_a_failure_never_verifies_and_a_later_pass_does(self) -> None:
+        self.assertEqual(self.run_gate()[0], 3)
+        self.assertEqual(self.tangier("gate", "verified", "backend")[:2], (1, "unverified\n"))
+        self.assertEqual(self.run_gate(code=0)[0], 0)
+        self.assertEqual(self.tangier("gate", "verified", "backend")[:2], (0, "verified\n"))
+        self.assertEqual(len(_runs(self.repo, self.failure)), 1)
+
+    # SPEC: gate#junit-report
+    def test_a_pass_keeps_the_report_counts(self) -> None:
+        code, _, err = self.run_gate(code=0)
+        self.assertEqual(code, 0, err)
+        (run,) = _runs(self.repo, f"refs/tangier/gates/backend/{self.key(JUNIT_CONFIG)}")
+        self.assertEqual(run["junit"], {"tests": 3, "failures": 1, "errors": 0, "skipped": 1})
+        self.assertNotIn("failures", run)
+
+    # SPEC: gate#failure-record
+    def test_read_only_and_dry_run_write_no_failure(self) -> None:
+        for extra, exit_code in ((("--read-only",), 3), (("--dry-run",), 0)):
+            with self.subTest(extra):
+                self.assertEqual(self.run_gate(*extra)[0], exit_code)
+                self.assertEqual(self.origin_refs(), [])
+                self.assertEqual(_git(self.repo, "for-each-ref", "refs/tangier/failures"), "")
+
+    # SPEC: gate#junit-stale
+    # SPEC: gate#junit-unreadable
+    def test_a_stale_report_is_deleted_before_the_run(self) -> None:
+        os.makedirs(os.path.join(self.repo, "build"))
+        _write(self.repo, "build/junit.xml", JUNIT_REPORT)
+        runner = ReportingRunner(self.repo, {("bin/lint",): Result(3)}, report=None)
+        code, _, err = self.tangier("gate", "run", "backend", "--base", self.base, runner=runner)
+        self.assertEqual(code, 3)
+        # Gone before the first command started.
+        self.assertEqual(runner.found, [False, False])
+        self.assertIn("warning: no JUnit report at build/junit.xml", err)
+        (run,) = _runs(self.repo, self.failure)
+        self.assertNotIn("junit", run)
+        self.assertNotIn("failures", run)
+        self.assertEqual(run["code"], 3)
+
+    # SPEC: gate#junit-unreadable
+    def test_an_unparseable_report_is_recorded_without_it(self) -> None:
+        code, _, err = self.run_gate(report="<testsuites><oops")
+        self.assertEqual(code, 3)
+        self.assertIn("cannot read the JUnit report at build/junit.xml", err)
+        self.assertNotIn("failures", _runs(self.repo, self.failure)[0])
+
+    # SPEC: gate#failure-publishes
+    def test_a_failure_publishes_to_origin_and_a_second_clone_syncs_it(self) -> None:
+        code, out, _ = self.run_gate()
+        self.assertEqual(code, 3)
+        self.assertIn("synced gate records with origin: pushed 1, pulled 0, merged 0, pruned 0\n", out)
+        self.assertEqual(self.origin_refs(), [self.failure])
+        other = self.clone_origin(self.origin)
+        _, out, _ = self.tangier("gate", "sync", cwd=other)
+        self.assertEqual(out, "synced gate records with origin: pushed 0, pulled 1, merged 0, pruned 0\n")
+        self.assertEqual(_git(other, "rev-parse", self.failure), _git(self.origin, "rev-parse", self.failure))
+
+    # SPEC: gate#sync-failures
+    def test_sync_merges_and_prunes_failures(self) -> None:
+        other = self.clone_origin(self.origin)
+        self.fail_on(other, 1)
+        self.fail_on(self.repo, 2)
+        self.assertEqual(self.tangier("gate", "sync", cwd=other)[0], 0)
+        stale = "refs/tangier/failures/backend/stale"
+        _put_blob(self.repo, stale, _record("stale", "2025-01-01T00:00:00+00:00"), remote="origin")
+        code, out, _ = self.tangier("gate", "sync")
+        self.assertEqual((code, out), (0, "synced gate records with origin: pushed 0, pulled 0, merged 1, pruned 1\n"))
+        self.assertEqual(self.origin_refs(), [self.failure])
+        self.assertEqual(
+            [run["time"] for run in _runs(self.origin, self.failure)],
+            ["2026-03-01T00:00:00+00:00", "2026-03-02T00:00:00+00:00"],
+        )
+
+
 class TestCustomPackageIsNotABucket(GateCase):
     # SPEC: gate#custom-package-not-a-bucket
     def test_absent_from_sha_all(self) -> None:

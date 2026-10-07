@@ -210,6 +210,7 @@ scope = ["smartypants", "test-backend-inputs"]
 | `cmd` | Required. A command, or a list run in order. |
 | `env` | A table of strings added to each command's environment. A key input. |
 | `scope` | Required. Packages whose content is a key input: SHA buckets, or tags with `paths`. |
+| `junit` | A path, relative to the repo root, where the commands write a JUnit XML report. Not a key input. Put it under a path git ignores, or a pass is not recorded. |
 
 Rules:
 
