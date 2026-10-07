@@ -435,8 +435,12 @@ def ref_for(name: str, key: str) -> str:
     return f"{REF_PREFIX}/{name}/{key}"
 
 
-def write_record(plan: GatePlan, runner: Mapping[str, str], duration: float) -> str:
+def write_record(
+    plan: GatePlan, runner: Mapping[str, str], duration: float, load: Mapping[str, float | int] | None = None
+) -> str:
     """Record a pass of the planned gate, run on `runner` in `duration` seconds, in the local ref. Returns the ref.
+
+    `load` is a `ranon.load()` sample from the end of the run, kept when the OS gave one.
 
     The run joins the runs already at the ref. A local ref that is not a
     readable record is replaced, with a warning.
@@ -453,6 +457,8 @@ def write_record(plan: GatePlan, runner: Mapping[str, str], duration: float) -> 
         "commands": plan.commands,
         "runner": dict(runner),
     }
+    if load:
+        run["load"] = dict(load)
     ref = ref_for(plan.name, plan.key)
     runs: list[dict[str, object]] = []
     if git.ref_exists(ref):

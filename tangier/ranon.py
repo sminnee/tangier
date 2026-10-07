@@ -41,3 +41,17 @@ def detect(environ: Mapping[str, str] = os.environ) -> dict[str, str]:
         server, repository, run_id = parts
         runner["url"] = f"{server}/{repository}/actions/runs/{run_id}"
     return runner
+
+
+def load() -> dict[str, float | int]:
+    """The 1-minute load average, to 0.1, and the CPU count, or `{}` where the OS gives no load average."""
+    try:
+        average = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return {}
+    return {"load": round(average, 1), "cpus": os.cpu_count() or 1}
+
+
+def overloaded(sample: Mapping[str, float | int] | None) -> bool:
+    """Whether a `load()` sample shows more load than CPUs."""
+    return bool(sample) and sample["load"] > sample["cpus"]

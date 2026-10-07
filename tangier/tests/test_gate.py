@@ -162,6 +162,10 @@ def _put_blob(root: str, ref: str, content: str, *, remote: str | None = None) -
     _ = _git(root, *args)
 
 
+# The `ranon.load()` sample every gate test runs under.
+LOAD = {"load": 3.4, "cpus": 8}
+
+
 class GateCase(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = make_git_repo(self, FILES)
@@ -183,6 +187,10 @@ class GateCase(unittest.TestCase):
         background = mock.patch.object(gate_cmds, "_in_background", return_value=False)
         _ = background.start()
         self.addCleanup(background.stop)
+        # The machine's own load would differ from run to run.
+        load = mock.patch.object(ranon, "load", return_value=LOAD)
+        _ = load.start()
+        self.addCleanup(load.stop)
 
     def tangier(self, *argv: str, runner: Any = None, cwd: str | None = None) -> tuple[int, str, str]:
         """Run the CLI in a repo. Returns (exit code, stdout, stderr)."""
@@ -525,6 +533,7 @@ class TestRun(GateCase):
                         "tangier": tangier.__version__,
                         "commands": SELECTED,
                         "runner": LOCAL_RAN_ON,
+                        "load": LOAD,
                     }
                 ],
             },
@@ -664,6 +673,7 @@ class TestRun(GateCase):
                     # The lists hold the untracked file as well as the committed change.
                     "commands": [["bin/test", "--dirs", "svc", "--files", "svc/a.py,svc/new.py"], ["bin/lint"]],
                     "runner": {"kind": "local", "host": socket.gethostname()},
+                    "load": LOAD,
                 }
             ],
         )

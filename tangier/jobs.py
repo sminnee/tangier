@@ -76,6 +76,8 @@ class GateState:
     line: str = ""
     # The record a pass wrote.
     ref: str | None = None
+    # A `ranon.load()` sample from when the gate finished.
+    load: dict[str, float | int] | None = None
 
     @property
     def finished(self) -> bool:
@@ -353,8 +355,17 @@ class Reporter:
     def started(self, name: str, key: str, offset: int) -> None:
         del name, key, offset
 
-    def finished(self, name: str, state: str, code: int, *, line: str = "", ref: str | None = None) -> None:
-        del name, state, code, line, ref
+    def finished(
+        self,
+        name: str,
+        state: str,
+        code: int,
+        *,
+        line: str = "",
+        ref: str | None = None,
+        load: dict[str, float | int] | None = None,
+    ) -> None:
+        del name, state, code, line, ref, load
 
 
 class JobReporter(Reporter):
@@ -381,12 +392,22 @@ class JobReporter(Reporter):
         g.state, g.key, g.offset, g.started = "running", key, offset, gate.now().isoformat()
         _write_gates(self.dir, self.gates)
 
-    def finished(self, name: str, state: str, code: int, *, line: str = "", ref: str | None = None) -> None:
+    def finished(
+        self,
+        name: str,
+        state: str,
+        code: int,
+        *,
+        line: str = "",
+        ref: str | None = None,
+        load: dict[str, float | int] | None = None,
+    ) -> None:
         g = self._gate(name)
         if g.started is None:
             # The gate failed before it started, as when it cannot be keyed.
             g.offset, g.started = self.offset(), gate.now().isoformat()
         g.state, g.code, g.line, g.ref, g.ended = state, code, line, ref, gate.now().isoformat()
+        g.load = load
         g.end = self.offset()
         _write_gates(self.dir, self.gates)
 

@@ -238,6 +238,7 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   | `tangier` | The tangier version. |
   | `commands` | The resolved commands. |
   | `runner` | Where the run happened. See below. |
+  | `load` | `{"load": <1-minute load average, to 0.1>, "cpus": <CPU count>}`, sampled as the commands ended. Absent where the OS gives no load average, and in runs that older tangier versions wrote. |
 
   `base`, `commands`, `head` and `dirty` are for people. None is a key input.
 
@@ -479,6 +480,12 @@ to an hour.
 - A running gate whose key no longer matches the working tree gets `worktree changed since
   start: will not be recorded` in `status`, and a warning in `wait`. By `[run-dirty-after]` its
   pass then writes no record, and the gate ends `unrecorded`. `[job-drift]`
+- Each gate samples the load average and the CPU count as it ends, into its record by
+  `[record-contents]`, into `gates.json`, and as `load` in `gate status --json`. When the load is
+  above the CPU count, `gate run` warns on stderr as the job starts: `warning: load average 84.2
+  on 10 CPUs; timeouts may come from load, not the code`. After a failed gate's tail, `gate run
+  --wait` and `gate wait` add `note: load average was 84.2 on 10 CPUs during this gate; if the
+  failures are timeouts, rerun when load is lower`. `[run-load]`
 - A job whose process is gone without a result has `died`, and `wait` prints the tail of its log
   once. This covers a reboot and a `kill -9`. The job process holds a lock on its job's `alive`
   file for as long as it lives, so a pid the OS has since reused cannot pass for the job.

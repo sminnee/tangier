@@ -151,6 +151,7 @@ def _start_job(config: Config, args: argparse.Namespace, names: list[str]) -> in
         finally:
             os.close(alive)
         print(f"job {job.id}: {', '.join(names)} ({job.commit_label})", flush=True)
+        _warn_load()
         return _wait(config, [job], None, waiter, run=True)
 
     return waiter.run(start_and_wait)
@@ -249,6 +250,17 @@ def _job_env() -> dict[str, str]:
     return {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": pythonpath}
 
 
+def _warn_load() -> None:
+    """Warn on stderr when the machine has more load than CPUs. See `[run-load]`."""
+    sample = ranon.load()
+    if ranon.overloaded(sample):
+        print(
+            f"warning: load average {sample['load']} on {sample['cpus']} CPUs; "
+            "timeouts may come from load, not the code",
+            file=sys.stderr,
+        )
+
+
 def _job_argv(argv: list[str], job_dir: str) -> list[str]:
     """The job process's command: this one, with `--job-dir` straight after `run`, ahead of any `--`."""
     at = argv.index("run", argv.index("gate")) + 1
@@ -293,10 +305,16 @@ def _run_one(
     """
 
     def finished(
-        state: str, code: int, line: str, *, ref: str | None = None, err: bool = False
+        state: str,
+        code: int,
+        line: str,
+        *,
+        ref: str | None = None,
+        err: bool = False,
+        load: dict[str, float | int] | None = None,
     ) -> tuple[int, str | None]:
         print(line, file=sys.stderr if err else sys.stdout)
-        reporter.finished(name, state, code, line=line, ref=ref)
+        reporter.finished(name, state, code, line=line, ref=ref, load=load)
         return code, ref
 
     offset = reporter.offset()
@@ -324,10 +342,14 @@ def _run_one(
     start = clock()
     code = _run_commands(_runner(args), gate.spec_for(config, name), p.commands)
     duration = clock() - start
+    # Sampled as the gate ends. See `[run-load]`.
+    load = ranon.load() or None
     if code != 0:
-        return finished("failed", code, f"gate `{name}`: failed in {jobs.took(duration)} (exit {code})")
+        return finished("failed", code, f"gate `{name}`: failed in {jobs.took(duration)} (exit {code})", load=load)
     if args.read_only:
-        return finished("passed", 0, f"gate `{name}`: passed in {jobs.took(duration)}, no record written (--read-only)")
+        return finished(
+            "passed", 0, f"gate `{name}`: passed in {jobs.took(duration)}, no record written (--read-only)", load=load
+        )
     # The key is content only, so a moved HEAD over the same tree is fine. A
     # changed tree is not: the commands did not test what the key describes.
     after = gate.snapshot().tree
@@ -338,11 +360,16 @@ def _run_one(
             f"gate `{name}`: passed in {jobs.took(duration)}, but the working tree changed during the run "
             f"(tree {snap.tree[:7]}, now {after[:7]}), so no record was written",
             err=True,
+            load=load,
         )
     ran_on = ranon.detect()
-    ref = gate.write_record(p, ran_on, duration)
+    ref = gate.write_record(p, ran_on, duration, load)
     return finished(
-        "passed", 0, f"gate `{name}`: passed in {jobs.took(duration)}, recorded as {ref} ({ran_on['kind']})", ref=ref
+        "passed",
+        0,
+        f"gate `{name}`: passed in {jobs.took(duration)}, recorded as {ref} ({ran_on['kind']})",
+        ref=ref,
+        load=load,
     )
 
 
@@ -388,6 +415,7 @@ def _wait(
         for job in now:
             if stream:
                 printed[job.id] = _stream_log(job, printed[job.id], whole=_settled(job, names))
+                _note_loads(job, _among(job, names), reported)
             else:
                 _report_results(job, _among(job, names), reported, started)
         if polls % DRIFT_EVERY == 0:
@@ -474,8 +502,27 @@ def _report_results(
         if state not in jobs.OK and state != "cancelled":
             # The output ends with the line just printed.
             _print_tail(jobs.tail(jobs.output(job, g.name).removesuffix(f"{g.line}\n")), job.log)
+            _note_load(g)
     if died:
         _print_tail(jobs.log_tail(job), job.log)
+
+
+def _note_loads(job: jobs.Job, gates: list[jobs.GateState], noted: set[tuple[int, str]]) -> None:
+    """On a terminal, where the log streams: the load note for each gate first seen failed."""
+    for g in gates:
+        if g.finished and (job.id, g.name) not in noted:
+            noted.add((job.id, g.name))
+            _note_load(g)
+
+
+def _note_load(g: jobs.GateState) -> None:
+    """For a failed gate that ran with more load than CPUs, say its timeouts may come from load. See `[run-load]`."""
+    if g.state == "failed" and g.load and ranon.overloaded(g.load):
+        print(
+            f"note: load average was {g.load['load']} on {g.load['cpus']} CPUs during this gate; "
+            "if the failures are timeouts, rerun when load is lower",
+            file=sys.stderr,
+        )
 
 
 def _print_tail(text: str, log: str) -> None:
@@ -619,6 +666,7 @@ def _job_json(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | Non
                 "started": g.started,
                 "ended": g.ended,
                 "ref": g.ref,
+                "load": g.load,
                 "stale": keys is not None and jobs.stale(g, keys),
                 "drift": keys is not None and job.effective(g) == "running" and keys.get(g.name) != g.key,
             }
