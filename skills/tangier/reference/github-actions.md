@@ -36,8 +36,8 @@ permissions:
   contents: read
 
 env:
-  # A pinned release from PyPI. Bump it deliberately.
-  TANGIER: tangier@0.2.2
+  # The latest release from PyPI.
+  TANGIER: tangier
 
 jobs:
   plan:
@@ -276,7 +276,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uvx tangier@0.2.2 gate sync
+      - run: uvx tangier gate sync
 ```
 
 ## Checkout depth
