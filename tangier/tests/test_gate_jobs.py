@@ -5,6 +5,9 @@ in-process: `InProcessRunner.spawn` calls `cli.main` with the job's argv, its
 output going to the job log, so the job is done before the wait starts.
 `SleeperRunner` spawns a real `sleep` instead, for a job that stays running.
 One test spawns a real job process end to end.
+
+The wait clock is patched: it reads the runner's `sleep` total, plus `lag`
+for time a test spends outside a sleep.
 """
 
 import contextlib
@@ -20,6 +23,7 @@ from typing import Any
 from unittest import mock
 
 from tangier import cli, gate, jobs
+from tangier.commands import gate_cmds
 from tangier.runner import Result, Subprocess
 from tangier.tests.support import RecordingRunner, make_git_repo
 
@@ -93,6 +97,17 @@ def _reap(pid: int) -> None:
         _ = os.waitpid(pid, 0)
 
 
+def hint(job_id: int, what: str = "starting") -> str:
+    """The wait hint for a job left running, as every path prints it."""
+    return (
+        f"job {job_id} is still running in the background: {what}.\n"
+        f"Run `tangier gate wait --job {job_id}` to keep waiting (up to an hour; exits 0 if every gate passed, "
+        "1 if one failed, 3 if still running).\n"
+        "`tangier gate status` shows progress; `tangier gate cancel` stops it.\n"
+        f"Full output: .git/tangier/jobs/{job_id}/output.log\n"
+    )
+
+
 def _timeless(status: str) -> str:
     """`gate status` output with its times as `<ago>` and `<t>`, which a test cannot fix."""
     status = re.sub(r"\d+[smhd] ago", "<ago>", status)
@@ -107,11 +122,22 @@ class JobCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         for var in ("CI", "GITHUB_ACTIONS", "GITHUB_OUTPUT"):
             _ = os.environ.pop(var, None)
+        self.lag = 0.0
+        # A stop signal that no handler catches records itself here, rather than ending the test run.
+        self.uncaught: list[int] = []
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            self.addCleanup(signal.signal, sig, signal.signal(sig, lambda signum, _: self.uncaught.append(signum)))
 
     def tangier(self, *argv: str, runner: Any = None) -> tuple[int, str, str]:
+        runner = runner if runner is not None else InProcessRunner()
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(list(argv), runner=runner if runner is not None else InProcessRunner())
+        with (
+            contextlib.chdir(self.repo),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+            mock.patch.object(gate_cmds, "clock", lambda: self.lag + sum(runner.slept)),
+        ):
+            code = cli.main(list(argv), runner=runner)
         return code, out.getvalue(), err.getvalue()
 
     def run_gates(self, *argv: str, runner: Any = None) -> tuple[int, str, str]:
@@ -144,7 +170,7 @@ class JobCase(unittest.TestCase):
         """A job that started `days` ago and is still running."""
         when = datetime.now(UTC) - timedelta(days=days)
         with mock.patch.object(gate, "now", return_value=when):
-            _ = self.run_gates("lint", "--timeout", "0", runner=SleeperRunner(self))
+            _ = self.run_gates("lint", runner=SleeperRunner(self))
 
     def old_job(self, days: float) -> None:
         """A finished job that started `days` ago."""
@@ -200,19 +226,103 @@ class TestRun(JobCase):
         self.assertEqual(code, 1)
 
     # SPEC: gate#job-run-waits
-    def test_a_run_that_outlasts_the_timeout_exits_3_and_leaves_the_job_running(self) -> None:
+    # SPEC: gate#job-wait-hint
+    def test_a_plain_run_returns_once_the_job_starts(self) -> None:
         runner = SleeperRunner(self)
-        code, out, _ = self.run_gates("lint", "--timeout", "5", runner=runner)
+        code, out, _ = self.run_gates("lint", runner=runner)
         self.assertEqual(code, 3)
-        self.assertIn(
-            "still running in background: starting. Run `tangier gate wait --job 1` or `tangier gate status`.", out
-        )
-        self.assertEqual(sum(runner.slept), 5)
+        self.assertEqual(runner.slept, [])
+        self.assertTrue(out.endswith(hint(1)), out)
         self.assertEqual(self.job().state, "running")
 
     # SPEC: gate#job-run-waits
+    # SPEC: gate#job-wait-hint
+    def test_run_wait_and_wait_stop_after_an_hour(self) -> None:
+        # Ten-minute polls, so the hour is six of them.
+        with mock.patch.object(gate_cmds, "POLL", 600):
+            runner = SleeperRunner(self)
+            code, out, _ = self.run_gates("lint", "--wait", runner=runner)
+            self.assertEqual((code, sum(runner.slept)), (3, 3600))
+            self.assertTrue(out.endswith(hint(1)), out)
+            runner = RecordingRunner()
+            code, out, _ = self.tangier("gate", "wait", runner=runner)
+            self.assertEqual((code, sum(runner.slept)), (3, 3600))
+            self.assertEqual(out, hint(1))
+        self.assertEqual(self.job().state, "running")
+
+    # SPEC: gate#job-run-waits
+    def test_timeout_is_hidden_but_still_works(self) -> None:
+        for command in ("run", "wait"):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+                _ = cli.main(["gate", command, "--help"])
+            self.assertNotIn("--timeout", out.getvalue())
+        runner = SleeperRunner(self)
+        code, out, _ = self.run_gates("lint", "--timeout", "5", runner=runner)
+        self.assertEqual((code, sum(runner.slept)), (3, 5))
+        self.assertTrue(out.endswith(hint(1)), out)
+
+    # SPEC: gate#job-run-waits
+    def test_the_timeout_is_wall_clock_time(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        reload = gate_cmds._reload
+
+        def slow(job: jobs.Job) -> jobs.Job:
+            self.lag += 3
+            return reload(job)
+
+        runner = RecordingRunner()
+        with mock.patch.object(gate_cmds, "_reload", slow):
+            code, _, _ = self.tangier("gate", "wait", "--timeout", "5", runner=runner)
+        # Reads at 3s and 7s, so one poll, not five.
+        self.assertEqual((code, runner.slept), (3, [1]))
+
+    def signalled(self, runner: Any, sig: int) -> Any:
+        """`runner`, whose every sleep sends `sig` to this process, as a tool timeout or a closed shell would."""
+        return mock.patch.object(runner, "sleep", side_effect=lambda _: os.kill(os.getpid(), sig))
+
+    def assert_handlers_restored(self) -> None:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            os.kill(os.getpid(), sig)
+        self.assertEqual(self.uncaught, [signal.SIGTERM, signal.SIGHUP])
+
+    # SPEC: gate#job-wait-hint
+    def test_sigterm_or_sighup_stops_wait_and_leaves_the_job_running(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(sig=sig):
+                runner = RecordingRunner()
+                with self.signalled(runner, sig):
+                    code, out, _ = self.tangier("gate", "wait", runner=runner)
+                self.assertEqual((code, out), (3, "stopped waiting.\n" + hint(1)))
+        self.assertEqual(self.job().state, "running")
+        self.assert_handlers_restored()
+
+    # SPEC: gate#job-wait-hint
+    def test_sigterm_in_run_wait_leaves_its_own_job_running(self) -> None:
+        runner = SleeperRunner(self)
+        with self.signalled(runner, signal.SIGTERM):
+            code, out, _ = self.run_gates("lint", "--wait", runner=runner)
+        self.assertEqual(code, 3)
+        self.assertTrue(out.endswith("stopped waiting.\n" + hint(1)), out)
+        self.assertEqual(self.job().state, "running")
+        self.assert_handlers_restored()
+
+    # SPEC: gate#job-one-per-worktree
+    # SPEC: gate#job-wait-hint
+    def test_sigterm_while_queued_starts_no_job(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        runner = RecordingRunner()
+        with self.signalled(runner, signal.SIGTERM):
+            code, _, err = self.run_gates("test", "--wait", runner=runner)
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "error: job 1 is running, so this run did not start.\n" + hint(1))
+        self.assertEqual(self.job_ids(), [1])
+        self.assert_handlers_restored()
+
+    # SPEC: gate#job-run-waits
     def test_ctrl_c_cancels_the_job(self) -> None:
-        code, _, err = self.run_gates("lint", runner=InterruptedSleeper(self))
+        code, _, err = self.run_gates("lint", "--wait", runner=InterruptedSleeper(self))
         self.assertEqual(code, 130)
         self.assertIn("cancelled job 1", err)
         self.assertEqual(self.job().state, "cancelled")
@@ -236,13 +346,71 @@ class TestRun(JobCase):
         self.assertIn("gate `lint`: required", out)
 
     # SPEC: gate#job-one-per-worktree
-    def test_a_second_run_is_refused_while_a_job_runs(self) -> None:
-        _ = self.run_gates("lint", "--timeout", "0", runner=SleeperRunner(self))
+    # SPEC: gate#job-wait-hint
+    def test_a_second_run_without_wait_is_refused_while_a_job_runs(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
         self.report(1, "lint")
+        code, out, err = self.run_gates("lint")
+        self.assertEqual((code, out), (2, ""))
+        self.assertRegex(err, r"^error: job 1 is running, so this run did not start\.\n")
+        self.assertEqual(_timeless(err.split("\n", 1)[1]), _timeless(hint(1, "lint (0.0s)")))
+        self.assertEqual(self.job_ids(), [1])
+
+    # SPEC: gate#job-one-per-worktree
+    def test_a_run_with_wait_queues_behind_the_running_job(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        first = self.job()
+
+        class Queued(InProcessRunner):
+            def sleep(inner, seconds: float) -> None:
+                super().sleep(seconds)
+                # The tree changes, then job 1 ends, while the second run waits for it.
+                self.edit()
+                _reap(first.pid)
+                jobs.finish(first.dir, 0)
+
+        runner = Queued()
+        code, out, _ = self.run_gates("lint", "--wait", runner=runner)
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "job 1 is running: starting; waiting for it before starting")
+        self.assertRegex(lines[1], r"^job 2: lint \([0-9a-f]{7}\+dirty\)$")
+        self.assertIn("gate `lint`: passed in ", lines[2])
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(runner.slept, [1])
+        self.assertEqual(self.job(2).state, "passed")
+        # Keyed when it started, not when it was queued.
+        self.assertNotEqual(self.job(2).gate("lint").key, first.gate("lint").key)
+
+    # SPEC: gate#job-one-per-worktree
+    # SPEC: gate#job-wait-hint
+    def test_a_queued_run_that_runs_out_of_time_starts_no_job(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        runner = RecordingRunner()
+        code, out, err = self.run_gates("lint", "--timeout", "2", runner=runner)
+        self.assertEqual((code, sum(runner.slept)), (2, 2))
+        self.assertEqual(out, "job 1 is running: starting; waiting for it before starting\n")
+        self.assertEqual(err, "error: job 1 is running, so this run did not start.\n" + hint(1))
+        self.assertEqual(self.job_ids(), [1])
+
+    # SPEC: gate#job-one-per-worktree
+    def test_ctrl_c_while_queued_leaves_the_running_job_alone(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        runner = RecordingRunner()
+        with mock.patch.object(runner, "sleep", side_effect=KeyboardInterrupt):
+            code, _, err = self.run_gates("lint", "--wait", runner=runner)
+        self.assertEqual(code, 130)
+        self.assertIn("stopped waiting; this run did not start", err)
+        self.assertEqual(self.job_ids(), [1])
+        self.assertEqual(self.job().state, "running")
+
+    # SPEC: gate#job-wait-hint
+    def test_a_job_whose_gates_are_done_is_publishing(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        self.report(1, "lint", "passed")
         code, _, err = self.run_gates("lint")
         self.assertEqual(code, 2)
-        self.assertIn("job 1 is running (lint). Run `tangier gate wait --job 1` or `tangier gate cancel`.", err)
-        self.assertEqual(self.job_ids(), [1])
+        self.assertTrue(err.endswith(hint(1, "publishing records")), err)
 
     # SPEC: gate#job-died
     def test_a_job_whose_process_is_gone_died(self) -> None:
@@ -286,13 +454,30 @@ class TestWait(JobCase):
 
     # SPEC: gate#wait-exit-codes
     def test_wait_for_one_gate_returns_when_it_is_done(self) -> None:
-        _ = self.run_gates("--all", "--timeout", "0", runner=SleeperRunner(self))
+        _ = self.run_gates("--all", runner=SleeperRunner(self))
         self.report(1, "lint", "passed")
         self.report(1, "test")
         self.assertEqual(self.tangier("gate", "wait", "lint", "--timeout", "0")[0], 0)
         code, out, _ = self.tangier("gate", "wait", "--timeout", "0")
         self.assertEqual(code, 3)
-        self.assertRegex(out, r"still running in background: test \([\d.]+s\)\. Run `tangier gate wait --job 1`")
+        self.assertRegex(out, r"job 1 is still running in the background: test \([\d.]+s\)\.\nRun `tangier gate wait")
+
+    # SPEC: gate#job-run-waits
+    def test_off_a_terminal_each_gate_says_when_it_starts(self) -> None:
+        _ = self.run_gates("--all", runner=SleeperRunner(self))
+        self.report(1, "lint")
+
+        class Progress(RecordingRunner):
+            def sleep(inner, seconds: float) -> None:
+                super().sleep(seconds)
+                if len(inner.slept) == 2:
+                    self.report(1, "lint", "passed")
+                    self.report(1, "test")
+
+        code, out, _ = self.tangier("gate", "wait", "--timeout", "4", runner=Progress())
+        self.assertEqual(code, 3)
+        progress = out.split("job 1 is still running")[0]
+        self.assertEqual(progress, "gate `lint`: started\ngate `lint`: passed\ngate `test`: started\n")
 
     # SPEC: gate#wait-exit-codes
     def test_wait_with_no_job_exits_2(self) -> None:
@@ -311,7 +496,7 @@ class TestWait(JobCase):
 
     # SPEC: gate#wait-exit-codes
     def test_ctrl_c_in_wait_leaves_the_job_running(self) -> None:
-        _ = self.run_gates("lint", "--timeout", "0", runner=SleeperRunner(self))
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
         runner = RecordingRunner()
         with mock.patch.object(runner, "sleep", side_effect=KeyboardInterrupt):
             code, _, err = self.tangier("gate", "wait", runner=runner)
@@ -328,7 +513,7 @@ class TestWait(JobCase):
 
     # SPEC: gate#job-drift
     def test_wait_warns_when_the_tree_changes_under_a_running_gate(self) -> None:
-        _ = self.run_gates("lint", "--timeout", "0", runner=SleeperRunner(self))
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
         self.report(1, "lint")
         self.edit()
         code, _, err = self.tangier("gate", "wait", "--timeout", "0")
@@ -429,7 +614,7 @@ class TestStatus(JobCase):
 
     # SPEC: gate#job-drift
     def test_a_running_gate_warns_when_the_tree_changes(self) -> None:
-        _ = self.run_gates("lint", "--timeout", "0", runner=SleeperRunner(self))
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
         self.report(1, "lint")
         _, out, _ = self.tangier("gate", "status")
         self.assertNotIn("worktree changed", out)
@@ -479,7 +664,7 @@ class InterruptedSleeper(RealSleep, SleeperRunner):
 class TestCancel(JobCase):
     # SPEC: gate#cancel
     def test_cancel_stops_the_job_and_marks_its_gates(self) -> None:
-        _ = self.run_gates("--all", "--timeout", "0", runner=SleeperRunner(self))
+        _ = self.run_gates("--all", runner=SleeperRunner(self))
         self.report(1, "lint", "passed")
         self.report(1, "test")
         code, out, _ = self.tangier("gate", "cancel", runner=RealSleep())
@@ -492,7 +677,7 @@ class TestCancel(JobCase):
 
     # SPEC: gate#cancel
     def test_cancel_kills_a_job_that_ignores_sigterm(self) -> None:
-        _ = self.run_gates("lint", "--timeout", "0", runner=SleeperRunner(self, ignore_term=True))
+        _ = self.run_gates("lint", runner=SleeperRunner(self, ignore_term=True))
         runner = RealSleep()
         self.assertEqual(self.tangier("gate", "cancel", runner=runner)[0], 0)
         self.assertEqual(sum(runner.slept) >= jobs.CANCEL_GRACE, True)

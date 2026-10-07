@@ -8,8 +8,10 @@ import math
 import os
 import re
 import shlex
+import signal
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 import tangier
@@ -65,8 +67,9 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
     to origin. A failed publish is a warning: the records stay local, and the
     exit code is still the gates'.
 
-    Outside CI the gates run in a background job, and this waits for it up to
-    `--timeout`. See `docs/specs/gate.md#jobs`.
+    Outside CI the gates run in a background job. A plain `gate run` returns
+    once it has started, and `--wait` waits for it, up to an hour. See
+    `docs/specs/gate.md#jobs`.
     """
     if args.job_dir:
         return _run_as_job(config, args)
@@ -132,29 +135,118 @@ def _run_as_job(config: Config, args: argparse.Namespace) -> int:
 
 
 def _start_job(config: Config, args: argparse.Namespace, names: list[str]) -> int:
-    """Start a job for `names`, then wait for it as `gate wait` does. Ctrl-C cancels it."""
-    runner = _runner(args)
-    snap = gate.snapshot()
-    keys = {name: _key_or_blank(config, name, snap.tree) for name in names}
-    # `-m tangier` from the package this process runs, whatever the job's cwd and sys.path.
+    """Start a job for `names`, then wait for it up to the run's limit, as `gate wait` does. Ctrl-C cancels it.
+
+    A job already running is waited out first, inside the same limit. See `[job-one-per-worktree]`.
+    """
+    waiter = _Waiter(_runner(args), _limit(args, WAIT_LIMIT if args.wait else 0), cancels=True)
+
+    def start_and_wait() -> int:
+        job, alive = _create_when_free(config, args, names, waiter)
+        waiter.started = job
+        try:
+            jobs.set_pid(
+                job, waiter.runner.spawn(_job_argv(args.argv, job.dir), log=job.log, env=_job_env(), pass_fds=(alive,))
+            )
+        finally:
+            os.close(alive)
+        print(f"job {job.id}: {', '.join(names)} ({job.commit_label})", flush=True)
+        return _wait(config, [job], None, waiter, run=True)
+
+    return waiter.run(start_and_wait)
+
+
+class _Waiter:
+    """A waiting command's limit, and what SIGTERM, SIGHUP and Ctrl-C do to it. See `[job-wait-hint]`.
+
+    SIGTERM and SIGHUP, which a tool timeout or a closed shell sends, only set
+    `stopped`. The poll loops read it between sleeps, so a signal never
+    interrupts a job's creation, its spawn or a file write. A signal the caller
+    ignores, as under `nohup`, stays ignored.
+
+    A Ctrl-C in `gate run` cancels the job it `started`, and before one has
+    started it only stops the wait, as it does in `gate wait`. Each exits 130.
+    """
+
+    def __init__(self, runner: Runner, limit: float | None, *, cancels: bool) -> None:
+        self.runner = runner
+        self.deadline = None if limit is None else clock() + limit
+        self.cancels = cancels
+        self.started: jobs.Job | None = None
+        self.stopped = False
+
+    def left(self) -> float | None:
+        """Seconds until the limit, never below 0. None for no limit."""
+        return None if self.deadline is None else max(0.0, self.deadline - clock())
+
+    def done(self) -> bool:
+        """Whether to stop waiting: the limit has passed, or a signal asked to stop."""
+        return self.stopped or self.left() == 0
+
+    def run(self, body: Callable[[], int]) -> int:
+        """`body`'s exit code, with SIGTERM and SIGHUP recorded while it runs, and a Ctrl-C's exit code."""
+
+        def stop(signum: int, frame: object) -> None:
+            del signum, frame
+            self.stopped = True
+
+        old = {
+            sig: signal.signal(sig, stop)
+            for sig in (signal.SIGTERM, signal.SIGHUP)
+            if signal.getsignal(sig) is not signal.SIG_IGN
+        }
+        try:
+            return body()
+        except KeyboardInterrupt:
+            if self.cancels and self.started is not None:
+                return _cancel_started(self.started, self.runner)
+            what = "this run did not start" if self.cancels else "the job carries on"
+            print(f"stopped waiting; {what}", file=sys.stderr)
+            return jobs.CANCELLED_CODE
+        finally:
+            for sig, previous in old.items():
+                _ = signal.signal(sig, previous)
+
+
+def _create_when_free(
+    config: Config, args: argparse.Namespace, names: list[str], waiter: _Waiter
+) -> tuple[jobs.Job, int]:
+    """Create the job, and lock its `alive` file, once no other job runs. Returns the job and the lock.
+
+    A running job is waited for, quietly, until the waiter is done. Then this raises `jobs.JobBusy`.
+    """
+    announced = False
+    while True:
+        # Keyed afresh on each try: the tree may have changed while the other job ran.
+        snap = gate.snapshot()
+        keys = {name: _key_or_blank(config, name, snap.tree) for name in names}
+        with jobs.lock():
+            try:
+                job = jobs.create(args.argv, args.base, snap, keys)
+            except jobs.JobBusy as busy:
+                other = busy.job
+            else:
+                # Under the lock, so the job reads as running before another run looks.
+                try:
+                    return job, jobs.hold_alive(job)
+                except BaseException:
+                    # A Ctrl-C here must not leave a job that reads as died.
+                    _ = jobs.finish(job.dir, jobs.CANCELLED_CODE, unfinished="cancelled")
+                    raise
+        if not announced and waiter.left() != 0:
+            print(f"job {other.id} is running: {other.phase()}; waiting for it before starting", flush=True)
+            announced = True
+        while (now := jobs.find(other.id)) is not None and now.state == "running":
+            if waiter.done():
+                raise jobs.JobBusy(now)
+            waiter.runner.sleep(POLL)
+
+
+def _job_env() -> dict[str, str]:
+    """The job's environment: `-m tangier` finds this process's package, whatever the job's cwd and sys.path."""
     package_root = os.path.dirname(os.path.dirname(os.path.abspath(tangier.__file__)))
     pythonpath = os.pathsep.join(p for p in (package_root, os.environ.get("PYTHONPATH")) if p)
-    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": pythonpath}
-    with jobs.lock():
-        job = jobs.create(args.argv, args.base, snap, keys)
-        try:
-            alive = jobs.hold_alive(job)
-            try:
-                jobs.set_pid(job, runner.spawn(_job_argv(args.argv, job.dir), log=job.log, env=env, pass_fds=(alive,)))
-            finally:
-                os.close(alive)
-        except KeyboardInterrupt:
-            return _cancel_started(job, runner)
-    print(f"job {job.id}: {', '.join(names)} ({job.commit_label})", flush=True)
-    try:
-        return _wait(config, [job], None, args.timeout, runner, run=True)
-    except KeyboardInterrupt:
-        return _cancel_started(job, runner)
+    return {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": pythonpath}
 
 
 def _job_argv(argv: list[str], job_dir: str) -> list[str]:
@@ -233,9 +325,9 @@ def _run_one(
     code = _run_commands(_runner(args), gate.spec_for(config, name), p.commands)
     duration = clock() - start
     if code != 0:
-        return finished("failed", code, f"gate `{name}`: failed in {_took(duration)} (exit {code})")
+        return finished("failed", code, f"gate `{name}`: failed in {jobs.took(duration)} (exit {code})")
     if args.read_only:
-        return finished("passed", 0, f"gate `{name}`: passed in {_took(duration)}, no record written (--read-only)")
+        return finished("passed", 0, f"gate `{name}`: passed in {jobs.took(duration)}, no record written (--read-only)")
     # The key is content only, so a moved HEAD over the same tree is fine. A
     # changed tree is not: the commands did not test what the key describes.
     after = gate.snapshot().tree
@@ -243,14 +335,14 @@ def _run_one(
         return finished(
             "unrecorded",
             1,
-            f"gate `{name}`: passed in {_took(duration)}, but the working tree changed during the run "
+            f"gate `{name}`: passed in {jobs.took(duration)}, but the working tree changed during the run "
             f"(tree {snap.tree[:7]}, now {after[:7]}), so no record was written",
             err=True,
         )
     ran_on = ranon.detect()
     ref = gate.write_record(p, ran_on, duration)
     return finished(
-        "passed", 0, f"gate `{name}`: passed in {_took(duration)}, recorded as {ref} ({ran_on['kind']})", ref=ref
+        "passed", 0, f"gate `{name}`: passed in {jobs.took(duration)}, recorded as {ref} ({ran_on['kind']})", ref=ref
     )
 
 
@@ -259,29 +351,37 @@ POLL = 1
 DRIFT_EVERY = 5
 # The exit code of a wait that timed out with the job still running.
 STILL_RUNNING = 3
+# How long `gate run --wait` and `gate wait` wait, in seconds, before they leave the job running.
+WAIT_LIMIT = 3600
+# The hidden `--timeout`'s default: no value given.
+_UNSET = -1
+
+
+def _limit(args: argparse.Namespace, default: float) -> float | None:
+    """Seconds to wait: the hidden `--timeout` when given, else `default`. None for no limit."""
+    return default if args.timeout == _UNSET else args.timeout
 
 
 def _wait(
     config: Config,
     waiting: list[jobs.Job],
     names: list[str] | None,
-    timeout: int | None,
-    runner: Runner,
+    waiter: _Waiter,
     *,
     run: bool = False,
 ) -> int:
-    """Wait until each job is done, or the gates in `names` are, or `timeout` seconds pass.
+    """Wait until each job is done, or the gates in `names` are, or the waiter is.
 
-    On a terminal the job log streams. Anywhere else only each gate's result
-    prints, with the tail of a failure, which keeps an agent's context small.
-    Elapsed time advances off the value handed to `runner.sleep`, never a real
-    clock, as in `deploy_cmds._wait_for_rollout`.
+    On a terminal the job log streams. Anywhere else only each gate's start
+    and result print, with the tail of a failure, which keeps an agent's
+    context small. The limit is wall-clock time by `clock`, so slow reads and
+    drift checks count toward it. A done waiter leaves the jobs running: the hint, exit 3.
     """
     stream = sys.stdout.isatty()
     printed: dict[int, int] = {job.id: 0 for job in waiting}
     reported: set[tuple[int, str]] = set()
+    started: set[tuple[int, str]] = set()
     drift_warned: set[tuple[int, str]] = set()
-    elapsed = 0
     polls = 0
     while True:
         now = [_reload(job) for job in waiting]
@@ -289,7 +389,7 @@ def _wait(
             if stream:
                 printed[job.id] = _stream_log(job, printed[job.id], whole=_settled(job, names))
             else:
-                _report_results(job, _among(job, names), reported)
+                _report_results(job, _among(job, names), reported, started)
         if polls % DRIFT_EVERY == 0:
             _warn_drift(config, now, drift_warned)
         polls += 1
@@ -298,13 +398,14 @@ def _wait(
                 if stream and job.state == "died":
                     print(f"job {job.id} died: its process is gone, and it wrote no result")
             return max(_exit_code(job, names, run=run) for job in now)
-        if timeout is not None and elapsed >= timeout:
+        if waiter.done():
+            if waiter.stopped:
+                print("stopped waiting.")
             for job in now:
                 if not _settled(job, names):
-                    _print_still_running(job)
+                    print(jobs.wait_hint(job))
             return STILL_RUNNING
-        runner.sleep(POLL)
-        elapsed += POLL
+        waiter.runner.sleep(POLL)
 
 
 def _reload(job: jobs.Job) -> jobs.Job:
@@ -349,11 +450,19 @@ def _stream_log(job: jobs.Job, start: int, *, whole: bool) -> int:
     return start + len(data)
 
 
-def _report_results(job: jobs.Job, gates: list[jobs.GateState], reported: set[tuple[int, str]]) -> None:
-    """Print each gate's result once, when it is first seen finished. A died job's log tail prints once."""
+def _report_results(
+    job: jobs.Job, gates: list[jobs.GateState], reported: set[tuple[int, str]], started: set[tuple[int, str]]
+) -> None:
+    """Print a gate's start when it is first seen running, and its result once, when first seen finished.
+
+    A died job's log tail prints once.
+    """
     died = False
     for g in gates:
         state = job.effective(g)
+        if state == "running" and (job.id, g.name) not in started:
+            started.add((job.id, g.name))
+            print(f"gate `{g.name}`: started", flush=True)
         if state not in jobs.FINISHED or (job.id, g.name) in reported:
             continue
         reported.add((job.id, g.name))
@@ -394,20 +503,6 @@ def _warn_drift(config: Config, now: list[jobs.Job], warned: set[tuple[int, str]
                 )
 
 
-def _print_still_running(job: jobs.Job) -> None:
-    current = job.current()
-    what = f"{current.name} ({_duration(current.started, None)})" if current and current.started else "starting"
-    print(f"still running in background: {what}. Run `tangier gate wait --job {job.id}` or `tangier gate status`.")
-
-
-def _duration(start: str | None, end: str | None) -> str:
-    """How long a gate ran, as `_took` gives it. Without `end`, up to now."""
-    if start is None:
-        return ""
-    finish = datetime.fromisoformat(end) if end else gate.now()
-    return _took(max(0.0, (finish - datetime.fromisoformat(start)).total_seconds()))
-
-
 def _ago(when: str) -> str:
     seconds = max(0, int((gate.now() - datetime.fromisoformat(when)).total_seconds()))
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
@@ -441,11 +536,8 @@ def cmd_wait(config: Config, args: argparse.Namespace) -> int:
         if missing:
             ids = ", ".join(str(job.id) for job in waiting)
             raise gate.GateError(f"gate {', '.join(missing)} is not in job {ids}")
-    try:
-        return _wait(config, waiting, names, args.timeout, _runner(args))
-    except KeyboardInterrupt:
-        print("stopped waiting; the job carries on", file=sys.stderr)
-        return jobs.CANCELLED_CODE
+    waiter = _Waiter(_runner(args), _limit(args, WAIT_LIMIT), cancels=False)
+    return waiter.run(lambda: _wait(config, waiting, names, waiter))
 
 
 def cmd_status(config: Config, args: argparse.Namespace) -> int:
@@ -499,7 +591,7 @@ def _print_job(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | No
             notes.append("stale")
         if gstate not in (*jobs.OK, "running", "pending", "cancelled"):
             notes.append(f"log: {os.path.relpath(job.log)}")
-        took = _duration(g.started, g.ended) if gstate != "pending" else ""
+        took = jobs.running_for(g.started, g.ended) if gstate != "pending" else ""
         line = f"  {g.name:<{width}}  {g.key[:8] or '-':<8}  {label:<11} {took:<6}  {'  '.join(notes)}"
         print(line.rstrip())
 
@@ -547,14 +639,6 @@ def cmd_cancel(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def _took(seconds: float) -> str:
-    """A run's length: `12.3s` under a minute, `4m05s` from a minute up."""
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    minutes, rest = divmod(round(seconds), 60)
-    return f"{minutes}m{rest:02d}s"
-
-
 def _print_plan(p: gate.GatePlan) -> None:
     print(f"gate `{p.name}`: {p.status}")
     print(f"  base {p.effective_base[:7] if p.effective_base else '(none)'} ({p.how})")
@@ -592,7 +676,7 @@ def _ran_on(run: dict[str, object]) -> str:
     duration = run.get("duration")
     # Records come from origin, so a hand-edited `duration` must not crash `--debug`.
     ok = isinstance(duration, (int, float)) and not isinstance(duration, bool) and math.isfinite(duration)
-    took = _took(float(duration)) if ok else None
+    took = jobs.took(float(duration)) if ok else None
     return " ".join(str(part) for part in [*parts, run.get("time"), took] if part)
 
 
@@ -760,14 +844,8 @@ def _since(value: str) -> timedelta:
 
 
 def _add_timeout(p: argparse.ArgumentParser) -> None:
-    _ = p.add_argument(
-        "--timeout",
-        type=_timeout,
-        default=60,
-        metavar="SECONDS",
-        help="how long to wait before leaving the job running and exiting 3; `none` waits until it is done "
-        "(default: 60)",
-    )
+    # Hidden: `--wait` and `gate wait` take the hour. It still parses, for scripts that pass it, and for tests.
+    _ = p.add_argument("--timeout", type=_timeout, default=_UNSET, help=argparse.SUPPRESS)
 
 
 def _accept(value: str) -> gate.Accept:
@@ -828,6 +906,11 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "--debug", action="store_true", help="print the comparator walk and the diff it chose to stderr"
     )
     _add_accept(rp)
+    _ = rp.add_argument(
+        "--wait",
+        action="store_true",
+        help="wait for the job, up to an hour, and exit with the gates' code; without it, return once it starts",
+    )
     _add_timeout(rp)
     # The job process: run inline and report to this job directory.
     _ = rp.add_argument("--job-dir", default=None, help=argparse.SUPPRESS)

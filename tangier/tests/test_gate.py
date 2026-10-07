@@ -25,7 +25,7 @@ from typing import Any
 from unittest import mock
 
 import tangier
-from tangier import cli, gate, git, ranon
+from tangier import cli, gate, git, jobs, ranon
 from tangier.commands import gate_cmds
 from tangier.runner import Result
 from tangier.tests.support import RecordingRunner, make_git_repo, make_origin, parse_toml
@@ -424,8 +424,8 @@ class TestRanOn(unittest.TestCase):
 class TestDuration(unittest.TestCase):
     # SPEC: gate#run-records-pass
     def test_a_minute_or_more_shows_minutes_and_seconds(self) -> None:
-        self.assertEqual(gate_cmds._took(59.9), "59.9s")
-        self.assertEqual(gate_cmds._took(60.0), "1m00s")
+        self.assertEqual(jobs.took(59.9), "59.9s")
+        self.assertEqual(jobs.took(60.0), "1m00s")
 
 
 class DirtyingRunner(RecordingRunner):

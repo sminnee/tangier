@@ -52,6 +52,14 @@ class JobError(gate.GateError):
     """A job cannot be started or found."""
 
 
+class JobBusy(JobError):
+    """Another job is running in this worktree. See `[job-one-per-worktree]`."""
+
+    def __init__(self, job: Job) -> None:
+        super().__init__(f"job {job.id} is running, so this run did not start.\n{wait_hint(job)}")
+        self.job = job
+
+
 @dataclass
 class GateState:
     name: str
@@ -107,6 +115,15 @@ class Job:
         """The running gate, if one is."""
         return next((g for g in self.gates if g.state == "running"), None)
 
+    def phase(self) -> str:
+        """A running job's phase: `<gate> (<time>)`, `starting`, or, once its gates are done, `publishing records`."""
+        current = self.current()
+        if current is not None and current.started:
+            return f"{current.name} ({running_for(current.started, None)})"
+        if self.gates and all(g.finished for g in self.gates):
+            return "publishing records"
+        return "starting"
+
     def effective(self, g: GateState) -> str:
         """The gate's state, with an unfinished gate in a died job read as `died`."""
         return "died" if not g.finished and self.state == "died" else g.state
@@ -128,18 +145,46 @@ def lock() -> Generator[None]:
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def wait_hint(job: Job) -> str:
+    """What to run about a job left running. Every path that leaves one running prints this. See `[job-wait-hint]`."""
+    return (
+        f"job {job.id} is still running in the background: {job.phase()}.\n"
+        f"Run `tangier gate wait --job {job.id}` to keep waiting (up to an hour; exits 0 if every gate passed, "
+        "1 if one failed, 3 if still running).\n"
+        "`tangier gate status` shows progress; `tangier gate cancel` stops it.\n"
+        f"Full output: {os.path.relpath(job.log)}"
+    )
+
+
+def took(seconds: float) -> str:
+    """A run's length: `12.3s` under a minute, `4m05s` from a minute up."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, rest = divmod(round(seconds), 60)
+    return f"{minutes}m{rest:02d}s"
+
+
+def running_for(start: str | None, end: str | None) -> str:
+    """How long a gate ran, as `took` gives it. Without `end`, up to now."""
+    if start is None:
+        return ""
+    finish = datetime.fromisoformat(end) if end else gate.now()
+    return took(max(0.0, (finish - datetime.fromisoformat(start)).total_seconds()))
+
+
+def running() -> Job | None:
+    """The job running in this worktree, if one is."""
+    return next((j for j in all_jobs() if j.state == "running"), None)
+
+
 def create(argv: list[str], base: str, snap: gate.Snapshot, keys: dict[str, str]) -> Job:
     """A new job for the gates in `keys`, in order, each pending. Call under `lock()`.
 
-    Refuses while another job is running. See `[job-one-per-worktree]`.
+    Raises `JobBusy` while another job is running. See `[job-one-per-worktree]`.
     """
-    running = next((j for j in all_jobs() if j.state == "running"), None)
-    if running is not None:
-        current = running.current()
-        what = f" ({current.name})" if current else ""
-        raise JobError(
-            f"job {running.id} is running{what}. Run `tangier gate wait --job {running.id}` or `tangier gate cancel`."
-        )
+    busy = running()
+    if busy is not None:
+        raise JobBusy(busy)
     os.makedirs(root(), exist_ok=True)
     job_id = _next_id()
     job = Job(
