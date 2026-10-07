@@ -184,6 +184,8 @@ class GateSpec:
     scope: list[str]
     # The group's name, for a member of `[gate.<group>.<name>]`. Its full name is `<group>.<name>`.
     group: str | None = None
+    # Where the commands write a JUnit XML report, relative to the repo root. Not a key input.
+    junit: str | None = None
 
 
 @dataclass
@@ -460,7 +462,7 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv]
 # (`refs/tangier/gates/<group>.<name>/<key>`) and of an output name
 # (`<group>-<name>-verified`), so it must be valid as both.
 _GATE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
-_GATE_KEYS = {"cmd", "env", "scope"}
+_GATE_KEYS = {"cmd", "env", "scope", "junit"}
 
 
 def gate_output_name(name: str) -> str:
@@ -566,11 +568,15 @@ def _parse_gate(
     for key, val in (("cmd", cmds), ("scope", scope)):
         if not val:
             raise ConfigError(f"{path}: `[{section}]` `{key}` is empty")
+    junit = spec.get("junit")
+    if junit is not None and (not isinstance(junit, str) or not junit):
+        raise ConfigError(f"{path}: `[{section}].junit` must be a path")
     return GateSpec(
         commands=[_split_command(path, f"`[{section}] cmd`", cmd) for cmd in cmds],
         env={**group_env, **_gate_env(path, section, spec)},
         scope=scope,
         group=group,
+        junit=junit,
     )
 
 

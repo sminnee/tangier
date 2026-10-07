@@ -574,12 +574,20 @@ class TestGate(unittest.TestCase):
             "unknown key": ('cmd = "bin/test"\nscope = "svc"\npaths = "x"\n', "unknown field `paths`"),
             "env not a table": ('cmd = "bin/test"\nscope = "svc"\nenv = "X=1"\n', "table of strings"),
             "env value not a string": ('cmd = "bin/test"\nscope = "svc"\nenv = { X = 1 }\n', "table of strings"),
+            "junit not a string": ('cmd = "bin/test"\nscope = "svc"\njunit = 1\n', "].junit` must be a path"),
+            "junit empty": ('cmd = "bin/test"\nscope = "svc"\njunit = ""\n', "].junit` must be a path"),
         }
         for label, (body, expected) in cases.items():
             with self.subTest(label):
                 with self.assertRaises(ConfigError) as ctx:
                     _ = parse_toml(_gate(body))
                 self.assertIn(expected, str(ctx.exception))
+
+    # SPEC: gate#junit-config
+    def test_junit_names_the_report_path(self) -> None:
+        cfg = parse_toml(_gate('cmd = "bin/test"\nscope = "svc"\njunit = "build/junit.xml"\n'))
+        self.assertEqual(cfg.gates["backend"].junit, "build/junit.xml")
+        self.assertIsNone(parse_toml(_gate('cmd = "bin/test"\nscope = "svc"\n')).gates["backend"].junit)
 
     # SPEC: gate#prune-after-days
     def test_prune_after_days_defaults_to_90(self) -> None:

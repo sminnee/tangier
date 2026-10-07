@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 
 import tangier
-from tangier import gate, git, jobs, ranon
+from tangier import gate, git, jobs, junit, ranon
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs, write_summary
@@ -340,17 +340,26 @@ def _run_one(
         return finished("verified", 0, f"gate `{name}`: verified ({p.reason}), nothing to run")
 
     spec = gate.spec_for(config, name)
+    if spec.junit:
+        # A report the commands do not write must not pass for theirs. See `[junit-stale]`.
+        try:
+            os.remove(spec.junit)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            raise gate.GateError(f"gate `{name}`: cannot delete the old JUnit report at {spec.junit}: {e}") from e
     start = clock()
     code = _run_commands(_runner(args), spec, p.commands)
     duration = clock() - start
     # Sampled as the gate ends. See `[run-load]`.
     load = ranon.load() or None
+    report = junit.read(spec.junit) if spec.junit else None
     if code != 0:
         line = f"gate `{name}`: failed in {jobs.took(duration)} (exit {code})"
         if args.read_only:
             return finished("failed", code, line, load=load)
         # Keyed as planned, before the run, whatever the commands left behind. See `[failure-record]`.
-        ref = gate.write_failure(p, ranon.detect(), duration, load, code)
+        ref = gate.write_failure(p, ranon.detect(), duration, load, code, report)
         return finished("failed", code, line, ref=ref, load=load)
     if args.read_only:
         return finished(
@@ -369,7 +378,7 @@ def _run_one(
             load=load,
         )
     ran_on = ranon.detect()
-    ref = gate.write_record(p, ran_on, duration, load)
+    ref = gate.write_record(p, ran_on, duration, load, report)
     return finished(
         "passed",
         0,

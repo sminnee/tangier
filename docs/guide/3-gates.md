@@ -84,6 +84,41 @@ CI and `--dry-run` run inline, with no job. One job runs at a time in a worktree
 worktree's git directory, and old ones are pruned on each new job. See
 [the spec](../specs/gate.md#jobs).
 
+## Reporting failures
+
+A failed run is recorded too, under `refs/tangier/failures/<gate>/<key>`, and published like a
+pass. It holds the exit code, the time taken and where it ran. It never verifies a gate: `gate
+verified` and CI read only `refs/tangier/gates`.
+
+To record which tests failed, have the commands write a JUnit XML report, and name it in `junit`:
+
+```toml
+[gate.test-backend]
+cmd   = "pytest --junitxml=build/junit-backend.xml -o junit_family=xunit1"
+scope = ["smartypants", "test-backend-inputs"]
+junit = "build/junit-backend.xml"
+```
+
+`gate run` deletes the file before the commands run, then reads it after. A failure keeps each
+failing test's class, name, file, line and exception type, and drops the message, which the job
+log holds. A pass and a failure both keep the counts. Put the report under a path git ignores, or
+the report itself changes the working tree and the pass is not recorded. A missing or broken
+report is a warning, and the run is recorded without it.
+
+Most tools write JUnit:
+
+| Tool | Flags | Terminal output |
+| --- | --- | --- |
+| pytest | `--junitxml=build/junit.xml -o junit_family=xunit1`; `xunit1` adds `file` and `line` | kept |
+| vitest | `--reporter=default --reporter=junit --outputFile.junit=build/junit.xml` | kept |
+| ruff | `check --output-format junit -o build/ruff.xml` | replaced by the file |
+| eslint | `-f junit -o build/eslint.xml`, with the `eslint-formatter-junit` package on ESLint 9 | replaced by the file |
+| unittest | `bin/unittest-junit build/junit.xml -s . -p 'test_*.py'`, copied from [tangier's repo](../../bin/unittest-junit); it wraps `unittest discover` | kept |
+
+For ruff and eslint, a report costs you the terminal output, so only lint gates whose failures you
+want to track need one. A lint report names each file and rule code, so `gate stats` can list the
+files that keep failing.
+
 ## Scope and `*-inputs` packages
 
 A scope entry is a package: a SHA bucket or a tag. The scope must cover every file the commands

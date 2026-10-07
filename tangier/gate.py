@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from tangier import __version__, git
+from tangier import __version__, git, junit
 from tangier.changemap import AnswerSet, answer_set_for_files, full_answer_set, scope_lines, scope_touched
 from tangier.config import (
     ITEMS_PLACEHOLDER_SUFFIX,
@@ -471,15 +471,20 @@ def write_record(
     runner: Mapping[str, str],
     duration: float,
     load: Mapping[str, float | int] | None = None,
+    report: junit.Report | None = None,
 ) -> str:
     """Record a pass of the planned gate, run on `runner` in `duration` seconds, in the local ref. Returns the ref.
 
     `load` is a `ranon.load()` sample from the end of the run, kept when the OS gave one.
+    `report` is the gate's JUnit report, whose counts the run keeps.
 
     The run joins the runs already at the ref. A local ref that is not a
     readable record is replaced, with a warning.
     """
-    return _add_run(GATES, plan, _run(plan, runner, duration, load))
+    run = _run(plan, runner, duration, load)
+    if report is not None:
+        run["junit"] = report.counts()
+    return _add_run(GATES, plan, run)
 
 
 def write_failure(
@@ -488,13 +493,17 @@ def write_failure(
     duration: float,
     load: Mapping[str, float | int] | None,
     code: int,
+    report: junit.Report | None = None,
 ) -> str:
     """Record a failed run of the planned gate under `FAILURES`, with its exit code. Returns the ref.
 
-    See `docs/specs/gate.md#failure-record`.
+    `report` adds the JUnit counts and the failing tests. See `docs/specs/gate.md#failure-record`.
     """
     run = _run(plan, runner, duration, load)
     run["code"] = code
+    if report is not None:
+        run["junit"] = report.counts()
+        run["failures"] = report.failures
     return _add_run(FAILURES, plan, run)
 
 

@@ -67,9 +67,11 @@ Done when `changemap explain` on a sample diff prints the invocation you expect.
    `scope`. A file missing from the scope gives a false pass.
 5. When the commands read different inputs, or one is slow, make a group: `[gate.<name>]` with
    `scope` and no `cmd`, and one `[gate.<name>.<member>]` with `cmd` per command.
-6. Add the gate to the repo's pre-push hook.
-7. Add its CI job: follow [ci.md](ci.md).
-8. Run `tangier gate run <name>`.
+6. When the commands can write a JUnit XML report, set `junit` to its path, under a path git
+   ignores. `gate stats` then lists the tests that fail most.
+7. Add the gate to the repo's pre-push hook.
+8. Add its CI job: follow [ci.md](ci.md).
+9. Run `tangier gate run <name>`.
 
 Done when `gate run <name>` passes and a second run prints `verified`.
 
