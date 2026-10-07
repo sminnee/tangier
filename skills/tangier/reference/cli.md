@@ -142,7 +142,7 @@ member. An unknown selector exits 2.
 | `gate list` | | Print every gate in config order, with a group's members indented under a `<group> (group)` line. | 0 |
 | `gate key [<selector>]` | `--head` | Print the key. A group, or no selector, prints `<name> <key>` per gate, and nothing when any gate fails closed. | 0, or 2 when a scope entry matches no file |
 | `gate verified <selector>` | `--head`, `--accept` | Print `verified` or `unverified`. A group needs every member. | 0 verified, 1 unverified |
-| `gate sync` | | Sync records with `origin`: pull, merge runs, push, and delete records whose newest run is older than `[gate] prune-after-days`, locally and on `origin`. Makes 3 attempts against a racing `origin`. | 0, or 2 |
+| `gate sync` | | Sync gate and failure records with `origin`: pull, merge runs, push, and delete records whose newest run is older than `[gate] prune-after-days`, locally and on `origin`. Makes 3 attempts against a racing `origin`. | 0, or 2 |
 | `gate github-outputs` | `--base`, `--head`, `--accept`, `--full`, `--summary` | Each gate's and group's status. | 0 |
 
 ### `gate run` flags
@@ -170,6 +170,9 @@ Each gate prints one of:
 - ``gate `<name>`: verified (...), nothing to run`` — a record matches this content.
 - ``gate `<name>`: not-needed for this diff (...)`` — no key input changed, or every list is empty.
 - the commands' output, then ``passed in <time>, recorded as <ref> (local|ci)``, ``passed in <time>, no record written (--read-only)``, or ``failed in <time> (exit <code>)``.
+
+A failed run writes a failure record, `refs/tangier/failures/<gate>/<key>`, and publishes it. It
+never verifies a gate. `--read-only` and `--dry-run` write none.
 
 `gate run` exits 1 without a record when the working tree changed during the run. A gate with a
 placeholder exits 2 when `--base` has no merge base and no record covers the tree; `--full` avoids

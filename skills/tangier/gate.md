@@ -14,7 +14,7 @@ skips a gate whose record matches. Flags and outputs are in [reference/cli.md](r
    not run again, unless the fix touched their scope.
 3. Commit exactly the work that passed. The commit reuses the record. A commit of only part of the
    work keys differently and needs a new run.
-4. `gate run` publishes its passes to `origin`. When any `gate run` printed `warning: gate records
+4. `gate run` publishes its records to `origin`. When any `gate run` printed `warning: gate records
    stay local`, run `tangier gate sync`. It needs network access to `origin`.
 
 Done when `gate run --all --wait` exits 0 on the committed tree, and every `gate run` that warned

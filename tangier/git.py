@@ -222,9 +222,9 @@ def for_each_ref(prefix: str) -> list[tuple[str, str]]:
     return _ref_lines(_git_checked("for-each-ref", "--format=%(objectname)%09%(refname)", prefix))
 
 
-def fetch(remote: str, refspec: str) -> None:
-    """Fetch `refspec`, and delete local refs under it that `remote` no longer has."""
-    _ = _git_checked("fetch", "--quiet", "--prune", remote, refspec)
+def fetch(remote: str, *refspecs: str) -> None:
+    """Fetch each refspec, and delete local refs under them that `remote` no longer has."""
+    _ = _git_checked("fetch", "--quiet", "--prune", remote, *refspecs)
 
 
 def push(remote: str, refspecs: list[str], *, leases: dict[str, str] | None = None, atomic: bool = False) -> None:

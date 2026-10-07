@@ -28,10 +28,33 @@ from tangier.config import (
     scope_tags,
 )
 
-REF_PREFIX = "refs/tangier/gates"
-# Where a fetch mirrors origin's gate refs, apart from this clone's own records.
-ORIGIN_MIRROR_PREFIX = "refs/tangier/origin-gates"
 REMOTE = "origin"
+
+
+@dataclass(frozen=True)
+class Store:
+    """A namespace of records under `prefix`. A fetch mirrors origin's under `mirror`, apart from this clone's own."""
+
+    prefix: str
+    mirror: str
+
+    def ref(self, name: str, key: str) -> str:
+        return f"{self.prefix}/{name}/{key}"
+
+    def mirrored(self, ref: str) -> str:
+        """Where `fetch_origin` puts origin's `ref`, a ref or a pattern under `prefix`."""
+        return self.mirror + ref[len(self.prefix) :]
+
+    def unmirrored(self, ref: str) -> str:
+        """The ref a mirrored ref stands for."""
+        return self.prefix + ref[len(self.mirror) :]
+
+
+# Passes, which verify a gate.
+GATES = Store("refs/tangier/gates", "refs/tangier/origin-gates")
+# Failed runs, for `gate stats`. Never verify a gate: see `[failure-not-verified]`.
+FAILURES = Store("refs/tangier/failures", "refs/tangier/origin-failures")
+STORES = (GATES, FAILURES)
 
 # Bump when the key's inputs or their encoding change: every record then misses.
 KEY_VERSION = 2
@@ -296,7 +319,7 @@ def comparator(
     not look it up again: on a clean tree that is HEAD.
     """
     spec = spec_for(cfg, name)
-    found = OriginRecords(f"{REF_PREFIX}/{name}/*") if origin is None else origin
+    found = OriginRecords(f"{GATES.prefix}/{name}/*") if origin is None else origin
     trail: list[Step] = []
 
     where, runs = lookup(name, snap_key, found, accept)
@@ -432,11 +455,22 @@ def plan(
 
 
 def ref_for(name: str, key: str) -> str:
-    return f"{REF_PREFIX}/{name}/{key}"
+    return GATES.ref(name, key)
+
+
+def store_of(ref: str) -> Store:
+    """The store a ref or pattern belongs to."""
+    for store in STORES:
+        if ref.startswith(store.prefix + "/"):
+            return store
+    raise GateError(f"`{ref}` is not under any record store")
 
 
 def write_record(
-    plan: GatePlan, runner: Mapping[str, str], duration: float, load: Mapping[str, float | int] | None = None
+    plan: GatePlan,
+    runner: Mapping[str, str],
+    duration: float,
+    load: Mapping[str, float | int] | None = None,
 ) -> str:
     """Record a pass of the planned gate, run on `runner` in `duration` seconds, in the local ref. Returns the ref.
 
@@ -445,6 +479,28 @@ def write_record(
     The run joins the runs already at the ref. A local ref that is not a
     readable record is replaced, with a warning.
     """
+    return _add_run(GATES, plan, _run(plan, runner, duration, load))
+
+
+def write_failure(
+    plan: GatePlan,
+    runner: Mapping[str, str],
+    duration: float,
+    load: Mapping[str, float | int] | None,
+    code: int,
+) -> str:
+    """Record a failed run of the planned gate under `FAILURES`, with its exit code. Returns the ref.
+
+    See `docs/specs/gate.md#failure-record`.
+    """
+    run = _run(plan, runner, duration, load)
+    run["code"] = code
+    return _add_run(FAILURES, plan, run)
+
+
+def _run(
+    plan: GatePlan, runner: Mapping[str, str], duration: float, load: Mapping[str, float | int] | None
+) -> dict[str, object]:
     run: dict[str, object] = {
         "head": plan.snapshot.commit,
         "tree": plan.snapshot.tree,
@@ -459,7 +515,11 @@ def write_record(
     }
     if load:
         run["load"] = dict(load)
-    ref = ref_for(plan.name, plan.key)
+    return run
+
+
+def _add_run(store: Store, plan: GatePlan, run: dict[str, object]) -> str:
+    ref = store.ref(plan.name, plan.key)
     runs: list[dict[str, object]] = []
     if git.ref_exists(ref):
         try:
@@ -519,29 +579,25 @@ def read_runs(sha: str) -> list[dict[str, object]]:
     return runs
 
 
-def _mirror(ref: str) -> str:
-    """Where `fetch_origin` puts origin's `ref`, a ref or a pattern under `REF_PREFIX`."""
-    return ORIGIN_MIRROR_PREFIX + ref[len(REF_PREFIX) :]
-
-
-def fetch_origin(pattern: str) -> None:
-    """Mirror origin's gate refs that match `pattern` under `ORIGIN_MIRROR_PREFIX`.
+def fetch_origin(*patterns: str) -> None:
+    """Mirror origin's records that match each pattern, in one fetch, under its store's mirror.
 
     The fetch prunes, so a mirrored ref that origin no longer has goes too.
     """
-    git.fetch(REMOTE, f"+{pattern}:{_mirror(pattern)}")
+    git.fetch(REMOTE, *(f"+{pattern}:{store_of(pattern).mirrored(pattern)}" for pattern in patterns))
 
 
 class OriginRecords:
-    """Origin's gate records that match `pattern`, fetched in one call, at the first lookup.
+    """Origin's records that match `pattern`, fetched in one call, at the first lookup.
 
     A caller that finds every record locally then reads no network. An origin
     that cannot be reached counts as holding no record, with a warning: the
     caller then runs the gate, which is the safe direction.
     """
 
-    def __init__(self, pattern: str = f"{REF_PREFIX}/*") -> None:
+    def __init__(self, pattern: str = f"{GATES.prefix}/*") -> None:
         self.pattern = pattern
+        self.store = store_of(pattern)
         self._blobs: dict[str, str] | None = None
         self._runs: dict[str, list[dict[str, object]]] = {}
 
@@ -550,11 +606,11 @@ class OriginRecords:
         if self._blobs is None:
             try:
                 fetch_origin(self.pattern)
-                found = git.for_each_ref(_mirror(self.pattern).removesuffix("/*"))
+                found = git.for_each_ref(self.store.mirrored(self.pattern).removesuffix("/*"))
             except git.GitError as e:
                 print(f"warning: cannot read gate records from {REMOTE}, so they count as absent: {e}", file=sys.stderr)
                 found = []
-            self._blobs = {REF_PREFIX + ref[len(ORIGIN_MIRROR_PREFIX) :]: sha for sha, ref in found}
+            self._blobs = {self.store.unmirrored(ref): sha for sha, ref in found}
         return self._blobs
 
     def __contains__(self, ref: object) -> bool:
@@ -590,7 +646,7 @@ def lookup(
             print(f"warning: {ref} counts as absent: {e}", file=sys.stderr)
         if any(ok for _, ok in seen):
             return "local", seen
-    found = OriginRecords(f"{REF_PREFIX}/{name}/*") if origin is None else origin
+    found = OriginRecords(f"{GATES.prefix}/{name}/*") if origin is None else origin
     if ref in found:
         runs = [(run, accepted(run, accept)) for run in found.runs(ref)]
         # After a push, origin holds the local runs too.
@@ -623,17 +679,16 @@ class Synced:
 
 
 def publish(refs: set[str]) -> Synced:
-    """Pull origin's gate records, then push only `refs`: the records a `gate run` wrote.
+    """Pull origin's records, then push only `refs`: the records a `gate run` wrote.
 
-    The first attempt pulls every record. A rejected push retries on the gates
-    of `refs` alone, up to `SYNC_ATTEMPTS` times. See `docs/specs/gate.md#store`.
+    The first attempt pulls every record in each store that `refs` touches. A
+    rejected push retries on the gates of `refs` alone, up to `SYNC_ATTEMPTS`
+    times. See `docs/specs/gate.md#store`.
     """
     before = _local_refs()
-    patterns = [f"{REF_PREFIX}/*"]
+    patterns = [f"{store.prefix}/*" for store in STORES if any(store_of(ref) is store for ref in refs)]
     for _ in range(SYNC_ATTEMPTS):
-        leases: dict[str, str] = {}
-        for pattern in patterns:
-            leases.update(_reconcile(pattern, None)[0])
+        leases, _ = _reconcile(patterns, None)
         wanted = {ref: sha for ref, sha in leases.items() if ref in refs}
         try:
             _push(wanted, set())
@@ -646,14 +701,16 @@ def publish(refs: set[str]) -> Synced:
 
 
 def sync(prune_after_days: int) -> Synced:
-    """Sync every gate record with origin: pull, merge runs, push what changed, and prune expired records.
+    """Sync every record, in every store, with origin: pull, merge runs, push what changed, and prune expired records.
 
     See `docs/specs/gate.md#store`.
     """
     before = _local_refs()
     pruned: set[str] = set()
     for _ in range(SYNC_ATTEMPTS):
-        leases, expired = _reconcile(f"{REF_PREFIX}/*", now() - timedelta(days=prune_after_days))
+        leases, expired = _reconcile(
+            [f"{store.prefix}/*" for store in STORES], now() - timedelta(days=prune_after_days)
+        )
         pruned |= expired
         try:
             _push(leases, expired)
@@ -682,11 +739,12 @@ def _counted(before: dict[str, str], pushed: set[str], pruned: set[str]) -> Sync
 
 
 def _local_refs() -> dict[str, str]:
-    return {ref: sha for sha, ref in git.for_each_ref(REF_PREFIX)}
+    """Every local record, in every store."""
+    return {ref: sha for store in STORES for sha, ref in git.for_each_ref(store.prefix)}
 
 
-def _reconcile(pattern: str, cutoff: datetime | None) -> tuple[dict[str, str], set[str]]:
-    """Fetch origin's refs matching `pattern` and resolve each against the local ref.
+def _reconcile(patterns: list[str], cutoff: datetime | None) -> tuple[dict[str, str], set[str]]:
+    """Fetch origin's refs matching each pattern, in one fetch, and resolve each against the local ref.
 
     Writes the resolved record locally: pulled, merged, or deleted when its
     newest run is older than `cutoff`. Returns each ref whose resolved state
@@ -695,10 +753,13 @@ def _reconcile(pattern: str, cutoff: datetime | None) -> tuple[dict[str, str], s
     delete. A record only this clone holds that has expired is dropped, not
     pushed.
     """
-    fetch_origin(pattern)
-    prefix = pattern.removesuffix("/*")
-    mine = {ref: sha for sha, ref in git.for_each_ref(prefix)}
-    theirs = {REF_PREFIX + ref[len(ORIGIN_MIRROR_PREFIX) :]: sha for sha, ref in git.for_each_ref(_mirror(prefix))}
+    fetch_origin(*patterns)
+    mine: dict[str, str] = {}
+    theirs: dict[str, str] = {}
+    for pattern in patterns:
+        store, prefix = store_of(pattern), pattern.removesuffix("/*")
+        mine.update({ref: sha for sha, ref in git.for_each_ref(prefix)})
+        theirs.update({store.unmirrored(ref): sha for sha, ref in git.for_each_ref(store.mirrored(prefix))})
     leases: dict[str, str] = {}
     expired: set[str] = set()
     for ref in sorted(mine.keys() | theirs.keys()):
@@ -751,5 +812,5 @@ def _reconciled(ref: str, sha: str, other: str) -> str:
     except GateError as e:
         print(f"warning: {REMOTE}'s {ref} is unreadable, so the local one replaces it: {e}", file=sys.stderr)
         return sha
-    name, _, key = ref[len(REF_PREFIX) + 1 :].rpartition("/")
+    name, _, key = ref[len(store_of(ref).prefix) + 1 :].rpartition("/")
     return _write_blob(name, key, runs)
