@@ -119,6 +119,25 @@ For ruff and eslint, a report costs you the terminal output, so only lint gates 
 want to track need one. A lint report names each file and rule code, so `gate stats` can list the
 files that keep failing.
 
+## Gate statistics
+
+`gate stats` reports on the runs in every record, local and `origin`'s:
+
+```sh
+tangier gate stats                   # the last 30 days, every gate
+tangier gate stats test --since 7d   # one group, one week
+tangier gate stats --ci --json       # CI runs only, as JSON
+```
+
+Each gate gets its runs, its pass rate, its median and 90th-percentile time for passes and
+failures, and its median load per CPU. Its **flaky keys** are the keys with both a pass and a
+failure: the same content gave both results. Then come the tests and files that failed most, for
+gates that write a report.
+
+The numbers have limits. A record keeps its newest 20 runs per key, and `gate sync` prunes it after
+`prune-after-days`. A verified or not-needed gate ran nothing, so it is not counted. A
+`--read-only` run writes no record, so a CI job that runs `--read-only` adds nothing to `--ci`.
+
 ## Scope and `*-inputs` packages
 
 A scope entry is a package: a SHA bucket or a tag. The scope must cover every file the commands

@@ -636,6 +636,40 @@ class OriginRecords:
         return self._runs[ref]
 
 
+def every_run(*, fetch: bool = True) -> list[tuple[Store, str, str, list[dict[str, object]]]]:
+    """Every record in every store, as (store, gate, key, runs): the local runs and origin's, merged.
+
+    Origin's are fetched in one call, unless `fetch` is false, in which case the
+    mirror is read as the last fetch left it. An origin that cannot be reached,
+    or a copy of a record that cannot be read, is skipped with a warning.
+    """
+    if fetch:
+        try:
+            fetch_origin(*(f"{store.prefix}/*" for store in STORES))
+        except git.GitError as e:
+            print(
+                f"warning: cannot read gate records from {REMOTE}, so its records count as last fetched: {e}",
+                file=sys.stderr,
+            )
+    found: list[tuple[Store, str, str, list[dict[str, object]]]] = []
+    for store in STORES:
+        blobs: dict[str, list[str]] = {}
+        for sha, ref in git.for_each_ref(store.prefix):
+            blobs.setdefault(ref, []).append(sha)
+        for sha, ref in git.for_each_ref(store.mirror):
+            blobs.setdefault(store.unmirrored(ref), []).append(sha)
+        for ref, shas in sorted(blobs.items()):
+            runs: list[dict[str, object]] = []
+            for sha in shas:
+                try:
+                    runs = merge_runs(runs, read_runs(sha))
+                except GateError as e:
+                    print(f"warning: skipped {ref}: {e}", file=sys.stderr)
+            name, _, key = ref[len(store.prefix) + 1 :].rpartition("/")
+            found.append((store, name, key, runs))
+    return found
+
+
 def lookup(
     name: str, key: str, origin: OriginRecords | None = None, accept: Sequence[Accept] = ()
 ) -> tuple[str | None, list[tuple[dict[str, object], bool]]]:

@@ -40,6 +40,15 @@ Ctrl-C in `gate run` cancels it.
   matches your working tree. Run the gate again.
 - `tangier gate cancel` stops the job.
 
+## Failure history
+
+Every failed run is recorded and published, under `refs/tangier/failures`. A failure never
+verifies a gate.
+
+- Before you debug a test failure, run `tangier gate stats <gate>`. When the gate shows flaky
+  keys and the failing test is in its top failing list, run the gate once more before you debug.
+  A test that fails again on the same content is a real failure.
+
 ## Selectors and groups
 
 `tangier gate run <group>.<member>` runs one member of a group. `tangier gate run <group>` runs

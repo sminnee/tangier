@@ -370,6 +370,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | `gate cancel` | Stop a running job. Takes `--job`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
 | `gate sync` | Sync gate and failure records with `origin`: pull, merge runs, push, and prune expired records. |
+| `gate stats [<selector> ...]` | Report how runs went: pass rates, durations, load, flaky keys, and the tests and files that fail most. Takes `--since`, `--ci`, `--local`, `--top`, `--no-fetch` and `--json`. See [Statistics](#statistics). |
 | `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept`, `--full` and `--summary`. |
 
 `gate run` has no `--head`. The commands test the checked-out tree, so the working tree is the only
@@ -473,6 +474,31 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
 - The status is one word, checked in this order: `verified` when the keyed content has a record,
   `not-needed` when the diff from the comparator does not need the gate, and `required`
   otherwise. A CI job runs the gate when the status is `required`. `[status-values]`
+## Statistics
+
+`gate stats` reads every pass and failure record and reports on the runs in them.
+
+- It reads the local records and `origin`'s, fetching both namespaces in one call, and merges each
+  ref's runs as `gate sync` does. `--no-fetch` reads the mirror as the last fetch left it. An
+  `origin` that cannot be read is a warning, and the local records still count. A run counts when
+  its `time` is within `--since`, which takes `90s`, `30m`, `8h` or `2d` and defaults to `30d`.
+  `--ci` counts only CI runs, and `--local` only dev machines. `[stats-filters]`
+- With no selector it reports every configured gate in config order, then, in name order, any
+  gate that only records name. Selectors work as for `gate run`. Each gate's row gives its runs, passes, failures
+  and pass rate. It also gives the median and nearest-rank 90th percentile `duration`, for passes
+  and failures apart, and the median load per CPU. A gate with no runs shows zero counts, and dashes for the rest.
+  `[stats]`
+- A flaky key is one with both a pass and a failure in the window: the same content gave both
+  outcomes. Each row counts its flaky keys. `[stats-flaky]`
+- After the table come the tests that failed most, across the gates, grouped by `classname` and
+  `test`. Each shows a count, its newest `file`, the gates it failed in, its `type`s, and when it
+  last failed. Then come the files that failed most, grouped by `file`. Each list holds `--top`
+  entries, default 20, most frequent first. Ties go to the most recent. `[stats-top-failures]`
+- A note says what the numbers leave out. A record keeps its newest 20 runs per key, and
+  `gate sync` prunes it after `prune-after-days`. A verified or not-needed gate ran nothing, so it
+  is not counted. `--json` prints the same figures as one object, with `gates`, `top_tests` and
+  `top_files`. It exits 0. `[stats-output]`
+
 ## Jobs
 
 `gate run --all` can take many minutes, and an agent's shell kills a command at its tool timeout.
