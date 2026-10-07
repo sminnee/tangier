@@ -339,13 +339,19 @@ def _run_one(
     if p.status == "verified":
         return finished("verified", 0, f"gate `{name}`: verified ({p.reason}), nothing to run")
 
+    spec = gate.spec_for(config, name)
     start = clock()
-    code = _run_commands(_runner(args), gate.spec_for(config, name), p.commands)
+    code = _run_commands(_runner(args), spec, p.commands)
     duration = clock() - start
     # Sampled as the gate ends. See `[run-load]`.
     load = ranon.load() or None
     if code != 0:
-        return finished("failed", code, f"gate `{name}`: failed in {jobs.took(duration)} (exit {code})", load=load)
+        line = f"gate `{name}`: failed in {jobs.took(duration)} (exit {code})"
+        if args.read_only:
+            return finished("failed", code, line, load=load)
+        # Keyed as planned, before the run, whatever the commands left behind. See `[failure-record]`.
+        ref = gate.write_failure(p, ranon.detect(), duration, load, code)
+        return finished("failed", code, line, ref=ref, load=load)
     if args.read_only:
         return finished(
             "passed", 0, f"gate `{name}`: passed in {jobs.took(duration)}, no record written (--read-only)", load=load

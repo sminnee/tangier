@@ -260,7 +260,7 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   `--accept` can match on them.
 
 - `gate run` writes a local ref. Once every gate in the invocation has run, an invocation that
-  wrote a record publishes it: it pulls and merges `origin`'s gate records, as `gate sync` does but
+  wrote a record, a pass or a [failure](#failure-records), publishes it: it pulls and merges `origin`'s gate records, as `gate sync` does but
   without pruning, and pushes only the refs it wrote, leased. A rejected push fetches and merges
   the written gates' refs alone and pushes again, up to 3 attempts. Other local records stay
   local. A failed publish is a warning that names `gate sync`, and the records stay local. The
@@ -292,6 +292,32 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
 - An `origin` that cannot be read counts as not verified, with a warning on stderr. The gate then
   runs. `[origin-unreachable]`
 
+### Failure records
+
+A failed run is recorded too, so `gate stats` can report on it. It never verifies a gate.
+
+- A run whose commands exit non-zero adds a run to the record at
+  `refs/tangier/failures/<gate>/<key>`. The key is the one the plan computed before the run,
+  whatever the commands left behind. The record has the pass record's shape: `format`, `gate`,
+  `key` and `runs`. Each run holds the pass fields, plus `code`, the exit code. `gate run`
+  writes no gate record for a failed run. `--read-only` and `--dry-run` write no failure record
+  either. `[failure-record]`
+- Failure records have their own namespace, because tangier 0.2 reads any run under
+  `refs/tangier/gates` as a pass. `gate verified`, `gate run` and `gate github-outputs` never read
+  them. A failed run then a pass at the same key is verified. `[failure-not-verified]`
+- A failure record publishes as a pass record does, by `[run-publishes]`. A publish fetches and
+  reconciles only the namespaces its records are in, so an invocation that only passed fetches no
+  failure records. In a job, the failed gate's `ref` in `gate status --json` is the failure
+  record's. `[failure-publishes]`
+- `gate sync` syncs, merges and prunes failure records with the same rules as gate records, in the
+  same fetch and the same atomic push. Its counts cover both kinds. A fetch mirrors `origin`'s failure
+  records into `refs/tangier/origin-failures/*`. `[sync-failures]`
+
+| Namespace | Holds | Mirror of `origin` |
+| --- | --- | --- |
+| `refs/tangier/gates/<gate>/<key>` | passes, which verify a gate | `refs/tangier/origin-gates/*` |
+| `refs/tangier/failures/<gate>/<key>` | failed runs, for `gate stats` | `refs/tangier/origin-failures/*` |
+
 A ref outside `refs/heads` and `refs/tags` triggers no workflow and no branch rule. Reading it needs
 `contents: read` only.
 
@@ -310,7 +336,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since` and `--json`. |
 | `gate cancel` | Stop a running job. Takes `--job`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
-| `gate sync` | Sync gate records with `origin`: pull, merge runs, push, and prune expired records. |
+| `gate sync` | Sync gate and failure records with `origin`: pull, merge runs, push, and prune expired records. |
 | `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept`, `--full` and `--summary`. |
 
 `gate run` has no `--head`. The commands test the checked-out tree, so the working tree is the only
@@ -358,7 +384,8 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
 - When the gate is verified, `gate run` says where the record is, runs nothing, and exits 0.
   `[run-reuses-record]`
 - Otherwise `gate run` runs each command with the gate's `env` added to the caller's environment.
-  It stops at the first failure, exits with that command's code, and writes no record. It prints
+  It stops at the first failure, exits with that command's code, and writes no gate record. It
+  records the failure instead, by `[failure-record]`. It prints
   ``gate `<name>`: failed in 3.2s (exit <code>)``. `[run-stops-at-first-failure]`
 - On success, `gate run` adds the run to the record, on a clean tree or a dirty one. It prints the
   time the commands took, the ref and the runner's kind:

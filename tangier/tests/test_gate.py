@@ -1541,6 +1541,8 @@ class TestStore(GateCase):
         self.assertIn(elsewhere, _gate_refs(self.repo))
 
     # SPEC: gate#run-publishes
+    # SPEC: gate#failure-publishes
+    # SPEC: gate#sync-failures
     def test_a_publish_race_retries_on_the_written_gate_alone(self) -> None:
         other = self.clone()
         ref = f"refs/tangier/gates/backend/{self.key()}"
@@ -1553,7 +1555,11 @@ class TestStore(GateCase):
         # The middle fetch is the other clone's sync.
         self.assertEqual(
             [c.args for c in fetch.call_args_list],
-            [("refs/tangier/gates/*",), ("refs/tangier/gates/*",), ("refs/tangier/gates/backend/*",)],
+            [
+                ("refs/tangier/gates/*",),
+                ("refs/tangier/gates/*", "refs/tangier/failures/*"),
+                ("refs/tangier/gates/backend/*",),
+            ],
         )
         self.assertEqual(
             [run["time"] for run in _runs(self.origin, ref)], ["2026-03-01T00:00:00+00:00", "2026-03-02T00:00:00+00:00"]
@@ -1609,12 +1615,17 @@ class TestStore(GateCase):
 
     # SPEC: gate#run-publishes
     # SPEC: gate#run-all
+    # SPEC: gate#failure-publishes
     def test_a_failing_gate_still_publishes_an_earlier_pass(self) -> None:
         _ = _commit(self.repo, "pipeline.toml", TestGroups.GROUPED)
         runner = RecordingRunner({tuple(TestGroups.CHECK): Result(3)})
         code, _, _ = self.tangier("gate", "run", "lint", "--base", self.base, runner=runner)
         self.assertEqual(code, 3)
-        self.assertEqual([ref.split("/")[3] for ref in self.origin_refs()], ["lint.format"])
+        # The failure publishes too, in its own store.
+        self.assertEqual(
+            [tuple(ref.split("/")[2:4]) for ref in self.origin_refs()],
+            [("failures", "lint.check"), ("gates", "lint.format")],
+        )
 
     # SPEC: gate#run-reuses-record
     def test_run_reuses_a_record_found_on_origin(self) -> None:

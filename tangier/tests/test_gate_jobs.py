@@ -606,6 +606,16 @@ class TestStatus(JobCase):
             },
         )
 
+    # SPEC: gate#failure-publishes
+    def test_status_json_gives_a_failed_gate_its_failure_record(self) -> None:
+        _ = self.run_gates("lint", runner=InProcessRunner({("bin/lint",): Result(3)}))
+        _, out, _ = self.tangier("gate", "status", "--json")
+        (data,) = json.loads(out)
+        key = self.job().gate("lint").key
+        self.assertEqual(
+            [(g["state"], g["ref"]) for g in data["gates"]], [("failed", f"refs/tangier/failures/lint/{key}")]
+        )
+
     # SPEC: gate#job-stale
     def test_a_result_is_stale_once_its_scope_changes(self) -> None:
         _ = self.run_gates("lint")
