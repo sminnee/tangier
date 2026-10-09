@@ -212,6 +212,19 @@ class JobCase(unittest.TestCase):
 
 class TestRun(JobCase):
     # SPEC: gate#job-run-waits
+    def test_a_publish_warning_reaches_the_waiter(self) -> None:
+        with mock.patch.object(gate, "publish", side_effect=gate.GateError("origin unreachable")):
+            code, out, err = self.run_gates("lint", "--wait")
+        self.assertEqual(code, 0)
+        self.assertIn("gate `lint`: passed", out)
+        self.assertEqual(
+            err, "warning: gate records stay local (origin unreachable); run `tangier gate sync` to retry\n"
+        )
+        # `gate wait` prints it again; `gate wait lint` asks only for the gate.
+        self.assertIn("gate records stay local", self.tangier("gate", "wait")[2])
+        self.assertEqual(self.tangier("gate", "wait", "lint")[2], "")
+
+    # SPEC: gate#job-run-waits
     def test_a_short_run_prints_the_job_and_each_result(self) -> None:
         code, out, _ = self.run_gates("--all")
         self.assertEqual(code, 0)

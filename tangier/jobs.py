@@ -682,6 +682,19 @@ def output(job: Job, name: str) -> str:
     return data.decode(errors="replace")
 
 
+def after_gates(job: Job) -> str:
+    """The log after the last gate's slice: what the job printed once its gates were done, as a failed publish.
+
+    Empty when a gate has no end, as one cut off by a cancel: its output has no bound.
+    """
+    ends = [g.end for g in job.gates]
+    if not ends or None in ends:
+        return ""
+    with open(job.log, "rb") as fh:
+        _ = fh.seek(max(e for e in ends if e is not None))
+        return fh.read().decode(errors="replace")
+
+
 def log_tail(job: Job, lines: int = 30) -> str:
     with open(job.log, "rb") as fh:
         return tail(fh.read().decode(errors="replace"), lines)
