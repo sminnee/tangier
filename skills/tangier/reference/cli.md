@@ -135,10 +135,10 @@ member. An unknown selector exits 2.
 
 | Command | Flags | Behaviour | Exit |
 | --- | --- | --- | --- |
-| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept`, `--wait` | Run each gate on the working tree, unless it is verified or not needed. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. Outside CI and `--dry-run`, start a job and return once it starts; `--wait` waits for it, up to an hour. While another job runs, `--wait` queues behind it, and a plain run starts nothing and exits 2. | the first non-zero code, 2 when another job runs, or 3 when the job is still running |
-| `gate wait [<selector>...]` | `--job N[,N...]` | Wait up to an hour for the latest job, or the listed jobs, or only the selected gates. On a terminal, stream the log. Elsewhere, print each gate's start and result and the log tail of a failure. After a failed gate that ran with more load than CPUs, print a load note. | 0 passed, 1 failed, 2 no such job, 3 still running |
-| `gate status` | `--job N[,N...]`, `--since` (default `8h`), `--json` | Print recent jobs, each gate's key and state, and which results are stale. The latest job always shows. | 0 |
-| `gate cancel` | `--job N` | Stop the running job's process group. Unfinished gates become `cancelled`. | 0 |
+| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept`, `--wait` | Run each gate on the working tree, unless it is verified or not needed. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. Outside CI and `--dry-run`, start a job and return once it starts; `--wait` waits for it, up to an hour. While another job in this worktree runs, `--wait` queues behind it, and a plain run starts nothing and exits 2. Over the machine's `max-running` limit, the job is `queued` until a slot frees. | the first non-zero code, 2 when another job runs, or 3 when the job is still queued or running |
+| `gate wait [<selector>...]` | `--job N[,N...]` | Wait up to an hour for this worktree's latest job, or the listed jobs from any worktree, or only the selected gates. Print a queued job's place when it changes. On a terminal, stream the log. Elsewhere, print each gate's start and result and the log tail of a failure. After a failed gate that ran with more load than CPUs, print a load note. For a job stopped by `gate cancel`, print who cancelled it and why. | 0 passed, 1 failed or cancelled, 2 no such job, 3 still queued or running |
+| `gate status` | `--job N[,N...]`, `--since` (default `8h`), `--running`, `--all`, `--json` | Print this worktree's recent jobs, each gate's key and state, and which results are stale. The latest job always shows. `--running` shows only queued and running jobs. `--all` shows every worktree's jobs, each with its worktree, after a `slots: 3 of 4 in use, 2 queued` line. | 0 |
+| `gate cancel` | `--job N` or `--all`, `--reason TEXT` | Stop this worktree's latest job, job N, or with `--all` every queued and running job on the machine, in one 10-second grace period. Unfinished gates become `cancelled`. Each job's waiter prints who cancelled it, with the reason. | 0 |
 | `gate list` | | Print every gate in config order, with a group's members indented under a `<group> (group)` line. | 0 |
 | `gate key [<selector>]` | `--head` | Print the key. A group, or no selector, prints `<name> <key>` per gate, and nothing when any gate fails closed. | 0, or 2 when a scope entry matches no file |
 | `gate verified <selector>` | `--head`, `--accept` | Print `verified` or `unverified`. A group needs every member. | 0 verified, 1 unverified |
@@ -175,6 +175,10 @@ Each gate prints one of:
 A failed run writes a failure record, `refs/tangier/failures/<gate>/<key>`, and publishes it. It
 never verifies a gate. `--read-only` and `--dry-run` write none. A gate with `junit = "<path>"`
 deletes that file before its commands run, then reads it.
+
+Jobs live in `~/.tangier/` (`TANGIER_HOME` moves it). `[jobs] max-running` in
+`~/.tangier/config.toml` caps how many run at once on the machine (default 4). See
+[setup.md](../setup.md#gate-jobs-on-this-machine).
 
 `gate run` exits 1 without a record when the working tree changed during the run. A gate with a
 placeholder exits 2 when `--base` has no merge base and no record covers the tree; `--full` avoids

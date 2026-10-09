@@ -80,9 +80,28 @@ tangier gate cancel               # stop the running job
 When a job prints a load warning, the machine is busier than it has CPUs, so a timeout may come
 from load and not the code.
 
-CI and `--dry-run` run inline, with no job. One job runs at a time in a worktree. Jobs live in the
-worktree's git directory, and old ones are pruned on each new job. See
-[the spec](../specs/gate.md#jobs).
+CI and `--dry-run` run inline, with no job. One job runs at a time in a worktree, and at most
+`max-running` (default 4) run at once on the machine, across every worktree and repo. A job over that limit is `queued`, and
+starts when a slot frees, oldest first. To see and stop what runs on the machine:
+
+```sh
+tangier gate status --running --all   # every queued and running job, with its worktree
+tangier gate cancel --all --reason "machine overloaded"
+```
+
+A waiter whose job was cancelled this way says who cancelled it and why, and asks not to start it
+again without a check.
+
+Jobs live in `~/.tangier/` (`TANGIER_HOME` moves it), and old ones are pruned on each new job. The
+limit is in `~/.tangier/config.toml`:
+
+```toml
+[jobs]
+max-running = 4
+```
+
+A job whose process dies, or a reboot, leaves nothing stuck: the next command that reads the jobs
+kills any gate commands the job left and marks it `died`. See [the spec](../specs/gate.md#jobs).
 
 ## Reporting failures
 

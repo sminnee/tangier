@@ -78,6 +78,20 @@ Done when `gate run <name>` passes and a second run prints `verified`.
 When the gate needs CI services, secrets or hardware, it is CI-only. Leave it out of the pre-push
 hook, and give its CI job `--accept ci`.
 
+## Gate jobs on this machine
+
+`gate run` keeps its jobs in `~/.tangier/`, for every repo on the machine. `TANGIER_HOME` moves
+it.
+
+- When an agent runs in a sandbox that allows writes only to the repo, add `~/.tangier` to the
+  sandbox's write allowlist. Without it, `gate run` fails with `cannot write ~/.tangier/...`.
+- To change how many jobs run at once (default 4), write `~/.tangier/config.toml`:
+
+  ```toml
+  [jobs]
+  max-running = 2
+  ```
+
 ## Checks
 
 Run each one. Done when all of them pass.

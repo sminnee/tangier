@@ -99,6 +99,11 @@ def git_dir() -> str:
     return _git_checked("rev-parse", "--absolute-git-dir").strip()
 
 
+def toplevel() -> str:
+    """This worktree's top directory, as an absolute path."""
+    return _git_checked("rev-parse", "--show-toplevel").strip()
+
+
 def rev_parse_tree(ref: str) -> str:
     """The tree SHA `ref` names. A commit names its tree."""
     return _git_checked("rev-parse", "--verify", f"{ref}^{{tree}}").strip()
