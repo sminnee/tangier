@@ -170,6 +170,7 @@ class RecordingRunner:
         capture: bool = True,
         env: dict[str, str] | None = None,
         check: bool = False,
+        pass_fds: tuple[int, ...] = (),
     ) -> Result:
         self.calls.append(list(argv))
         self.stdins.append(input)
