@@ -36,7 +36,10 @@ class Result:
 
 
 class Runner(Protocol):
-    """The seam. `check=False` by default, mirroring the ported bash's missing `set -e`."""
+    """The seam. `check=False` by default, mirroring the ported bash's missing `set -e`.
+
+    `pass_fds` stay open in the command, as in `spawn`.
+    """
 
     def run(
         self,
@@ -46,6 +49,7 @@ class Runner(Protocol):
         capture: bool = True,
         env: dict[str, str] | None = None,
         check: bool = False,
+        pass_fds: tuple[int, ...] = (),
     ) -> Result: ...
 
     def pipe(
@@ -92,6 +96,7 @@ class Subprocess:
         capture: bool = True,
         env: dict[str, str] | None = None,
         check: bool = False,
+        pass_fds: tuple[int, ...] = (),
     ) -> Result:
         if self.echo:
             print(" ".join(argv), file=sys.stderr)
@@ -102,6 +107,7 @@ class Subprocess:
             text=True,
             env=env,
             check=False,
+            pass_fds=pass_fds,
         )
         result = Result(proc.returncode, proc.stdout or "" if capture else "", proc.stderr or "" if capture else "")
         if check and result.returncode != 0:
@@ -194,6 +200,7 @@ class DryRun:
         capture: bool = True,
         env: dict[str, str] | None = None,
         check: bool = False,
+        pass_fds: tuple[int, ...] = (),
     ) -> Result:
         self.calls.append(list(argv))
         print("would run: " + " ".join(argv), file=sys.stderr)
