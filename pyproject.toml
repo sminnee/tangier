@@ -1,6 +1,6 @@
 [project]
 name = "tangier"
-version = "0.2.4"
+version = "0.2.5"
 description = "Smart CI for monorepos: change-scoped tests, local gate reuse, content-addressed package builds"
 readme = "README.md"
 requires-python = ">=3.11"
