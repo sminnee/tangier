@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import tangier
-from tangier import gate, git, jobs, junit, ranon, stats
+from tangier import gate, git, home, jobs, junit, ranon, stats
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs, write_summary
@@ -85,14 +85,16 @@ def _in_background(args: argparse.Namespace) -> bool:
     return not (args.dry_run or ranon.detect()["kind"] == "ci")
 
 
-def _run_inline(config: Config, args: argparse.Namespace, names: list[str], reporter: jobs.Reporter) -> int:
+def _run_inline(
+    config: Config, args: argparse.Namespace, names: list[str], reporter: jobs.Reporter, pass_fds: tuple[int, ...] = ()
+) -> int:
     # One read of origin for all gates, and none when every record is local.
     origin = gate.OriginRecords()
     first = 0
     written: set[str] = set()
     for i, name in enumerate(names):
         try:
-            code, ref = _run_one(config, args, name, origin, reporter)
+            code, ref = _run_one(config, args, name, origin, reporter, pass_fds)
         except (gate.GateError, git.GitError) as e:
             # Printed first, so the gate's slice of the job log holds the error.
             print(f"error: {e}", file=sys.stderr)
@@ -120,18 +122,27 @@ def _run_inline(config: Config, args: argparse.Namespace, names: list[str], repo
 
 
 def _run_as_job(config: Config, args: argparse.Namespace) -> int:
-    """The job process: the inline run, reporting to the job directory, then `done`.
+    """The job process: a slot from the machine-wide queue, the inline run reporting to the job directory, then `done`.
 
-    A gate still unfinished when `done` is written, after an unexpected error, ends `error`.
+    It holds the job's `procs` lock and passes it to every command it runs. A
+    gate still unfinished when `done` is written, after an unexpected error,
+    ends `error`. See `[job-queue]` and `[job-reap]`.
     """
     code = 2
+    held: list[int] = []
     try:
-        code = _run_inline(config, args, _selected(config, args), jobs.JobReporter(args.job_dir))
+        held.append(jobs.hold_procs(args.job_dir))
+        if not jobs.has_slot(args.job_dir):
+            held.append(jobs.claim_slot(args.job_dir, _runner(args), home.load_config().max_running))
+        code = _run_inline(config, args, _selected(config, args), jobs.JobReporter(args.job_dir), (held[0],))
     except gate.GateError as e:
         print(f"error: {e}", file=sys.stderr)
     finally:
         sys.stdout.flush()
         jobs.finish(args.job_dir, code)
+        # `done` first, so the next job never sees this one hold a slot it has finished with.
+        for fd in held:
+            os.close(fd)
     return code
 
 
@@ -143,14 +154,15 @@ def _start_job(config: Config, args: argparse.Namespace, names: list[str]) -> in
     waiter = _Waiter(_runner(args), _limit(args, WAIT_LIMIT if args.wait else 0), cancels=True)
 
     def start_and_wait() -> int:
-        job, alive = _create_when_free(config, args, names, waiter)
+        job, held = _create_when_free(config, args, names, waiter)
         waiter.started = job
         try:
             jobs.set_pid(
-                job, waiter.runner.spawn(_job_argv(args.argv, job.dir), log=job.log, env=_job_env(), pass_fds=(alive,))
+                job, waiter.runner.spawn(_job_argv(args.argv, job.dir), log=job.log, env=_job_env(), pass_fds=held)
             )
         finally:
-            os.close(alive)
+            for fd in held:
+                os.close(fd)
         print(f"job {job.id}: {', '.join(names)} ({job.commit_label})", flush=True)
         _warn_load()
         return _wait(config, [job], None, waiter, run=True)
@@ -212,13 +224,17 @@ class _Waiter:
 
 def _create_when_free(
     config: Config, args: argparse.Namespace, names: list[str], waiter: _Waiter
-) -> tuple[jobs.Job, int]:
-    """Create the job, and lock its `alive` file, once no other job runs. Returns the job and the lock.
+) -> tuple[jobs.Job, tuple[int, ...]]:
+    """Create the job, and lock its `alive` file, once no other job runs here. Returns the job and the locks to pass on.
+
+    A free slot is taken under the same lock, so a job never reads as queued while a slot is free. See `[job-queue]`.
 
     A running job is waited for, quietly, until the waiter is done. Then this raises `jobs.JobBusy`.
     """
+    max_running = home.load_config().max_running
     announced = False
     while True:
+        jobs.reap(waiter.runner)
         # Keyed afresh on each try: the tree may have changed while the other job ran.
         snap = gate.snapshot()
         keys = {name: _key_or_blank(config, name, snap.tree) for name in names}
@@ -229,16 +245,25 @@ def _create_when_free(
                 other = busy.job
             else:
                 # Under the lock, so the job reads as running before another run looks.
+                held: list[int] = []
                 try:
-                    return job, jobs.hold_alive(job)
-                except BaseException:
-                    # A Ctrl-C here must not leave a job that reads as died.
-                    _ = jobs.finish(job.dir, jobs.CANCELLED_CODE, unfinished="cancelled")
+                    held.append(jobs.hold_alive(job))
+                    if (slot := jobs.claim_free(job.dir, max_running)) is not None:
+                        held.append(slot)
+                    return job, tuple(held)
+                except BaseException as e:
+                    # The job must not read as died: a Ctrl-C cancelled it, anything else is an error.
+                    for fd in held:
+                        os.close(fd)
+                    if isinstance(e, KeyboardInterrupt):
+                        _ = jobs.finish(job.dir, jobs.CANCELLED_CODE, unfinished="cancelled")
+                    else:
+                        _ = jobs.finish(job.dir, 2)
                     raise
         if not announced and waiter.left() != 0:
             print(f"job {other.id} is running: {other.phase()}; waiting for it before starting", flush=True)
             announced = True
-        while (now := jobs.find(other.id)) is not None and now.state == "running":
+        while (now := jobs.find(other.id)) is not None and now.state in jobs.ACTIVE:
             if waiter.done():
                 raise jobs.JobBusy(now)
             waiter.runner.sleep(POLL)
@@ -269,8 +294,8 @@ def _job_argv(argv: list[str], job_dir: str) -> list[str]:
 
 
 def _cancel_started(job: jobs.Job, runner: Runner) -> int:
-    """Cancel the job `gate run` started, unless it finished first."""
-    if not jobs.cancel(jobs.load(job.dir), runner):
+    """Cancel the job `gate run` started, unless it finished first. The caller knows why, so it gets no notice."""
+    if not jobs.cancel([jobs.load(job.dir)], runner):
         return _exit_code(jobs.load(job.dir), None, run=True)
     print(f"cancelled job {job.id}", file=sys.stderr)
     return jobs.CANCELLED_CODE
@@ -295,9 +320,14 @@ def _selected(config: Config, args: argparse.Namespace) -> list[str]:
 
 
 def _run_one(
-    config: Config, args: argparse.Namespace, name: str, origin: gate.OriginRecords, reporter: jobs.Reporter
+    config: Config,
+    args: argparse.Namespace,
+    name: str,
+    origin: gate.OriginRecords,
+    reporter: jobs.Reporter,
+    pass_fds: tuple[int, ...],
 ) -> tuple[int, str | None]:
-    """Plan one gate, then run it unless it is verified or not needed.
+    """Plan one gate, then run it unless it is verified or not needed. Its commands get `pass_fds`.
 
     Returns its exit code, and the ref it wrote or None.
 
@@ -350,7 +380,7 @@ def _run_one(
         except OSError as e:
             raise gate.GateError(f"gate `{name}`: cannot delete the old JUnit report at {spec.junit}: {e}") from e
     start = clock()
-    code = _run_commands(_runner(args), spec, p.commands)
+    code = _run_commands(_runner(args), spec, p.commands, pass_fds)
     duration = clock() - start
     # Sampled as the gate ends. See `[run-load]`.
     load = ranon.load() or None
@@ -425,9 +455,15 @@ def _wait(
     reported: set[tuple[int, str]] = set()
     started: set[tuple[int, str]] = set()
     drift_warned: set[tuple[int, str]] = set()
+    places: dict[int, tuple[int, int] | None] = {}
     polls = 0
     while True:
         now = [_reload(job) for job in waiting]
+        if any(job.state in ("orphaned", "died") and job.code is None for job in now):
+            # Reap first, so a dead job's result is final when it is read.
+            jobs.reap(waiter.runner)
+            now = [_reload(job) for job in now]
+        _report_places(now, places)
         for job in now:
             if stream:
                 printed[job.id] = _stream_log(job, printed[job.id], whole=_settled(job, names))
@@ -441,6 +477,8 @@ def _wait(
             for job in now:
                 if stream and job.state == "died":
                     print(f"job {job.id} died: its process is gone, and it wrote no result")
+                if job.state == "cancelled" and (info := jobs.cancelled_info(job)):
+                    print(_cancel_notice(job, info), file=sys.stderr)
             return max(_exit_code(job, names, run=run) for job in now)
         if waiter.done():
             if waiter.stopped:
@@ -450,6 +488,30 @@ def _wait(
                     print(jobs.wait_hint(job))
             return STILL_RUNNING
         waiter.runner.sleep(POLL)
+
+
+def _report_places(now: list[jobs.Job], places: dict[int, tuple[int, int] | None]) -> None:
+    """Print a queued job's place in the queue when first seen, and each time it moves. See `[job-queue]`."""
+    for job in now:
+        place = jobs.queue_position(job) if job.state == "queued" else None
+        if place is not None and place != places.get(job.id):
+            print(f"job {job.id} is queued: {place[0]} of {place[1]}", flush=True)
+        places[job.id] = place
+
+
+def _cancel_notice(job: jobs.Job, info: dict[str, str]) -> str:
+    """What a waiter prints for a job someone cancelled with `gate cancel`. See `[cancel-notice]`."""
+    reason = f" (reason: {info['reason']})" if info.get("reason") else ""
+    try:
+        at = f" at {datetime.fromisoformat(info['time']).astimezone().strftime('%H:%M')}"
+    except (KeyError, TypeError, ValueError):
+        at = ""
+    return (
+        f"job {job.id} was cancelled by `{info.get('by', 'tangier gate cancel')}`{reason}{at}. "
+        "It may have been cancelled for a reason, such as an overloaded machine. "
+        "Before you start it again, check with the system administrator or your human user. "
+        "Or push the branch and let CI (GitHub Actions) run the gates."
+    )
 
 
 def _reload(job: jobs.Job) -> jobs.Job:
@@ -465,7 +527,7 @@ def _among(job: jobs.Job, names: list[str] | None) -> list[jobs.GateState]:
 
 
 def _settled(job: jobs.Job, names: list[str] | None) -> bool:
-    return job.state != "running" or all(g.finished for g in _among(job, names))
+    return job.state not in jobs.UNFINISHED or all(g.finished for g in _among(job, names))
 
 
 def _exit_code(job: jobs.Job, names: list[str] | None, *, run: bool) -> int:
@@ -544,11 +606,14 @@ def _note_load(g: jobs.GateState) -> None:
 def _print_tail(text: str, log: str) -> None:
     if text:
         print("  | " + text.replace("\n", "\n  | "))
-    print(f"  log: {os.path.relpath(log)}")
+    print(f"  log: {home.tilde(log)}")
 
 
 def _warn_drift(config: Config, now: list[jobs.Job], warned: set[tuple[int, str]]) -> None:
     """Warn, once per gate, when a running gate's key no longer matches the working tree."""
+    # Another worktree's job keys another tree.
+    mine = jobs.here()
+    now = [job for job in now if job.git_dir == mine]
     if not any(job.current() for job in now):
         return
     try:
@@ -585,7 +650,7 @@ def _jobs_named(ids: list[int] | None) -> list[jobs.Job]:
     for job_id in ids:
         job = jobs.find(job_id)
         if job is None:
-            raise gate.GateError(f"no job {job_id} in this worktree (pruned?)")
+            raise gate.GateError(f"no job {job_id} (pruned?)")
         found.append(job)
     return found
 
@@ -604,7 +669,11 @@ def cmd_wait(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_status(config: Config, args: argparse.Namespace) -> int:
-    """Each recent job and its gates, newest first, with what no longer applies to the working tree. Exits 0."""
+    """Each recent job and its gates, newest first, with what no longer applies to the working tree. Exits 0.
+
+    `--all` shows the jobs of every worktree on the machine, and `--running` only the unfinished ones.
+    """
+    jobs.reap(_runner(args))
     missing: list[int] = []
     if args.job is not None:
         shown = []
@@ -615,34 +684,59 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
             else:
                 shown.append(job)
     else:
-        every = jobs.all_jobs()
+        every = jobs.all_jobs(worktree_only=not args.all)
         cutoff = gate.now() - args.since
-        shown = [j for j in every if j.state == "running" or datetime.fromisoformat(j.started) >= cutoff]
-        if not shown and every:
+        shown = [
+            j
+            for j in every
+            if j.state in jobs.UNFINISHED or (not args.running and datetime.fromisoformat(j.started) >= cutoff)
+        ]
+        if not shown and every and not args.running:
             shown = [every[0]]
+    # Only this worktree's jobs can be stale against its tree.
+    mine = jobs.here()
     try:
-        tree, keys = jobs.current_keys(config, sorted({g.name for job in shown for g in job.gates}))
+        tree, keys = jobs.current_keys(
+            config, sorted({g.name for job in shown if job.git_dir == mine for g in job.gates})
+        )
     except gate.GateError:
         tree, keys = None, None
+
+    def local(job: jobs.Job) -> tuple[str | None, dict[str, str | None] | None, bool]:
+        return (tree, keys, True) if job.git_dir == mine else (None, None, False)
+
     if args.json:
-        data: list[dict[str, object]] = [_job_json(job, tree, keys) for job in shown]
+        data: list[dict[str, object]] = [_job_json(job, *local(job)) for job in shown]
         data += [{"id": job_id, "state": "not-found"} for job_id in missing]
         print(json.dumps(data, indent=2))
         return 0
+    if args.all:
+        print(_slots_line())
     if not shown and not missing:
         print("no jobs")
     for job in shown:
-        _print_job(job, tree, keys)
+        _print_job(job, *local(job)[:2], where=args.all)
     for job_id in missing:
         print(f"job {job_id}: not found (pruned?)")
     return 0
 
 
-def _print_job(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | None) -> None:
+def _slots_line() -> str:
+    """`slots: 3 of 4 in use, 2 queued`, for the whole machine."""
+    queued = sum(1 for j in jobs.all_jobs(worktree_only=False) if j.state == "queued")
+    return f"slots: {jobs.slots_in_use()} of {home.load_config().max_running} in use, {queued} queued"
+
+
+def _print_job(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | None, *, where: bool = False) -> None:
     state = job.state
-    when = f"started {_ago(job.started)}" if state == "running" else _ago(job.started)
-    stale = "  stale" if tree is not None and state != "running" and tree != job.tree else ""
-    print(f"job {job.id:<3} {state:<9} {job.commit_label:<14} {when}{stale}")
+    unfinished = state in jobs.UNFINISHED
+    when = f"started {_ago(job.started)}" if unfinished else _ago(job.started)
+    notes = ["stale"] if tree is not None and not unfinished and tree != job.tree else []
+    if job.state == "queued" and (place := jobs.queue_position(job)) is not None:
+        notes.append(f"queue {place[0]} of {place[1]}")
+    if where:
+        notes.append(home.tilde(job.worktree) or "(worktree unknown)")
+    print(f"job {job.id:<3} {state:<9} {job.commit_label:<14} {'  '.join([when, *notes])}")
     width = max((len(g.name) for g in job.gates), default=0)
     for g in job.gates:
         gstate = job.effective(g)
@@ -653,14 +747,18 @@ def _print_job(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | No
         if keys is not None and gstate != "died" and jobs.stale(g, keys):
             notes.append("stale")
         if gstate not in (*jobs.OK, "running", "pending", "cancelled"):
-            notes.append(f"log: {os.path.relpath(job.log)}")
+            notes.append(f"log: {home.tilde(job.log)}")
         took = jobs.running_for(g.started, g.ended) if gstate != "pending" else ""
         line = f"  {g.name:<{width}}  {g.key[:8] or '-':<8}  {label:<11} {took:<6}  {'  '.join(notes)}"
         print(line.rstrip())
 
 
-def _job_json(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | None) -> dict[str, object]:
+def _job_json(
+    job: jobs.Job, tree: str | None, keys: dict[str, str | None] | None, local: bool = True
+) -> dict[str, object]:
+    """The job as `status --json` prints it. `stale` and `drift` are null for a job in another worktree."""
     state = job.state
+    place = jobs.queue_position(job) if state == "queued" else None
     return {
         "id": job.id,
         "state": state,
@@ -671,8 +769,12 @@ def _job_json(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | Non
         "base": job.base,
         "started": job.started,
         "code": job.code,
-        "stale": tree is not None and state != "running" and tree != job.tree,
+        "stale": (tree is not None and state not in jobs.UNFINISHED and tree != job.tree) if local else None,
         "log": job.log,
+        "worktree": job.worktree,
+        "git_dir": job.git_dir,
+        "queue_position": place[0] if place else None,
+        "cancelled": jobs.cancelled_info(job),
         "gates": [
             {
                 "name": g.name,
@@ -683,8 +785,10 @@ def _job_json(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | Non
                 "ended": g.ended,
                 "ref": g.ref,
                 "load": g.load,
-                "stale": keys is not None and jobs.stale(g, keys),
-                "drift": keys is not None and job.effective(g) == "running" and keys.get(g.name) != g.key,
+                "stale": (keys is not None and jobs.stale(g, keys)) if local else None,
+                "drift": (keys is not None and job.effective(g) == "running" and keys.get(g.name) != g.key)
+                if local
+                else None,
             }
             for g in job.gates
         ],
@@ -692,14 +796,29 @@ def _job_json(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | Non
 
 
 def cmd_cancel(config: Config, args: argparse.Namespace) -> int:
-    """Stop a running job. Its unfinished gates become `cancelled`."""
+    """Stop an unfinished job, or with `--all` every one on the machine. Its unfinished gates become `cancelled`.
+
+    Each job's waiter is told who cancelled it and why. See `[cancel-notice]`.
+    """
     del config
-    (job,) = _jobs_named(None if args.job is None else [args.job])
-    if job.state != "running":
-        print(f"job {job.id} is not running ({job.state})")
-        return 0
-    jobs.cancel(job, _runner(args))
-    print(f"cancelled job {job.id}")
+    runner = _runner(args)
+    jobs.reap(runner)
+    if args.all:
+        targets = [j for j in jobs.all_jobs(worktree_only=False) if j.state in jobs.UNFINISHED]
+        if not targets:
+            print("no job is queued or running")
+            return 0
+        by = "tangier gate cancel --all"
+    else:
+        (job,) = _jobs_named(None if args.job is None else [args.job])
+        if job.state not in jobs.UNFINISHED:
+            print(f"job {job.id} is not running ({job.state})")
+            return 0
+        targets = [job]
+        by = "tangier gate cancel" + ("" if args.job is None else f" --job {args.job}")
+    for job in jobs.cancel(targets, runner, by=by, reason=args.reason):
+        where = f" ({home.tilde(job.worktree)})" if args.all and job.worktree else ""
+        print(f"cancelled job {job.id}{where}")
     return 0
 
 
@@ -744,11 +863,11 @@ def _ran_on(run: dict[str, object]) -> str:
     return " ".join(str(part) for part in [*parts, run.get("time"), took] if part)
 
 
-def _run_commands(runner: Runner, spec: GateSpec, commands: list[list[str]]) -> int:
-    """Run each command in turn. Returns the first non-zero exit code, or 0."""
+def _run_commands(runner: Runner, spec: GateSpec, commands: list[list[str]], pass_fds: tuple[int, ...]) -> int:
+    """Run each command in turn, with `pass_fds` open in it. Returns the first non-zero exit code, or 0."""
     env = {**os.environ, **spec.env}
     for argv in commands:
-        result = runner.run(argv, capture=False, env=env)
+        result = runner.run(argv, capture=False, env=env, pass_fds=pass_fds)
         if not result.ok:
             return result.returncode
     return 0
@@ -1092,11 +1211,16 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         metavar="AGE",
         help="jobs started this recently (default: 8h)",
     )
+    _ = sp.add_argument("--running", action="store_true", help="only queued and running jobs")
+    _ = sp.add_argument("--all", action="store_true", help="the jobs of every worktree on this machine")
     _ = sp.add_argument("--json", action="store_true", help="print the jobs as JSON, with full keys and record refs")
     sp.set_defaults(func=cmd_status)
 
-    cp = gsub.add_parser("cancel", help="stop a running gate job")
-    _ = cp.add_argument("--job", type=int, default=None, metavar="N", help="the job (default: the latest)")
+    cp = gsub.add_parser("cancel", help="stop a queued or running gate job")
+    which = cp.add_mutually_exclusive_group()
+    _ = which.add_argument("--job", type=int, default=None, metavar="N", help="the job (default: the latest here)")
+    _ = which.add_argument("--all", action="store_true", help="every queued and running job on this machine")
+    _ = cp.add_argument("--reason", default=None, metavar="TEXT", help="why, for the jobs' waiters to print")
     cp.set_defaults(func=cmd_cancel)
 
     vp = gsub.add_parser("verified", help="has this gate passed? prints verified/unverified, exits 0/1")

@@ -1,21 +1,31 @@
 """Gate jobs: a `gate run` that outlives the shell that started it. See `docs/specs/gate.md#jobs`.
 
-A job is a directory under `<git-dir>/tangier/jobs/<id>/`:
+Every job on the machine is a directory under `~/.tangier/jobs/<id>/` (see `home`):
 
-  job.json    what ran: id, pid, argv, gates, base, the commit and tree, dirty, started
-  gates.json  each gate's state, start and end, exit code, key, and where its output starts
-  output.log  the job's combined stdout and stderr
-  alive       locked for as long as the job process lives
-  done        written last, holding the job's exit code
+  job.json        what ran: id, pid, argv, gates, base, the commit and tree, dirty, started,
+                  and the worktree and git directory it ran in
+  gates.json      each gate's state, start and end, exit code, key, and where its output starts
+  output.log      the job's combined stdout and stderr
+  alive           locked for as long as the job process lives
+  procs           locked by the job process and every command it runs
+  slot            written when the job leaves the queue and holds a slot
+  cancelled.json  who cancelled the job, and why; written by `gate cancel`
+  ended.json      written when a reaper finalized a job whose process died
+  done            written last, holding the job's exit code
+
+At most `max-running` jobs hold a slot, a lock on `~/.tangier/slots/<i>`. The
+rest wait in a queue, oldest first. Liveness comes from kernel locks only,
+never a bare pid: a lock is released when its process dies, however it dies.
 
 The job process writes `gates.json` through a `Reporter`. Every other command
-only reads the directory, apart from `cancel` and `prune`.
+only reads the directory, apart from `cancel`, `reap`, `prune` and the migration.
 """
 
 from __future__ import annotations
 
 import contextlib
 import fcntl
+import getpass
 import json
 import os
 import shutil
@@ -25,7 +35,7 @@ from collections.abc import Generator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
-from tangier import gate, git
+from tangier import gate, git, home
 from tangier.config import Config
 from tangier.runner import Runner
 
@@ -34,11 +44,18 @@ FINISHED = ("passed", "failed", "not-needed", "verified", "unrecorded", "error",
 # The finished states that count as a pass.
 OK = ("passed", "not-needed", "verified")
 
-# The automatic prune: finished jobs past KEEP_FOR, then the oldest while the logs pass
-# MAX_LOG_BYTES. The newest KEEP_LATEST always stay.
+# A job that has not finished. `stopping`: a cancel is stopping it. `orphaned`: the job process is
+# gone, but commands it ran are not.
+ACTIVE = ("queued", "running", "stopping")
+UNFINISHED = (*ACTIVE, "orphaned")
+
+# The automatic prune's limits. See `prune_auto`.
 KEEP_LATEST = 5
 KEEP_FOR = timedelta(hours=24)
-MAX_LOG_BYTES = 50 * 1024 * 1024
+MAX_LOG_BYTES = 200 * 1024 * 1024
+
+# How often a queued job looks for a free slot.
+QUEUE_POLL = 1
 
 # How long `cancel` waits after SIGTERM before it sends SIGKILL.
 CANCEL_GRACE = 10
@@ -95,10 +112,13 @@ class Job:
     tree: str
     dirty: bool
     started: str
+    # The worktree's top directory and its git directory, both resolved. Empty in a job from before they were kept.
+    worktree: str = ""
+    git_dir: str = ""
     gates: list[GateState] = field(default_factory=list)
     # The exit code from `done`, or None while the job has not finished.
     code: int | None = None
-    # `running`, `died`, `cancelled`, `passed` or `failed`, as `load` read it.
+    # `queued`, `running`, `orphaned`, `died`, `cancelled`, `passed` or `failed`, as `load` read it.
     state: str = "running"
 
     @property
@@ -118,7 +138,14 @@ class Job:
         return next((g for g in self.gates if g.state == "running"), None)
 
     def phase(self) -> str:
-        """A running job's phase: `<gate> (<time>)`, `starting`, or, once its gates are done, `publishing records`."""
+        """A job's phase: `queued (...)`, `<gate> (<time>)`, `starting`, or after its gates `publishing records`.
+
+        A queued job's phase is its place in the queue and the slots in use.
+        """
+        if self.state == "queued":
+            position, length = queue_position(self) or (0, 0)
+            limit = home.load_config().max_running
+            return f"queued ({position} of {length}; {slots_in_use()} of {limit} slots in use)"
         current = self.current()
         if current is not None and current.started:
             return f"{current.name} ({running_for(current.started, None)})"
@@ -132,29 +159,42 @@ class Job:
 
 
 def root() -> str:
-    return os.path.join(git.git_dir(), "tangier", "jobs")
+    return os.path.join(home.root(), "jobs")
+
+
+def _slots() -> str:
+    return os.path.join(home.root(), "slots")
+
+
+def here() -> str:
+    """This worktree's git directory, resolved, as a job's `git_dir` holds it."""
+    return os.path.realpath(git.git_dir())
 
 
 @contextlib.contextmanager
 def lock() -> Generator[None]:
-    """Hold the jobs lock, so checking for a running job and creating one is one step."""
-    os.makedirs(root(), exist_ok=True)
-    with open(os.path.join(root(), "lock"), "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+    """Hold the machine-wide jobs lock, so checking the jobs and changing them is one step. It is not re-entrant."""
+    home.makedirs(root())
+    path = os.path.join(root(), "lock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except PermissionError as e:
+        raise home.unwritable(path, e) from e
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def wait_hint(job: Job) -> str:
     """What to run about a job left running. Every path that leaves one running prints this. See `[job-wait-hint]`."""
     return (
-        f"job {job.id} is still running in the background: {job.phase()}.\n"
+        f"job {job.id} is in the background: {job.phase()}.\n"
         f"Run `tangier gate wait --job {job.id}` to keep waiting (up to an hour; exits 0 if every gate passed, "
-        "1 if one failed, 3 if still running).\n"
+        "1 if one failed or it was cancelled, 3 if still queued or running).\n"
         "`tangier gate status` shows progress; `tangier gate cancel` stops it.\n"
-        f"Full output: {os.path.relpath(job.log)}"
+        f"Full output: {home.tilde(job.log)}"
     )
 
 
@@ -175,19 +215,20 @@ def running_for(start: str | None, end: str | None) -> str:
 
 
 def running() -> Job | None:
-    """The job running in this worktree, if one is."""
-    return next((j for j in all_jobs() if j.state == "running"), None)
+    """The unfinished job in this worktree, queued or running, if there is one."""
+    return next((j for j in all_jobs() if j.state in UNFINISHED), None)
 
 
 def create(argv: list[str], base: str, snap: gate.Snapshot, keys: dict[str, str]) -> Job:
     """A new job for the gates in `keys`, in order, each pending. Call under `lock()`.
 
-    Raises `JobBusy` while another job is running. See `[job-one-per-worktree]`.
+    Raises `JobBusy` while another job in this worktree has not finished. See `[job-one-per-worktree]`.
     """
     busy = running()
     if busy is not None:
         raise JobBusy(busy)
-    os.makedirs(root(), exist_ok=True)
+    home.makedirs(root())
+    _ = migrate_legacy()
     job_id = _next_id()
     job = Job(
         dir=os.path.join(root(), str(job_id)),
@@ -199,6 +240,8 @@ def create(argv: list[str], base: str, snap: gate.Snapshot, keys: dict[str, str]
         tree=snap.tree,
         dirty=snap.dirty,
         started=gate.now().isoformat(),
+        worktree=os.path.realpath(git.toplevel()),
+        git_dir=here(),
         gates=[GateState(name, key) for name, key in keys.items()],
     )
     os.makedirs(job.dir)
@@ -216,15 +259,42 @@ def hold_alive(job: Job) -> int:
     reads as alive from before it is spawned until it exits, however it exits.
     A reused pid cannot fake it. Close this copy once the job holds its own.
     """
-    fd = os.open(os.path.join(job.dir, "alive"), os.O_RDWR | os.O_CREAT, 0o644)
+    return _hold(os.path.join(job.dir, "alive"))
+
+
+def hold_procs(job_dir: str) -> int:
+    """Lock the job's `procs` file and return the descriptor, for the job process to pass to each command it runs.
+
+    The commands and what they start inherit it, so the lock outlives a job
+    process that dies while its commands run. See `[job-reap]`.
+    """
+    return _hold(os.path.join(job_dir, "procs"))
+
+
+def _hold(path: str) -> int:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     fcntl.flock(fd, fcntl.LOCK_EX)
     return fd
 
 
 def alive(job_dir: str) -> bool:
     """Whether some process still holds the job's `alive` lock."""
+    return _held(os.path.join(job_dir, "alive"))
+
+
+def procs(job_dir: str) -> bool:
+    """Whether some command the job ran still holds its `procs` lock."""
+    return _held(os.path.join(job_dir, "procs"))
+
+
+def _busy(job_dir: str) -> bool:
+    """Whether any process of the job is left: the job process, or a command it ran."""
+    return alive(job_dir) or procs(job_dir)
+
+
+def _held(path: str) -> bool:
     try:
-        fd = os.open(os.path.join(job_dir, "alive"), os.O_RDONLY)
+        fd = os.open(path, os.O_RDONLY)
     except FileNotFoundError:
         return False
     try:
@@ -271,7 +341,14 @@ def load(job_dir: str) -> Job:
         job.code = _read_done(job_dir)
         job.gates = _read_gates(job_dir)
     if job.code is None:
-        job.state = "running" if alive(job_dir) else "died"
+        if _held(os.path.join(job_dir, "stopping")):
+            job.state = "stopping"
+        elif alive(job_dir):
+            job.state = "running" if has_slot(job_dir) else "queued"
+        else:
+            job.state = "orphaned" if procs(job_dir) else "died"
+    elif os.path.exists(os.path.join(job_dir, "ended.json")):
+        job.state = "died"
     elif any(g.state == "cancelled" for g in job.gates):
         job.state = "cancelled"
     else:
@@ -295,15 +372,26 @@ def find(job_id: int) -> Job | None:
         return None
 
 
-def all_jobs() -> list[Job]:
-    """Every readable job in this worktree, newest first."""
+def all_jobs(*, worktree_only: bool = True) -> list[Job]:
+    """Every readable job in this worktree, or with `worktree_only=False` on the machine, newest first."""
+    mine = here() if worktree_only else None
     found = (find(job_id) for job_id in reversed(_ids()))
-    return [job for job in found if job is not None]
+    return [job for job in found if job is not None and (mine is None or job.git_dir == mine)]
 
 
 def latest() -> Job | None:
     jobs = all_jobs()
     return jobs[0] if jobs else None
+
+
+def cancelled_info(job: Job) -> dict[str, str] | None:
+    """Who cancelled the job, with what, why and when, as `gate cancel` wrote it. None for no such file."""
+    try:
+        with open(os.path.join(job.dir, "cancelled.json")) as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _write_job(job: Job) -> None:
@@ -412,26 +500,163 @@ class JobReporter(Reporter):
         _write_gates(self.dir, self.gates)
 
 
-def cancel(job: Job, runner: Runner) -> bool:
-    """Stop the job's process group: SIGTERM, then SIGKILL after `CANCEL_GRACE` seconds.
+def cancel(targets: list[Job], runner: Runner, *, by: str | None = None, reason: str | None = None) -> list[Job]:
+    """Stop each job's process group: SIGTERM, then SIGKILL after `CANCEL_GRACE` seconds. Returns the jobs it cancelled.
 
-    Every unfinished gate becomes `cancelled`. See `[cancel]` for a gate that
-    escapes the signal. Returns False when the job finished first, and leaves
-    its result alone.
+    `by` and `reason` go into each job's `cancelled.json` for its waiter. A Ctrl-C passes no `by`.
+    A job that finished first, or that another cancel is stopping, is left alone. See `[cancel]`.
+
+    While it signals and waits it holds each job's `stopping` lock, not the jobs lock: the job
+    reads as `stopping`, so no reap reads it as died and it has no place in the queue, and every
+    other command carries on. A cancel that dies frees the locks, and the jobs are reaped.
     """
-    if alive(job.dir):
-        _killpg(job.pid, signal.SIGTERM)
-        waited = 0.0
-        while alive(job.dir) and waited < CANCEL_GRACE:
-            runner.sleep(CANCEL_POLL)
-            waited += CANCEL_POLL
-        if alive(job.dir):
-            _killpg(job.pid, signal.SIGKILL)
-        # The job must be gone before its files are rewritten.
-        while alive(job.dir) and waited < 2 * CANCEL_GRACE:
-            runner.sleep(CANCEL_POLL)
-            waited += CANCEL_POLL
-    return finish(job.dir, CANCELLED_CODE, unfinished="cancelled")
+    stopping: list[int] = []
+    try:
+        with lock():
+            mine = []
+            # Read again under the lock: the pid may have been set, or the job finished, since `targets` was read.
+            for j in (load(j.dir) for j in targets if _read_done(j.dir) is None):
+                fd = _try_hold(os.path.join(j.dir, "stopping"))
+                if fd is not None:
+                    stopping.append(fd)
+                    mine.append(j)
+            if by is not None:
+                info = {"by": by, "reason": reason, "user": _user(), "time": gate.now().isoformat()}
+                for j in mine:
+                    _write_atomic(os.path.join(j.dir, "cancelled.json"), json.dumps(info, indent=2))
+        _stop(mine, runner)
+        with lock():
+            cancelled = []
+            for j in mine:
+                if finish(j.dir, CANCELLED_CODE, unfinished="cancelled"):
+                    cancelled.append(j)
+                elif by is not None:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.remove(os.path.join(j.dir, "cancelled.json"))
+            return cancelled
+    finally:
+        for fd in stopping:
+            os.close(fd)
+
+
+def _try_hold(path: str) -> int | None:
+    """Lock `path` and return the descriptor, or None when another process holds it."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _user() -> str:
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):
+        return ""
+
+
+def _stop(targets: list[Job], runner: Runner) -> None:
+    """SIGTERM each job's group, then SIGKILL it until no process of the job is left. Each phase lasts `CANCEL_GRACE`.
+
+    A job is gone once both its `alive` and `procs` locks are free. One that
+    still holds one after both grace periods, as a command that left the group
+    but kept the lock, is left to itself.
+    """
+    for j in targets:
+        if _busy(j.dir):
+            _killpg(j.pid, signal.SIGTERM)
+    waited = 0.0
+    while any(_busy(j.dir) for j in targets) and waited < CANCEL_GRACE:
+        runner.sleep(CANCEL_POLL)
+        waited += CANCEL_POLL
+    # SIGKILL on each poll, for a command started in the group after the last one.
+    while (left := [j for j in targets if _busy(j.dir)]) and waited < 2 * CANCEL_GRACE:
+        for j in left:
+            _killpg(j.pid, signal.SIGKILL)
+        runner.sleep(CANCEL_POLL)
+        waited += CANCEL_POLL
+
+
+def reap(runner: Runner) -> list[Job]:
+    """Finalize every job whose process died, after killing the commands it left. Returns those jobs.
+
+    Every command that reads jobs reaps first, so a dead job never keeps a
+    slot or a place in the queue. See `[job-reap]`.
+    """
+    if not _ids():
+        return []
+    with lock():
+        return _reap_locked(runner)
+
+
+def _reap_locked(runner: Runner) -> list[Job]:
+    dead = [j for j in all_jobs(worktree_only=False) if j.state in ("orphaned", "died") and j.code is None]
+    # Kill first and write after, so a reap stopped part way can run again.
+    _stop([j for j in dead if j.state == "orphaned"], runner)
+    reaped = []
+    for j in dead:
+        # `ended.json` before `done`, which is written last, so the job never reads `failed` between the two.
+        ended = {"by": "reaper", "reason": "job process died", "time": gate.now().isoformat()}
+        _write_atomic(os.path.join(j.dir, "ended.json"), json.dumps(ended, indent=2))
+        _ = finish(j.dir, 1, unfinished="died")
+        reaped.append(j)
+    return reaped
+
+
+def claim_slot(job_dir: str, runner: Runner, max_running: int) -> int:
+    """Wait in the queue until this job may run, then hold a slot. Returns the slot's locked descriptor.
+
+    Keep it open while the job runs. Each poll reaps first. See `[job-queue]`.
+    """
+    while True:
+        with lock():
+            _ = _reap_locked(runner)
+            fd = claim_free(job_dir, max_running)
+        if fd is not None:
+            return fd
+        runner.sleep(QUEUE_POLL)
+
+
+def has_slot(job_dir: str) -> bool:
+    """Whether the job holds a slot: its parent took one before the spawn, or it took one itself."""
+    return os.path.exists(os.path.join(job_dir, "slot"))
+
+
+def claim_free(job_dir: str, max_running: int) -> int | None:
+    """A free slot's locked descriptor, when this job is first in the queue, or None. Call under `lock()`."""
+    first = next(iter(_queue()), None)
+    if first is None or first.id != int(os.path.basename(job_dir)):
+        return None
+    home.makedirs(_slots())
+    for i in range(max_running):
+        fd = _try_hold(os.path.join(_slots(), str(i)))
+        if fd is None:
+            continue
+        try:
+            _write_atomic(os.path.join(job_dir, "slot"), gate.now().isoformat())
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+    return None
+
+
+def _queue() -> list[Job]:
+    """Every queued job on the machine, oldest first."""
+    return [j for j in reversed(all_jobs(worktree_only=False)) if j.state == "queued"]
+
+
+def queue_position(job: Job) -> tuple[int, int] | None:
+    """The queued job's place in the queue, from 1, and the queue's length. None when it is not queued."""
+    queue = [j.id for j in _queue()]
+    return (queue.index(job.id) + 1, len(queue)) if job.id in queue else None
+
+
+def slots_in_use() -> int:
+    """How many jobs on the machine hold a slot."""
+    return sum(1 for j in all_jobs(worktree_only=False) if j.state == "running")
 
 
 def _killpg(pid: int, sig: signal.Signals) -> None:
@@ -489,16 +714,25 @@ def stale(g: GateState, keys: dict[str, str | None]) -> bool:
 
 
 def prune_auto() -> list[int]:
-    """Delete finished jobs older than `KEEP_FOR`, then the oldest while the logs pass `MAX_LOG_BYTES`.
+    """Delete finished jobs past `KEEP_FOR` or whose worktree is gone, then the oldest while logs pass `MAX_LOG_BYTES`.
 
-    The newest `KEEP_LATEST` jobs and any running job always stay.
+    The newest `KEEP_LATEST` jobs of each worktree, unless it is gone, and
+    every unfinished job always stay. See `[job-prune]`.
     """
-    jobs = all_jobs()
-    candidates = [j for j in jobs[KEEP_LATEST:] if j.state != "running"]
+    jobs = all_jobs(worktree_only=False)
+    newest: dict[str, int] = {}
+    latest: set[int] = set()
+    for j in jobs:
+        newest[j.git_dir] = newest.get(j.git_dir, 0) + 1
+        if newest[j.git_dir] <= KEEP_LATEST:
+            latest.add(j.id)
+    finished = [j for j in jobs if j.state not in UNFINISHED]
+    gone = [j for j in finished if j.worktree and not os.path.isdir(j.worktree)]
     cutoff = gate.now() - KEEP_FOR
-    old = [j for j in candidates if _started(j) < cutoff]
-    kept = [j for j in candidates if j not in old]
-    total = sum(_size(j.log) for j in jobs if j not in old)
+    old = gone + [j for j in finished if j not in gone and j.id not in latest and _started(j) < cutoff]
+    deleted = {j.id for j in old}
+    kept = [j for j in finished if j.id not in deleted and j.id not in latest]
+    total = sum(_size(j.log) for j in jobs if j.id not in deleted)
     # Oldest first.
     for j in reversed(kept):
         if total <= MAX_LOG_BYTES:
@@ -506,6 +740,49 @@ def prune_auto() -> list[int]:
         old.append(j)
         total -= _size(j.log)
     return _delete(old)
+
+
+def migrate_legacy() -> list[int]:
+    """Move this worktree's jobs from `<git-dir>/tangier/jobs/` into `root()`, with new IDs. Returns the new IDs.
+
+    Call under `lock()`. It also holds the legacy folder's own lock, so an
+    older tangier cannot create a job there meanwhile. A legacy job still
+    running stays, as its process writes to its old path, and moves on a later
+    run. The legacy folder goes once it holds no job. See `[job-migrate]`.
+    """
+    legacy = os.path.join(git.git_dir(), "tangier", "jobs")
+    if not os.path.isdir(legacy):
+        return []
+    with open(os.path.join(legacy, "lock"), "a") as legacy_lock:
+        fcntl.flock(legacy_lock, fcntl.LOCK_EX)
+        return _migrate(legacy)
+
+
+def _migrate(legacy: str) -> list[int]:
+    moved = []
+    worktree, mine = os.path.realpath(git.toplevel()), here()
+    for old_id in sorted(int(n) for n in os.listdir(legacy) if n.isdigit()):
+        src = os.path.join(legacy, str(old_id))
+        if alive(src):
+            continue
+        try:
+            with open(os.path.join(src, "job.json")) as fh:
+                data = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            # Unreadable, so no command would show it.
+            shutil.rmtree(src, ignore_errors=True)
+            continue
+        job_id = _next_id()
+        # Rewritten before the move, so a moved job always has its new ID and worktree.
+        data.update(id=job_id, worktree=worktree, git_dir=mine)
+        _write_atomic(os.path.join(src, "job.json"), json.dumps(data, indent=2))
+        _ = shutil.move(src, os.path.join(root(), str(job_id)))
+        moved.append(job_id)
+    if not any(n.isdigit() for n in os.listdir(legacy)):
+        shutil.rmtree(legacy, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            os.rmdir(os.path.dirname(legacy))
+    return moved
 
 
 def _delete(jobs: list[Job]) -> list[int]:

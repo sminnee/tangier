@@ -33,9 +33,15 @@ Ctrl-C in `gate run` cancels it.
   which waits up to an hour. Do not write a loop around it.
 - A second `gate run --wait` queues behind the running job, then starts its own. A second
   `gate run` without `--wait` starts nothing and exits 2, with the running job's wait hint.
+- At most a few jobs run at once on the machine, across every worktree. A job over the limit is
+  `queued`, and exit 3 can mean it is still queued. Keep waiting with the printed `gate wait` command.
+- When a job sits in the queue, or a gate times out under load, run
+  `tangier gate status --running --all` to see what else runs on the machine.
+- When a waiter prints `job <n> was cancelled by ...`, do not start the job again until the human
+  says so. Offer to push the branch and let CI run the gates instead.
 - When a gate fails on a timeout, look for a `load average` warning or note first. Load above the
   CPU count means other work slowed the gate. Rerun when load is lower before you debug the code.
-- Do not edit the worktree while a job runs. A gate whose tree changes under it writes no record.
+- Do not edit the worktree while a job is queued or runs. A gate whose tree changes under it writes no record.
 - Run `tangier gate status` to see each recent job and its gates. A `stale` result no longer
   matches your working tree. Run the gate again.
 - `tangier gate cancel` stops the job.

@@ -522,15 +522,17 @@ to an hour.
   A signal the caller ignores, as under `nohup`, stays ignored. The hint reads:
 
   ```
-  job 11 is still running in the background: test (4m05s).
-  Run `tangier gate wait --job 11` to keep waiting (up to an hour; exits 0 if every gate passed, 1 if one failed, 3 if still running).
+  job 11 is in the background: test (4m05s).
+  Run `tangier gate wait --job 11` to keep waiting (up to an hour; exits 0 if every gate passed, 1 if one failed or it was cancelled, 3 if still queued or running).
   `tangier gate status` shows progress; `tangier gate cancel` stops it.
-  Full output: .git/tangier/jobs/11/output.log
+  Full output: ~/.tangier/jobs/11/output.log
   ```
 
   The phase is the running gate and how long it has run, `starting` before the first gate, or
-  `publishing records` once every gate is done. The log path is relative to the current
-  directory. A SIGKILL cannot be caught, and prints nothing. `[job-wait-hint]`
+  `publishing records` once every gate is done. For a queued job, the phase is `queued (2 of 3; 4
+  of 4 slots in use)`: its place in the queue, the queue length, and the slots in use. The log path
+  shows the home directory as `~`. A SIGKILL cannot be caught, and prints nothing.
+  `[job-wait-hint]`
 - On a terminal, `gate run --wait` and `gate wait` stream the job log. Elsewhere they print
   ``gate `<name>`: started`` when a gate is first seen running, then its result line, and for a
   failure the last 30 lines of its output and the log path.
@@ -554,12 +556,21 @@ to an hour.
   ended in error, was cancelled or died, 2 for a usage error or no such job, and 3 when an hour
   passed with the job still running. Several jobs give the worst code. A Ctrl-C stops waiting,
   leaves the job running, and exits 130. `[wait-exit-codes]`
-- `gate status` prints one block per job, newest first: each job from the last `--since`
-  (default `8h`) and each running job. The latest job always shows. `--job 12,14` shows exactly
-  those jobs, and a missing one prints `job 9: not found (pruned?)`. The job line holds its
-  state and its commit, `<sha>[+dirty]`. Each gate line holds the gate's key, short, its state
-  and how long it ran. The key identifies the result, as the record ref does. `--json` gives the
-  full keys and each pass's record ref. It exits 0. `[job-status]`
+- `gate status` prints one block per job in this worktree, newest first: each job from the last
+  `--since` (default `8h`) and each queued or running job. The latest job always shows. `--job
+  12,14` shows exactly those jobs, from any worktree, and a missing one prints `job 9: not found
+  (pruned?)`. `--running` shows only queued and running jobs. The job line holds its state
+  (`queued`, `running`, `stopping`, `passed`, `failed`, `cancelled` or `died`) and its commit,
+  `<sha>[+dirty]`. A queued job's line adds `queue 2 of 3`. Each gate line holds the gate's key,
+  short, its state and how long it ran. The key identifies the result, as the record ref does.
+  `--json` gives the full keys, each pass's record ref, and the job's `worktree`, `git_dir`,
+  `queue_position` (null unless queued) and `cancelled` (the `cancelled.json` data, or null). It
+  exits 0. `[job-status]`
+- `gate status --all` shows the jobs of every worktree on the machine. A first line gives the
+  slots, as `slots: 3 of 4 in use, 2 queued`, and each job line adds its worktree, with the home
+  directory as `~`. Only a job in this worktree can be `stale`: for another worktree's job,
+  `stale` and `drift` are null in `--json`. `gate status --running --all` shows what runs on the
+  machine now. `[status-all]`
 - A finished job is `stale` when the working tree differs from the tree it keyed. A gate result
   is `stale` when the gate's key for the working tree differs from the key it ran against. A
   stale result does not apply to the work in hand. `[job-stale]`
@@ -573,15 +584,66 @@ to an hour.
   --wait` and `gate wait` add `note: load average was 84.2 on 10 CPUs during this gate; if the
   failures are timeouts, rerun when load is lower`. `[run-load]`
 - A job whose process is gone without a result has `died`, and `wait` prints the tail of its log
-  once. This covers a reboot and a `kill -9`. The job process holds a lock on its job's `alive`
-  file for as long as it lives, so a pid the OS has since reused cannot pass for the job.
-  `[job-died]`
-- A job lives in `<git-dir>/tangier/jobs/<n>/`: `job.json`, `gates.json`, `output.log`, `alive`,
-  and `done`, written last. The git directory is per worktree, so `git worktree remove` deletes it,
-  and no job file is in the keyed tree. Each new job deletes finished jobs older than 24 hours,
-  then the oldest finished jobs while the logs pass 50 MB. The newest 5 jobs and a running job
-  always stay. `[job-prune]`
-- `gate cancel` sends SIGTERM to the job's process group, and SIGKILL 10 seconds later. Its
-  unfinished gates become `cancelled`. It exits 0, and says so when the job is not running. A gate
-  command that starts its own session, as a daemon does, escapes the signal, so it must clean up
-  after itself. `[cancel]`
+  once. This covers a reboot and a `kill -9`. Liveness comes from kernel locks only, never from a
+  bare pid. The job process holds a lock on its job's `alive` file for as long as it lives. It
+  also holds a lock on the job's `procs` file, and passes it to each gate command, so the
+  commands and their children hold it too. The kernel releases a lock when its last holder dies,
+  so a pid the OS has since reused cannot pass for the job. `[job-died]`
+- With `alive` free and `procs` held, the job process is gone but its commands still run: the
+  job is `orphaned`. With both free and no `done`, it `died`. Every command that reads jobs,
+  `run`, `wait`, `status` and `cancel`, and each poll of a queued job, reaps first: it sends
+  SIGTERM to each orphaned job's process group, then SIGKILL after 10 seconds, then writes the
+  result. Each unfinished gate ends `died`, `done` holds 1, and `ended.json` holds `{"by":
+  "reaper", "reason": "job process died"}`. It kills first and writes after, so a reap that stops
+  part way can run again. A dead job thus never keeps a slot or a place in the queue, and no
+  daemon is needed. After a reboot every lock is free, so the first command that reads the jobs
+  reaps them all. A parent that dies after it creates a job but before the spawn leaves a job
+  that reads `died`, and is reaped. `[job-reap]`
+- Jobs live in `~/.tangier/`, for every worktree and repo on the machine. `TANGIER_HOME` moves
+  it. Gate records stay in git refs, because they sync to `origin`. A job is
+  `~/.tangier/jobs/<n>/`: `job.json` (with the job's `worktree` and `git_dir`), `gates.json`,
+  `output.log`, `alive`, `procs`, `slot`, `cancelled.json`, `ended.json`, and `done`, written
+  last. No job file is in the keyed tree. Job IDs come from one counter for the machine, so
+  `gate wait --job 12` and `gate status --job 12` work from any directory. When `~/.tangier`
+  cannot be written, as in a sandbox that allows writes only to the repo, the error names the
+  path. Add it to the sandbox's write allowlist. `[job-home]`
+- `~/.tangier/config.toml` holds `[jobs] max-running`, the number of jobs that run at once on the
+  machine: a whole number of 1 or more, default 4. An unknown key or a bad value is an error.
+  `[job-config]`
+- A job takes a slot before it runs a gate. The slots are `~/.tangier/slots/0` up to
+  `max-running - 1`. The job holds a lock on one for as long as it runs, so a job that dies frees
+  its slot. A job with no free slot is `queued`. The queue is first in, first out, by job ID,
+  across every worktree. A plain `gate run` returns at once with a queued job, and prints the wait
+  hint. While a job is queued, `gate wait` and `gate run --wait` print `job 12 is queued: 2 of 3`
+  once, and again each time its place changes. A queued job counts as this worktree's job for
+  `[job-one-per-worktree]`. In CI and with `--dry-run`, gates run inline, with no slot.
+  `[job-queue]`
+- Each new job deletes finished jobs older than 24 hours, and finished jobs whose worktree no
+  longer exists. Then it deletes the oldest finished jobs while the logs of every job pass 200 MB.
+  The newest 5 jobs of each worktree and each unfinished job always stay. `[job-prune]`
+- A worktree's jobs from before `~/.tangier` are in `<git-dir>/tangier/jobs/`. Each new job in that
+  worktree moves the finished ones into `~/.tangier/jobs/`, in their old order, with new IDs. A
+  job still running stays, because its process writes to its old path. It moves on a later run.
+  The old folder goes when no job is left in it. `[job-migrate]`
+- `gate cancel` stops this worktree's latest job, and `--job N` stops job N in any worktree. It
+  sends SIGTERM to the job's process group. Ten seconds later, it sends SIGKILL until both the
+  `alive` and `procs` locks are free, for up to ten more seconds. Meanwhile it holds a lock on
+  the job's `stopping` file, and the job reads as `stopping`: no reap reads it as `died`, it has no
+  place in the queue, and its waiter keeps waiting. Other commands carry on. A cancel that dies
+  frees the lock, and the job is reaped. Its unfinished gates become `cancelled`. It exits 0, and says so when the job is not queued or running. A gate command that
+  starts its own session and closes its inherited descriptors, as a daemon does, escapes both
+  the signal and the lock, so it must clean up after itself. A daemon that starts its own session
+  but keeps the descriptor holds the `procs` lock: each cancel or reap of its job then waits the
+  full 20 seconds, and signals the job's old process group. `[cancel]`
+- `gate cancel --all` cancels every queued and running job on the machine. All the jobs share one
+  grace period, so `--all` takes 10 seconds, not 10 seconds for each job. It
+  prints `cancelled job 12 (~/src/app)` for each. `--reason TEXT` says why. `[cancel-all]`
+- `gate cancel` writes `cancelled.json` (`by`, `reason`, `user`, `time`) into each job before it
+  signals it. A waiter of a job cancelled this way prints, on stderr:
+
+  ```
+  job 12 was cancelled by `tangier gate cancel --all` (reason: load test) at 14:02. It may have been cancelled for a reason, such as an overloaded machine. Before you start it again, check with the system administrator or your human user. Or push the branch and let CI (GitHub Actions) run the gates.
+  ```
+
+  The exit code stays as `[wait-exit-codes]` gives it. A Ctrl-C in `gate run` writes no
+  `cancelled.json`, because the caller knows why the job stopped. `[cancel-notice]`
