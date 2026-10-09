@@ -537,8 +537,10 @@ to an hour.
   ``gate `<name>`: started`` when a gate is first seen running, then its result line, and for a
   failure the last 30 lines of its output and the log path.
 - The job publishes the records it wrote once its gates are done, as an inline run does. Each gate's
-  output is its own slice of the job log, so a failure's tail never holds the publish's output. With
-  `--fail-fast`, the gates not run end `cancelled`.
+  output is its own slice of the job log, so a failure's tail never holds the publish's output. Off a
+  terminal, where the log does not stream, `gate wait` and `gate run --wait` print what the job wrote
+  after its last gate on stderr, such as `warning: gate records stay local`. A job cut off by a
+  cancel prints nothing more, and `gate wait <selector>` does not print it. With `--fail-fast`, the gates not run end `cancelled`.
 - In CI, by `[runner-detect]`, and with `--dry-run`, `gate run` runs inline, with no
   job. CI has no tool timeout and wants a streamed log, and a dry run runs nothing.
   `[job-inline-ci]`

@@ -479,6 +479,10 @@ def _wait(
                     print(f"job {job.id} died: its process is gone, and it wrote no result")
                 if job.state == "cancelled" and (info := jobs.cancelled_info(job)):
                     print(_cancel_notice(job, info), file=sys.stderr)
+                # Off a terminal, only this shows a post-gate warning such as `gate records stay local`.
+                whole_job = not stream and names is None and job.code is not None and job.state != "died"
+                if whole_job and (text := jobs.after_gates(job).strip()):
+                    print(text, file=sys.stderr)
             return max(_exit_code(job, names, run=run) for job in now)
         if waiter.done():
             if waiter.stopped:
