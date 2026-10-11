@@ -7,8 +7,11 @@ tangier [--config PATH] <group> <command> [args]
 ```
 
 `--config` defaults to `$TANGIER_CONFIG`, then `pipeline.toml`. A missing or malformed config
-exits 2, except for `tailnet check`, which runs without one. Any other tangier error prints
-`error: ...` and exits 2.
+exits 2, except for `tailnet check`, `gate status --all` and `gate cancel`, which run without one.
+`gate status --all` and `gate cancel --all` work from any directory, even outside a git repo. Any
+other tangier error prints `error: ...` and exits 2.
+
+`tangier --version` prints the installed version, as `tangier 0.2.6`.
 
 ## Shared flags
 

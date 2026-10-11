@@ -572,7 +572,8 @@ to an hour.
   slots, as `slots: 3 of 4 in use, 2 queued`, and each job line adds its worktree, with the home
   directory as `~`. Only a job in this worktree can be `stale`: for another worktree's job,
   `stale` and `drift` are null in `--json`. `gate status --running --all` shows what runs on the
-  machine now. `[status-all]`
+  machine now. It needs no `pipeline.toml` and works outside a git repo, where no job is
+  `stale`. `[status-all]`
 - A finished job is `stale` when the working tree differs from the tree it keyed. A gate result
   is `stale` when the gate's key for the working tree differs from the key it ran against. A
   stale result does not apply to the work in hand. `[job-stale]`
@@ -639,7 +640,8 @@ to an hour.
   full 20 seconds, and signals the job's old process group. `[cancel]`
 - `gate cancel --all` cancels every queued and running job on the machine. All the jobs share one
   grace period, so `--all` takes 10 seconds, not 10 seconds for each job. It
-  prints `cancelled job 12 (~/src/app)` for each. `--reason TEXT` says why. `[cancel-all]`
+  prints `cancelled job 12 (~/src/app)` for each. `--reason TEXT` says why. It needs no
+  `pipeline.toml` and works outside a git repo. `[cancel-all]`
 - `gate cancel` writes `cancelled.json` (`by`, `reason`, `user`, `time`) into each job before it
   signals it. A waiter of a job cancelled this way prints, on stderr:
 

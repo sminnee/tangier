@@ -1067,6 +1067,21 @@ class TestQueue(JobCase):
     def where(self, repo: str) -> dict[str, str]:
         return {"worktree": os.path.realpath(repo), "git_dir": os.path.realpath(os.path.join(repo, ".git"))}
 
+    # SPEC: gate#status-all
+    # SPEC: gate#cancel-all
+    def test_the_machine_wide_listings_need_no_config_or_repo(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        code, out, err = self.tangier("gate", "status", "--running", "--all", cwd=elsewhere.name)
+        self.assertEqual(code, 0, err)
+        self.assertRegex(out, rf"\njob 1 +running .*  {re.escape(self.shown(self.repo))}\n")
+        code, _, err = self.tangier("gate", "status", cwd=elsewhere.name)
+        self.assertEqual(code, 2)
+        self.assertTrue(err.startswith("config error:"), err)
+        code, out, err = self.tangier("gate", "cancel", "--all", runner=RealSleep(), cwd=elsewhere.name)
+        self.assertEqual((code, out), (0, f"cancelled job 1 ({self.shown(self.repo)})\n"), err)
+
     # SPEC: gate#cancel-all
     # SPEC: gate#cancel-notice
     def test_cancel_all_stops_every_job_in_one_grace_period_and_tells_the_waiters(self) -> None:

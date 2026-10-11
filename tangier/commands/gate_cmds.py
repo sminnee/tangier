@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -697,14 +698,19 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
         ]
         if not shown and every and not args.running:
             shown = [every[0]]
-    # Only this worktree's jobs can be stale against its tree.
-    mine = jobs.here()
+    # Only this worktree's jobs can be stale against its tree. Outside a repo, `--all` has none to compare.
     try:
-        tree, keys = jobs.current_keys(
-            config, sorted({g.name for job in shown if job.git_dir == mine for g in job.gates})
-        )
-    except gate.GateError:
-        tree, keys = None, None
+        mine: str | None = jobs.here()
+    except git.GitError:
+        if not args.all:
+            raise
+        mine = None
+    tree, keys = None, None
+    if mine is not None:
+        with contextlib.suppress(gate.GateError):
+            tree, keys = jobs.current_keys(
+                config, sorted({g.name for job in shown if job.git_dir == mine for g in job.gates})
+            )
 
     def local(job: jobs.Job) -> tuple[str | None, dict[str, str | None] | None, bool]:
         return (tree, keys, True) if job.git_dir == mine else (None, None, False)
@@ -1218,14 +1224,15 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _ = sp.add_argument("--running", action="store_true", help="only queued and running jobs")
     _ = sp.add_argument("--all", action="store_true", help="the jobs of every worktree on this machine")
     _ = sp.add_argument("--json", action="store_true", help="print the jobs as JSON, with full keys and record refs")
-    sp.set_defaults(func=cmd_status)
+    # Without `--all`, status keys this worktree's gates to find the stale ones, so it needs the config.
+    sp.set_defaults(func=cmd_status, config_optional=lambda a: a.all)
 
     cp = gsub.add_parser("cancel", help="stop a queued or running gate job")
     which = cp.add_mutually_exclusive_group()
     _ = which.add_argument("--job", type=int, default=None, metavar="N", help="the job (default: the latest here)")
     _ = which.add_argument("--all", action="store_true", help="every queued and running job on this machine")
     _ = cp.add_argument("--reason", default=None, metavar="TEXT", help="why, for the jobs' waiters to print")
-    cp.set_defaults(func=cmd_cancel)
+    cp.set_defaults(func=cmd_cancel, config_optional=True)
 
     vp = gsub.add_parser("verified", help="has this gate passed? prints verified/unverified, exits 0/1")
     _ = vp.add_argument("name", help="a gate, or a group, which is verified when every member is")
