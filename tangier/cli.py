@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 
+import tangier
 from tangier.commands import changemap_cmds, deploy_cmds, gate_cmds, image_cmds, tailnet_cmds
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, ConfigError, read_config
@@ -46,9 +47,14 @@ def main(argv: list[str] | None = None, *, runner: Runner | None = None) -> int:
     except FileNotFoundError as e:
         # A repo with no images and no deploy environments still wants the
         # tailnet preflight — k8s-cluster is helm and kubectl, and a config
-        # file there would describe nothing. Every other command needs the
-        # config to mean anything, so only this one degrades.
-        if not getattr(args, "config_optional", False):
+        # file there would describe nothing. The machine-wide job commands
+        # (`gate status --all`, `gate cancel`) read only the job queue, so
+        # they run from anywhere. Every other command needs the config to
+        # mean anything. `config_optional` may be a predicate on the args.
+        optional = getattr(args, "config_optional", False)
+        if callable(optional):
+            optional = optional(args)
+        if not optional:
             print(f"config error: {e}", file=sys.stderr)
             return 2
         config = Config()
@@ -76,6 +82,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="smart CI for monorepos: change-scoped tests, local gate reuse, content-addressed builds",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    _ = p.add_argument("--version", action="version", version=f"%(prog)s {tangier.__version__}")
     _ = p.add_argument(
         "--config",
         default=DEFAULT_CONFIG,
