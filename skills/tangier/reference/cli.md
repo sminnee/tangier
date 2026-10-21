@@ -140,7 +140,7 @@ member. An unknown selector exits 2.
 | --- | --- | --- | --- |
 | `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--no-fail-fast`, `--dry-run`, `--debug`, `--accept`, `--wait` | Run each gate on the working tree, in config order, unless it is verified or not needed. The first gate that fails or errors stops the run. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. Outside CI and `--dry-run`, start a job and return once it starts; `--wait` waits for it, up to an hour. While another job in this worktree runs, `--wait` queues behind it, and a plain run starts nothing and exits 2. Over the machine's `max-running` limit, the job is `queued` until a slot frees. | the first non-zero code, 2 when another job runs, or 3 when the job is still queued or running |
 | `gate wait [<selector>...]` | `--job N[,N...]` | Wait up to an hour for this worktree's latest job, or the listed jobs from any worktree, or only the selected gates. Print a queued job's place when it changes. On a terminal, stream the log. Elsewhere, print each gate's start and result and the log tail of a failure. After a failed gate that ran with more load than CPUs, print a load note. For a job stopped by `gate cancel`, print who cancelled it and why. | 0 passed, 1 failed or cancelled, 2 no such job, 3 still queued or running |
-| `gate status` | `--job N[,N...]`, `--since` (default `8h`), `--running`, `--all`, `--json` | Print this worktree's recent jobs, each gate's key and state, and which results are stale. The latest job always shows. `--running` shows only queued and running jobs. `--all` shows every worktree's jobs, each with its worktree. The first line gives the machine's slots, load, and the CPU and memory its gate jobs use; each unfinished job line adds its own `cpu 230%  mem 1.2G`. `--json` prints `{"machine", "running", "queued", "recent", "not_found"}`; see below. | 0 |
+| `gate status` | `--job N[,N...]`, `--since` (default `8h`), `--running`, `--all`, `--json`, `--watch` | Print this worktree's recent jobs, each gate's key and state, and which results are stale. The latest job always shows. `--running` shows only queued and running jobs. `--all` shows every worktree's jobs, each with its worktree. The first line gives the machine's slots, load, and the CPU and memory its gate jobs use; each unfinished job line adds its own `cpu 230%  mem 1.2G`. `--json` prints `{"machine", "running", "queued", "recent", "not_found"}`; see below. `--watch` keeps running and prints each job and gate change as it happens; see below. | 0 |
 | `gate cancel` | `--job N` or `--all`, `--reason TEXT` | Stop this worktree's latest job, job N, or with `--all` every queued and running job on the machine, in one 10-second grace period. Unfinished gates become `cancelled`. Each job's waiter prints who cancelled it, with the reason. | 0 |
 | `gate list` | | Print every gate in config order, with a group's members indented under a `<group> (group)` line. | 0 |
 | `gate key [<selector>]` | `--head` | Print the key. A group, or no selector, prints `<name> <key>` per gate, and nothing when any gate fails closed. | 0, or 2 when a scope entry matches no file |
@@ -209,6 +209,23 @@ group from one `ps`: CPU as a percentage of one CPU (a recent average on macOS, 
 average on Linux) and resident memory. It is null once no process in the group lives. Work a job
 hands to a daemon, such as Docker's, is not counted. `jobs_cpu_percent` and `jobs_rss_bytes` are
 null when no job is unfinished or `ps` cannot run.
+
+### `gate status --watch --json`
+
+One JSON object per line. The first is the status, then one per change, as it happens:
+
+```json
+{"type":"status","time":"2026-10-21T00:03:04+00:00","machine":{...},"running":[],"queued":[],"recent":[],"not_found":[]}
+{"type":"job","time":"...","previous":null,"job":{"id":14,"state":"queued",...}}
+{"type":"job","time":"...","previous":"queued","job":{"id":14,"state":"running",...}}
+{"type":"gate","time":"...","job_id":14,"previous":"pending","gate":{"name":"lint","state":"running",...}}
+{"type":"gate","time":"...","job_id":14,"previous":"running","gate":{"name":"lint","state":"passed",...}}
+{"type":"job","time":"...","previous":"running","job":{"id":14,"state":"passed",...}}
+```
+
+`job` and `gate` are as `gate status --json` gives them. A job's event comes before its gates'
+while it is unfinished, and after them once it finishes. `--since` and `--running` limit only the first line.
+Ctrl-C, or closing the pipe, exits 0.
 
 ### `gate github-outputs`
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import io
 import json
 import math
 import os
@@ -18,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any, NamedTuple
 
 import tangier
-from tangier import gate, git, home, jobs, junit, ranon, stats, usage
+from tangier import gate, git, home, jobs, junit, ranon, stats, usage, watch
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs, write_summary
@@ -687,7 +688,10 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
     """Each recent job and its gates, newest first, with what no longer applies to the working tree. Exits 0.
 
     `--all` shows the jobs of every worktree on the machine, and `--running` only the unfinished ones.
+    `--watch` keeps running and prints each change. See `[status-watch]`.
     """
+    if args.watch:
+        return _watch_status(config, args)
     view = _status_view(config, args, _runner(args))
     if args.json:
         print(json.dumps(_status_json(view), indent=2))
@@ -799,6 +803,157 @@ def _print_status(view: _StatusView, args: argparse.Namespace) -> None:
         _print_job(job, local.tree, local.keys, where=args.all, use=_use(job, view.samples))
     for job_id in view.missing:
         print(f"job {job_id}: not found (pruned?)")
+
+
+def _watch_status(config: Config, args: argparse.Namespace) -> int:
+    """Print the status, then each change to a job or gate as it happens, until Ctrl-C. See `[status-watch]`.
+
+    SIGTERM and SIGHUP stop it as Ctrl-C does, so its socket goes with it.
+    """
+
+    def stop(signum: int, frame: object) -> None:
+        del signum, frame
+        raise KeyboardInterrupt
+
+    old = {
+        sig: signal.signal(sig, stop)
+        for sig in (signal.SIGTERM, signal.SIGHUP)
+        if signal.getsignal(sig) is not signal.SIG_IGN
+    }
+    try:
+        with watch.Watcher() as watcher:
+            _watch(config, args, watcher)
+    except KeyboardInterrupt:
+        pass
+    except BrokenPipeError:
+        # The reader went away. Point stdout at devnull, so the flush at exit does not fail again.
+        with contextlib.suppress(OSError, ValueError, io.UnsupportedOperation):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    finally:
+        for sig, previous in old.items():
+            _ = signal.signal(sig, previous)
+    return 0
+
+
+def _watch(config: Config, args: argparse.Namespace, watcher: watch.Watcher) -> None:
+    runner = _runner(args)
+    view = _status_view(config, args, runner)
+    if args.json:
+        _emit({"type": "status", "time": gate.now().isoformat(), **_status_json(view)})
+    else:
+        _print_status(view, args)
+        sys.stdout.flush()
+    # A job that is not on the machine yet always shows once it is, whatever `--since` or `--running` say.
+    known = {j.id for j in view.machine_jobs}
+    tracked = {j.id: j for j in view.shown}
+    while True:
+        watcher.wait(watch.POLL)
+        jobs.reap(runner)
+        now = {j.id: j for j in jobs.all_jobs(worktree_only=False)}
+        watched = [
+            j
+            for job_id, j in sorted(now.items())
+            if job_id in tracked or (job_id not in known and _in_scope(j, args, view.mine))
+        ]
+        changes = [c for j in watched if (c := _change(j, tracked.get(j.id))) is not None]
+        known.update(now)
+        tracked = {j.id: j for j in watched}
+        if changes:
+            _emit_changes(config, args, view.mine, changes)
+
+
+def _in_scope(job: jobs.Job, args: argparse.Namespace, mine: str | None) -> bool:
+    """Whether a job new to the machine belongs in the watch: by `--job`, else in this worktree or with `--all`."""
+    if args.job is not None:
+        return job.id in args.job
+    return args.all or job.git_dir == mine
+
+
+@dataclasses.dataclass
+class _Change:
+    """A job now and before, whether its own state changed, and each gate that changed, with its previous state."""
+
+    job: jobs.Job
+    before: jobs.Job | None
+    job_changed: bool
+    gates: list[tuple[jobs.GateState, str]]
+
+
+def _change(job: jobs.Job, before: jobs.Job | None) -> _Change | None:
+    """What changed in the job since `before`, or None for nothing. A gate new to the job was `pending`."""
+    prior = {} if before is None else {g.name: before.effective(g) for g in before.gates}
+    gates = [(g, prior.get(g.name, "pending")) for g in job.gates if job.effective(g) != prior.get(g.name, "pending")]
+    job_changed = before is None or job.state != before.state
+    return _Change(job, before, job_changed, gates) if job_changed or gates else None
+
+
+def _emit_changes(config: Config, args: argparse.Namespace, mine: str | None, changes: list[_Change]) -> None:
+    """Print each change, oldest job first. See `[status-watch]`."""
+    if args.json:
+        # The git work `stale` and `drift` need, and a `ps` for `usage`, only when there is a JSON event to fill in.
+        local = _local(config, mine, [c.job for c in changes])
+        unfinished = any(c.job.state in jobs.UNFINISHED for c in changes)
+        samples = usage.sample(_runner(args, echo=False)) if unfinished else {}
+    for c in changes:
+        for event in _in_order(c):
+            if event is None and args.json:
+                _emit_job_json(c, local(c.job), samples)
+            elif event is None:
+                _emit_job_text(c, where=args.all)
+            elif args.json:
+                _emit_gate_json(c.job, *event, local(c.job))
+            else:
+                _emit_gate_text(c.job, event[0])
+
+
+def _in_order(c: _Change) -> list[tuple[jobs.GateState, str] | None]:
+    """The change's events in order, None for the job's own. See `[status-watch]`."""
+    if not c.job_changed:
+        return list(c.gates)
+    if c.job.state in jobs.UNFINISHED:
+        return [None, *c.gates]
+    return [*c.gates, None]
+
+
+def _emit_job_json(c: _Change, local: _Local, samples: dict[int, usage.Usage]) -> None:
+    data = _job_json(c.job, local, use=_use(c.job, samples))
+    previous = None if c.before is None else c.before.state
+    _emit({"type": "job", "time": gate.now().isoformat(), "previous": previous, "job": data})
+
+
+def _emit_gate_json(job: jobs.Job, g: jobs.GateState, previous: str, local: _Local) -> None:
+    data = _gate_json(job, g, local)
+    _emit({"type": "gate", "time": gate.now().isoformat(), "job_id": job.id, "previous": previous, "gate": data})
+
+
+def _emit_job_text(c: _Change, *, where: bool) -> None:
+    job = c.job
+    notes = []
+    if job.state == "queued" and (place := jobs.queue_position(job)) is not None:
+        notes.append(f"queue {place[0]} of {place[1]}")
+    if where and c.before is None:
+        notes.append(home.tilde(job.worktree) or "(worktree unknown)")
+    _emit_line(f"job {job.id} {'  '.join([job.state, *notes])}")
+
+
+def _emit_gate_text(job: jobs.Job, g: jobs.GateState) -> None:
+    gstate = job.effective(g)
+    parts = [f"failed({g.code})" if gstate == "failed" else gstate]
+    if gstate not in ("running", "pending"):
+        parts.append(jobs.running_for(g.started, g.ended))
+    if gstate not in (*jobs.OK, "running", "pending", "cancelled"):
+        parts.append(f" log: {home.tilde(job.log)}")
+    _emit_line(f"job {job.id} {g.name} {' '.join(p for p in parts if p)}")
+
+
+def _emit_line(text: str) -> None:
+    """A text event: the local time, then `text`."""
+    print(f"{datetime.now().astimezone():%H:%M:%S} {text}", flush=True)
+
+
+def _emit(event: dict[str, object]) -> None:
+    """A JSON event, on one line."""
+    print(json.dumps(event, separators=(",", ":")), flush=True)
 
 
 def _use(job: jobs.Job, samples: dict[int, usage.Usage]) -> usage.Usage | None:
@@ -1345,6 +1500,11 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _ = sp.add_argument("--running", action="store_true", help="only queued and running jobs")
     _ = sp.add_argument("--all", action="store_true", help="the jobs of every worktree on this machine")
     _ = sp.add_argument("--json", action="store_true", help="print the jobs as JSON, with full keys and record refs")
+    _ = sp.add_argument(
+        "--watch",
+        action="store_true",
+        help="keep running and print each change as it happens; with --json, one JSON object per line",
+    )
     # Without `--all`, status keys this worktree's gates to find the stale ones, so it needs the config.
     sp.set_defaults(func=cmd_status, config_optional=lambda a: a.all)
 
