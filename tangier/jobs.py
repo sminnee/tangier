@@ -35,7 +35,7 @@ from collections.abc import Generator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
-from tangier import gate, git, home
+from tangier import gate, git, home, watch
 from tangier.config import Config
 from tangier.runner import Runner
 
@@ -409,11 +409,12 @@ def _write_gates(job_dir: str, gates: list[GateState]) -> None:
 
 
 def _write_atomic(path: str, text: str) -> None:
-    """Write via a temporary file and a rename, so a reader never sees half a file."""
+    """Write via a temporary file and a rename, so a reader never sees half a file. Then wake the watchers."""
     tmp = f"{path}.tmp"
     with open(tmp, "w") as fh:
         _ = fh.write(text)
     os.replace(tmp, path)
+    watch.notify()
 
 
 def finish(job_dir: str, code: int, unfinished: str = "error") -> bool:
@@ -520,6 +521,9 @@ def cancel(targets: list[Job], runner: Runner, *, by: str | None = None, reason:
                 if fd is not None:
                     stopping.append(fd)
                     mine.append(j)
+            # `stopping` is a lock, not a file, so no write wakes the watchers.
+            if mine:
+                watch.notify()
             if by is not None:
                 info = {"by": by, "reason": reason, "user": _user(), "time": gate.now().isoformat()}
                 for j in mine:
