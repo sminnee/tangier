@@ -105,7 +105,7 @@ def _run_inline(
         first = first or code
         if ref:
             written.add(ref)
-        if first and args.fail_fast:
+        if first and args.fail_fast and not args.dry_run:
             if rest := names[i + 1 :]:
                 print(f"fail-fast: not run: {', '.join(rest)}; --no-fail-fast runs them", file=sys.stderr)
             for skipped in rest:

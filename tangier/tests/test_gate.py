@@ -1295,6 +1295,16 @@ class TestRunMany(GateCase):
         self.assertEqual(runner.calls, [])
         self.assertIn("fail-fast: not run: lint; --no-fail-fast runs them\n", err)
 
+    # SPEC: gate#run-fail-fast
+    # SPEC: gate#run-dry-run
+    def test_a_dry_run_plans_every_gate_past_a_gate_error(self) -> None:
+        # `backend` cannot resolve its base; `lint` still prints its plan.
+        runner = RecordingRunner()
+        code, out, err = self.tangier("gate", "run", "--all", "--dry-run", "--base", "origin/main", runner=runner)
+        self.assertEqual(code, 2)
+        self.assertNotIn("not run", err)
+        self.assertIn("gate `lint`: required\n", out)
+
     # SPEC: gate#run-all
     def test_no_gate_and_no_all_is_an_error(self) -> None:
         code, _, err = self.tangier("gate", "run", "--base", self.base)
