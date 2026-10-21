@@ -11,7 +11,7 @@ exits 2, except for `tailnet check`, `gate status --all` and `gate cancel`, whic
 `gate status --all` and `gate cancel --all` work from any directory, even outside a git repo. Any
 other tangier error prints `error: ...` and exits 2.
 
-`tangier --version` prints the installed version, as `tangier 0.3.0`.
+`tangier --version` prints the installed version, as `tangier 0.3.1`.
 
 ## Shared flags
 

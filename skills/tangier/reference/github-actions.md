@@ -291,7 +291,7 @@ jobs:
 
 ## Shipped actions
 
-Pin `@v0`, a moving alias that every release updates, or an exact `@v0.3.0`.
+Pin `@v0`, a moving alias that every release updates, or an exact `@v0.3.1`.
 
 ### `sminnee/tangier/.github/workflows/build.yaml@v0`
 
