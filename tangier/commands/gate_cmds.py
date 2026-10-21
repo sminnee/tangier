@@ -15,7 +15,7 @@ import sys
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 import tangier
 from tangier import gate, git, home, jobs, junit, ranon, stats, usage
@@ -688,7 +688,39 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
 
     `--all` shows the jobs of every worktree on the machine, and `--running` only the unfinished ones.
     """
-    jobs.reap(_runner(args))
+    view = _status_view(config, args, _runner(args))
+    if args.json:
+        print(json.dumps(_status_json(view), indent=2))
+    else:
+        _print_status(view, args)
+    return 0
+
+
+class _Local(NamedTuple):
+    """What a job's results are compared against: the working tree and its keys, for a job in this worktree."""
+
+    tree: str | None
+    keys: dict[str, str | None] | None
+    here: bool
+
+
+@dataclasses.dataclass
+class _StatusView:
+    """What `gate status` shows: the jobs, the `--job` ids with no job, and the machine."""
+
+    machine_jobs: list[jobs.Job]
+    shown: list[jobs.Job]
+    missing: list[int]
+    # This worktree's git directory, or None outside a repo.
+    mine: str | None
+    # A job's working tree and keys to compare against, and whether it is in this worktree.
+    local: Callable[[jobs.Job], _Local]
+    samples: dict[int, usage.Usage]
+    machine: dict[str, object]
+
+
+def _status_view(config: Config, args: argparse.Namespace, runner: Runner) -> _StatusView:
+    jobs.reap(runner)
     machine_jobs = jobs.all_jobs(worktree_only=False)
     missing: list[int] = []
     if args.job is not None:
@@ -717,39 +749,56 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
         if not args.all:
             raise
         mine = None
-    tree, keys = None, None
-    if mine is not None:
-        with contextlib.suppress(gate.GateError):
-            tree, keys = jobs.current_keys(
-                config, sorted({g.name for job in shown if job.git_dir == mine for g in job.gates})
-            )
-
-    def local(job: jobs.Job) -> tuple[str | None, dict[str, str | None] | None, bool]:
-        return (tree, keys, True) if job.git_dir == mine else (None, None, False)
-
     # Unechoed, so `ps` and `sysctl` stay out of the status output.
     quiet = _runner(args, echo=False)
     samples = usage.sample(quiet) if any(j.state in jobs.UNFINISHED for j in machine_jobs) else {}
-    machine = _machine(machine_jobs, samples, quiet)
+    return _StatusView(
+        machine_jobs=machine_jobs,
+        shown=shown,
+        missing=missing,
+        mine=mine,
+        local=_local(config, mine, shown),
+        samples=samples,
+        machine=_machine(machine_jobs, samples, quiet),
+    )
+
+
+def _local(config: Config, mine: str | None, shown: list[jobs.Job]) -> Callable[[jobs.Job], _Local]:
+    """Key the working tree for the gates of `shown` in this worktree, the git work `stale` and `drift` need."""
+    tree, keys = None, None
+    names = sorted({g.name for job in shown if job.git_dir == mine for g in job.gates})
+    if mine is not None and names:
+        with contextlib.suppress(gate.GateError):
+            tree, keys = jobs.current_keys(config, names)
+
+    def local(job: jobs.Job) -> _Local:
+        return _Local(tree, keys, True) if job.git_dir == mine else _Local(None, None, False)
+
+    return local
+
+
+def _status_json(view: _StatusView) -> dict[str, object]:
+    shown, machine_jobs = view.shown, view.machine_jobs
     running = [j for j in shown if j.state in jobs.UNFINISHED and j.state != "queued"]
     order = {j.id: place for place, j in enumerate(j for j in reversed(machine_jobs) if j.state == "queued")}
     queued = sorted((j for j in shown if j.state == "queued"), key=lambda j: order.get(j.id, 0))
     recent = [j for j in shown if j.state not in jobs.UNFINISHED]
-    if args.json:
-        groups = {
-            name: [_job_json(job, *local(job), use=_use(job, samples)) for job in group]
-            for name, group in (("running", running), ("queued", queued), ("recent", recent))
-        }
-        print(json.dumps({"machine": machine, **groups, "not_found": missing}, indent=2))
-        return 0
-    print(_machine_line(machine))
-    if not shown and not missing:
+    groups = {
+        name: [_job_json(job, view.local(job), use=_use(job, view.samples)) for job in group]
+        for name, group in (("running", running), ("queued", queued), ("recent", recent))
+    }
+    return {"machine": view.machine, **groups, "not_found": view.missing}
+
+
+def _print_status(view: _StatusView, args: argparse.Namespace) -> None:
+    print(_machine_line(view.machine))
+    if not view.shown and not view.missing:
         print("no jobs")
-    for job in shown:
-        _print_job(job, *local(job)[:2], where=args.all, use=_use(job, samples))
-    for job_id in missing:
+    for job in view.shown:
+        local = view.local(job)
+        _print_job(job, local.tree, local.keys, where=args.all, use=_use(job, view.samples))
+    for job_id in view.missing:
         print(f"job {job_id}: not found (pruned?)")
-    return 0
 
 
 def _use(job: jobs.Job, samples: dict[int, usage.Usage]) -> usage.Usage | None:
@@ -825,19 +874,12 @@ def _print_job(
         print(line.rstrip())
 
 
-def _job_json(
-    job: jobs.Job,
-    tree: str | None,
-    keys: dict[str, str | None] | None,
-    local: bool = True,
-    *,
-    use: usage.Usage | None = None,
-) -> dict[str, object]:
+def _job_json(job: jobs.Job, local: _Local, *, use: usage.Usage | None = None) -> dict[str, object]:
     """The job as `status --json` prints it. `stale` and `drift` are null for a job in another worktree.
 
     `usage` is null when the job's process group has no live process. See `[status-usage]`.
     """
-    state = job.state
+    state, tree = job.state, local.tree
     place = jobs.queue_position(job) if state == "queued" else None
     return {
         "id": job.id,
@@ -849,30 +891,33 @@ def _job_json(
         "base": job.base,
         "started": job.started,
         "code": job.code,
-        "stale": (tree is not None and state not in jobs.UNFINISHED and tree != job.tree) if local else None,
+        "stale": (tree is not None and state not in jobs.UNFINISHED and tree != job.tree) if local.here else None,
         "log": job.log,
         "worktree": job.worktree,
         "git_dir": job.git_dir,
         "queue_position": place[0] if place else None,
         "cancelled": jobs.cancelled_info(job),
-        "gates": [
-            {
-                "name": g.name,
-                "key": g.key,
-                "state": job.effective(g),
-                "code": g.code,
-                "started": g.started,
-                "ended": g.ended,
-                "ref": g.ref,
-                "load": g.load,
-                "stale": (keys is not None and jobs.stale(g, keys)) if local else None,
-                "drift": (keys is not None and job.effective(g) == "running" and keys.get(g.name) != g.key)
-                if local
-                else None,
-            }
-            for g in job.gates
-        ],
+        "gates": [_gate_json(job, g, local) for g in job.gates],
         "usage": None if use is None else dataclasses.asdict(use),
+    }
+
+
+def _gate_json(job: jobs.Job, g: jobs.GateState, local: _Local) -> dict[str, object]:
+    """A gate as `status --json` prints it in its job. `stale` and `drift` are null for a job in another worktree."""
+    keys = local.keys
+    return {
+        "name": g.name,
+        "key": g.key,
+        "state": job.effective(g),
+        "code": g.code,
+        "started": g.started,
+        "ended": g.ended,
+        "ref": g.ref,
+        "load": g.load,
+        "stale": (keys is not None and jobs.stale(g, keys)) if local.here else None,
+        "drift": (keys is not None and job.effective(g) == "running" and keys.get(g.name) != g.key)
+        if local.here
+        else None,
     }
 
 
