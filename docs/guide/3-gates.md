@@ -40,6 +40,9 @@ Run every gate:
 tangier gate run --all     # each gate: verified, not-needed, or a run
 ```
 
+Gates run in config order, and the first failure stops the run, so put cheap, fast gates such as
+lint first in `pipeline.toml`. `--no-fail-fast` runs every gate, to see every failure at once.
+
 Once its gates have run, `gate run` pulls `origin`'s records and pushes the ones it wrote, so CI
 finds them. When `origin` cannot be reached or refuses the push, it warns, keeps the records local,
 and still exits with the gates' result. `tangier gate sync` then sends them.
@@ -195,7 +198,7 @@ scope = ["vulture-allowlist"]
 
 Members share the group's `env` and `scope`. `gate run lint` runs every member, and `gate run
 lint.vulture` runs one. A group has no run order: put a prerequisite, such as a build, in the member
-that needs it.
+that needs it. Members still run in config order, and the first failure stops the rest.
 
 ## CI-only gates
 

@@ -364,7 +364,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | --- | --- |
 | `gate list` | Print every gate and group. |
 | `gate key [<selector>]` | Print the key. With no selector, print `<name> <key>` for every gate. |
-| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept` and `--wait`. Outside CI the gates run as a [job](#jobs). |
+| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--no-fail-fast`, `--dry-run`, `--debug`, `--accept` and `--wait`. Outside CI the gates run as a [job](#jobs). |
 | `gate wait [<selector> ...]` | Wait for a job, or for some of its gates, up to an hour. Takes `--job`. |
 | `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since` and `--json`. |
 | `gate cancel` | Stop a running job. Takes `--job`. |
@@ -381,12 +381,12 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   `<group> (group)` line. `[list]`
 - `gate run` takes one or more [selectors](#selector), or `--all` for every configured gate in
   config order. No
-  name and no `--all` is an error, exit 2. Each gate is planned and run in turn. A failing gate
-  does not stop the rest, so one run reports every failure. The exit code is the first non-zero
-  one. All gates share one read of `origin`. `[run-all]`
-- `--fail-fast` stops at the first gate that fails or errors, and names the gates it did not run
-  on stderr. The exit code is that gate's. Put cheap gates, such as lint and format, before slow
-  ones in the config, so a cheap failure stops the run first. `[run-fail-fast]`
+  name and no `--all` is an error, exit 2. Each gate is planned and run in turn. The exit code is
+  the first non-zero one. All gates share one read of `origin`. `[run-all]`
+- Fail-fast is the default. The first gate that fails or errors stops the run. The gates it did not
+  run are named on stderr. The exit code is that gate's. `--no-fail-fast` runs every gate, so one
+  run reports every failure. Gates run in config order, by `[selector]`, so put cheap gates, such
+  as lint and format, before slow ones. A cheap failure then stops the run first. `[run-fail-fast]`
 - `--dry-run` prints each gate's status, its comparator as a short SHA with how it was chosen
   (`record at abc1234, local` or `merge base with origin/main`), and the commands a run would
   execute. It runs nothing and writes nothing. When `--accept` rejected a record on the walk, the
@@ -540,7 +540,7 @@ to an hour.
   output is its own slice of the job log, so a failure's tail never holds the publish's output. Off a
   terminal, where the log does not stream, `gate wait` and `gate run --wait` print what the job wrote
   after its last gate on stderr, such as `warning: gate records stay local`. A job cut off by a
-  cancel prints nothing more, and `gate wait <selector>` does not print it. With `--fail-fast`, the gates not run end `cancelled`.
+  cancel prints nothing more, and `gate wait <selector>` does not print it. With fail-fast, the gates not run end `cancelled`.
 - In CI, by `[runner-detect]`, and with `--dry-run`, `gate run` runs inline, with no
   job. CI has no tool timeout and wants a streamed log, and a dry run runs nothing.
   `[job-inline-ci]`
