@@ -18,16 +18,18 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest import mock
 
-from tangier import cli, gate, git, home, jobs, ranon, usage
+from tangier import cli, gate, git, home, jobs, ranon, usage, watch
 from tangier.commands import gate_cmds
 from tangier.runner import Result, Subprocess
 from tangier.tests.support import RecordingRunner, make_git_repo
@@ -741,6 +743,70 @@ class TestStatus(JobCase):
         self.assertEqual(code, 1)
         self.assertIn("so no record was written", out)
         self.assertEqual(self.job().gate("lint").state, "unrecorded")
+
+
+class TestNotify(JobCase):
+    """A real watcher socket. Where one cannot be bound, as in a sandbox, these skip."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        path = os.path.join(self.home, "probe.sock")
+        try:
+            probe.bind(path)
+        except PermissionError:
+            self.skipTest("a Unix socket cannot be bound here, as in a sandbox")
+        finally:
+            probe.close()
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(path)
+
+    # SPEC: gate#status-watch
+    def test_a_write_wakes_a_watcher_at_once(self) -> None:
+        with watch.Watcher() as watcher:
+            self.assertIsNotNone(watcher.sock)
+            jobs._write_atomic(os.path.join(self.home, "file"), "x")
+            jobs._write_atomic(os.path.join(self.home, "file"), "y")
+            start = time.monotonic()
+            watcher.wait(10)
+            self.assertLess(time.monotonic() - start, 5)
+            # The burst read as one wakeup, so the next wait runs to its timeout.
+            start = time.monotonic()
+            watcher.wait(0.05)
+            self.assertGreaterEqual(time.monotonic() - start, 0.04)
+        self.assertEqual(os.listdir(os.path.join(self.home, "watch")), [])
+
+    # SPEC: gate#status-watch
+    def test_notify_removes_a_dead_watchers_socket(self) -> None:
+        home.makedirs(os.path.join(self.home, "watch"))
+        dead = os.path.join(self.home, "watch", "1.sock")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sock.bind(dead)
+        sock.close()
+        start = time.monotonic()
+        watch.notify()
+        self.assertLess(time.monotonic() - start, 1)
+        self.assertFalse(os.path.exists(dead))
+
+
+class TestNotifyWithoutSocket(JobCase):
+    # SPEC: gate#status-watch
+    def test_a_write_with_no_watcher_does_not_fail(self) -> None:
+        jobs._write_atomic(os.path.join(self.home, "file"), "x")
+        # Another file in the watch folder is not a watcher, and stays.
+        home.makedirs(os.path.join(self.home, "watch"))
+        other = os.path.join(self.home, "watch", "notes")
+        open(other, "w").close()
+        jobs._write_atomic(os.path.join(self.home, "file"), "y")
+        self.assertTrue(os.path.exists(other))
+
+    # SPEC: gate#status-watch
+    def test_a_watcher_that_cannot_bind_only_polls(self) -> None:
+        with mock.patch.object(socket.socket, "bind", side_effect=PermissionError), watch.Watcher() as watcher:
+            self.assertIsNone(watcher.sock)
+            start = time.monotonic()
+            watcher.wait(0.05)
+            self.assertGreaterEqual(time.monotonic() - start, 0.04)
 
 
 class RealRunner(Subprocess):
