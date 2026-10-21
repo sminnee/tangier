@@ -186,6 +186,21 @@ class JobCase(unittest.TestCase):
             if state is not None:
                 reporter.finished(name, state, code, line=f"gate `{name}`: {state}")
 
+    def claim(self, job_id: int) -> int | None:
+        with jobs.lock():
+            return jobs.claim_free(self.job(job_id).dir, 1)
+
+    def take_slot(self, job_id: int) -> None:
+        """Job `job_id` takes a slot, as its job process would."""
+        slot = self.claim(job_id)
+        assert slot is not None
+        self.addCleanup(os.close, slot)
+
+    def end(self, job_id: int) -> None:
+        """Job `job_id` ends: its process goes, and its result is written."""
+        _reap(self.job(job_id).pid)
+        jobs.finish(self.job(job_id).dir, 0)
+
     def max_running(self, n: int) -> None:
         with open(os.path.join(self.home, "config.toml"), "w") as fh:
             _ = fh.write(f"[jobs]\nmax-running = {n}\n")
@@ -950,15 +965,6 @@ class TestQueue(JobCase):
         self.max_running(1)
         self.other = self.other_repo()
 
-    def claim(self, job_id: int) -> int | None:
-        with jobs.lock():
-            return jobs.claim_free(self.job(job_id).dir, 1)
-
-    def end(self, job_id: int) -> None:
-        """Job `job_id` ends: its process goes, and its result is written."""
-        _reap(self.job(job_id).pid)
-        jobs.finish(self.job(job_id).dir, 0)
-
     # SPEC: gate#job-queue
     # SPEC: gate#job-wait-hint
     def test_a_job_over_the_limit_queues_until_a_slot_frees(self) -> None:
@@ -1032,7 +1038,7 @@ class TestQueue(JobCase):
                 if len(inner.slept) == 1:
                     # Job 1 ends, and job 2 takes its slot, as its job process would.
                     test.end(1)
-                    test.addCleanup(os.close, test.claim(2) or 0)
+                    test.take_slot(2)
 
         _, out, _ = self.tangier("gate", "wait", "--job", "3", "--timeout", "3", runner=EndsTheFirst())
         self.assertEqual(
