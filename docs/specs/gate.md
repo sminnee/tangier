@@ -565,15 +565,31 @@ to an hour.
   (`queued`, `running`, `stopping`, `passed`, `failed`, `cancelled` or `died`) and its commit,
   `<sha>[+dirty]`. A queued job's line adds `queue 2 of 3`. Each gate line holds the gate's key,
   short, its state and how long it ran. The key identifies the result, as the record ref does.
-  `--json` gives the full keys, each pass's record ref, and the job's `worktree`, `git_dir`,
-  `queue_position` (null unless queued) and `cancelled` (the `cancelled.json` data, or null). It
-  exits 0. `[job-status]`
-- `gate status --all` shows the jobs of every worktree on the machine. A first line gives the
-  slots, as `slots: 3 of 4 in use, 2 queued`, and each job line adds its worktree, with the home
-  directory as `~`. Only a job in this worktree can be `stale`: for another worktree's job,
-  `stale` and `drift` are null in `--json`. `gate status --running --all` shows what runs on the
-  machine now. It needs no `pipeline.toml` and works outside a git repo, where no job is
-  `stale`. `[status-all]`
+  The first line describes the machine, as `slots: 3 of 4 in use, 2 queued  load 5.2 on 10 CPUs
+  gates: cpu 412%  mem 5.6G of 32G`, and leaves out any part it has no figure for. `--json`
+  prints one object: `machine`, then `running` (the `running`, `stopping` and `orphaned` jobs),
+  `queued` (in queue order, oldest first), `recent` (the finished jobs, newest first) and
+  `not_found` (the `--job` ids with no job). `--running` leaves `recent` empty. Each job gives the
+  full keys, each pass's record ref, and the job's `worktree`, `git_dir`, `queue_position` (null
+  unless queued), `cancelled` (the `cancelled.json` data, or null) and `usage` by
+  `[status-usage]`. It exits 0. `[job-status]`
+- `gate status --all` shows the jobs of every worktree on the machine, and each job line adds its
+  worktree, with the home directory as `~`. Only a job in this worktree can be `stale`: for
+  another worktree's job, `stale` and `drift` are null in `--json`. `gate status --running --all`
+  shows what runs on the machine now. It needs no `pipeline.toml` and works outside a git repo,
+  where no job is `stale`. `[status-all]`
+- `gate status` reads the CPU and memory each unfinished job uses from one `ps` call, which it
+  skips when no job on the machine is unfinished. A job runs in its own process group, so its use
+  is the sum over that group: CPU as a percentage of one CPU, resident memory, and the number of
+  processes. A command that leaves the group, as work handed to a Docker daemon does, is not
+  counted. `ps` CPU is a recent average on macOS, and on Linux the average over each process's
+  life. A job line adds `cpu 230%  mem 1.2G`. In `--json` a job's `usage` is `{"cpu_percent",
+  "rss_bytes", "processes"}`, or null when its group has no live process, as for a finished job.
+  A queued job's usage is its own process, waiting for a slot. `machine` gives `slots_in_use`,
+  `max_running`, `queued`, `load` and `cpus` (null where the OS gives no load average),
+  `memory_total_bytes` (null where it cannot be read), and `jobs_cpu_percent` and
+  `jobs_rss_bytes`, the sums over every unfinished job on the machine. Those two are null when no
+  `ps` sample was taken, and the text line then leaves out its `gates:` part. `[status-usage]`
 - A finished job is `stale` when the working tree differs from the tree it keyed. A gate result
   is `stale` when the gate's key for the working tree differs from the key it ran against. A
   stale result does not apply to the work in hand. `[job-stale]`

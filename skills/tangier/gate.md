@@ -36,7 +36,8 @@ Ctrl-C in `gate run` cancels it.
 - At most a few jobs run at once on the machine, across every worktree. A job over the limit is
   `queued`, and exit 3 can mean it is still queued. Keep waiting with the printed `gate wait` command.
 - When a job sits in the queue, or a gate times out under load, run
-  `tangier gate status --running --all` to see what else runs on the machine.
+  `tangier gate status --running --all` to see what else runs on the machine, and the CPU and
+  memory each job uses.
 - When a waiter prints `job <n> was cancelled by ...`, do not start the job again until the human
   says so. Offer to push the branch and let CI run the gates instead.
 - When a gate fails on a timeout, look for a `load average` warning or note first. Load above the

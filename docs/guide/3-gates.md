@@ -85,9 +85,14 @@ CI and `--dry-run` run inline, with no job. One job runs at a time in a worktree
 starts when a slot frees, oldest first. To see and stop what runs on the machine:
 
 ```sh
-tangier gate status --running --all   # every queued and running job, with its worktree
+tangier gate status --running --all   # every queued and running job, with its worktree and CPU and memory use
+tangier gate status --all --json      # every worktree's recent jobs, grouped as running, queued and recent, for a dashboard
 tangier gate cancel --all --reason "machine overloaded"
 ```
+
+`gate status` starts with a machine line, such as `slots: 3 of 4 in use, 2 queued  load 5.2 on 10
+CPUs  gates: cpu 412%  mem 5.6G of 32G`. Work a job hands to a daemon, such as Docker's, is not
+counted.
 
 A waiter whose job was cancelled this way says who cancelled it and why, and asks not to start it
 again without a check.
