@@ -385,8 +385,9 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   the first non-zero one. All gates share one read of `origin`. `[run-all]`
 - Fail-fast is the default. The first gate that fails or errors stops the run. The gates it did not
   run are named on stderr. The exit code is that gate's. `--no-fail-fast` runs every gate, so one
-  run reports every failure. Gates run in config order, by `[selector]`, so put cheap gates, such
-  as lint and format, before slow ones. A cheap failure then stops the run first. `[run-fail-fast]`
+  run reports every failure. `--dry-run` runs nothing, so it plans every gate. Gates run in config
+  order, by `[selector]`, so put cheap gates, such as lint and format, before slow ones. A cheap
+  failure then stops the run first. `[run-fail-fast]`
 - `--dry-run` prints each gate's status, its comparator as a short SHA with how it was chosen
   (`record at abc1234, local` or `merge base with origin/main`), and the commands a run would
   execute. It runs nothing and writes nothing. When `--accept` rejected a record on the walk, the
