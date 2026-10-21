@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import json
 import math
 import os
@@ -17,7 +18,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import tangier
-from tangier import gate, git, home, jobs, junit, ranon, stats
+from tangier import gate, git, home, jobs, junit, ranon, stats, usage
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs, write_summary
@@ -644,6 +645,15 @@ def _ago(when: str) -> str:
     return f"{seconds}s ago"
 
 
+def _bytes(size: int) -> str:
+    """`512B`, `12K`, `340M` or `5.6G`."""
+    for unit, scale in (("G", 1024**3), ("M", 1024**2), ("K", 1024)):
+        if size >= scale:
+            figure = size / scale
+            return f"{figure:.1f}{unit}" if figure < 10 else f"{figure:.0f}{unit}"
+    return f"{size}B"
+
+
 def _jobs_named(ids: list[int] | None) -> list[jobs.Job]:
     """The listed jobs, or the latest one. A missing job is an error."""
     if ids is None:
@@ -679,6 +689,7 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
     `--all` shows the jobs of every worktree on the machine, and `--running` only the unfinished ones.
     """
     jobs.reap(_runner(args))
+    machine_jobs = jobs.all_jobs(worktree_only=False)
     missing: list[int] = []
     if args.job is not None:
         shown = []
@@ -689,7 +700,8 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
             else:
                 shown.append(job)
     else:
-        every = jobs.all_jobs(worktree_only=not args.all)
+        here = None if args.all else jobs.here()
+        every = [j for j in machine_jobs if here is None or j.git_dir == here]
         cutoff = gate.now() - args.since
         shown = [
             j
@@ -715,35 +727,85 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
     def local(job: jobs.Job) -> tuple[str | None, dict[str, str | None] | None, bool]:
         return (tree, keys, True) if job.git_dir == mine else (None, None, False)
 
+    # Unechoed, so `ps` and `sysctl` stay out of the status output.
+    quiet = _runner(args, echo=False)
+    samples = usage.sample(quiet) if any(j.state in jobs.UNFINISHED for j in machine_jobs) else {}
+    machine = _machine(machine_jobs, samples, quiet)
+    running = [j for j in shown if j.state in jobs.UNFINISHED and j.state != "queued"]
+    order = {j.id: place for place, j in enumerate(j for j in reversed(machine_jobs) if j.state == "queued")}
+    queued = sorted((j for j in shown if j.state == "queued"), key=lambda j: order.get(j.id, 0))
+    recent = [j for j in shown if j.state not in jobs.UNFINISHED]
     if args.json:
-        data: list[dict[str, object]] = [_job_json(job, *local(job)) for job in shown]
-        data += [{"id": job_id, "state": "not-found"} for job_id in missing]
-        print(json.dumps(data, indent=2))
+        groups = {
+            name: [_job_json(job, *local(job), use=_use(job, samples)) for job in group]
+            for name, group in (("running", running), ("queued", queued), ("recent", recent))
+        }
+        print(json.dumps({"machine": machine, **groups, "not_found": missing}, indent=2))
         return 0
-    if args.all:
-        print(_slots_line())
+    print(_machine_line(machine))
     if not shown and not missing:
         print("no jobs")
     for job in shown:
-        _print_job(job, *local(job)[:2], where=args.all)
+        _print_job(job, *local(job)[:2], where=args.all, use=_use(job, samples))
     for job_id in missing:
         print(f"job {job_id}: not found (pruned?)")
     return 0
 
 
-def _slots_line() -> str:
-    """`slots: 3 of 4 in use, 2 queued`, for the whole machine."""
-    queued = sum(1 for j in jobs.all_jobs(worktree_only=False) if j.state == "queued")
-    return f"slots: {jobs.slots_in_use()} of {home.load_config().max_running} in use, {queued} queued"
+def _use(job: jobs.Job, samples: dict[int, usage.Usage]) -> usage.Usage | None:
+    """The job's process group's sample.
+
+    None before the job has a pid, and once it finishes, when its pid may be another group's.
+    """
+    return samples.get(job.pid) if job.pid > 0 and job.state in jobs.UNFINISHED else None
 
 
-def _print_job(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | None, *, where: bool = False) -> None:
+def _machine(every: list[jobs.Job], samples: dict[int, usage.Usage], runner: Runner) -> dict[str, object]:
+    """The whole machine's slots, queue, load and memory, and what its unfinished gate jobs use.
+
+    The `jobs_` figures are null when no `ps` sample was taken: no job is unfinished, or `ps` failed.
+    """
+    used = [u for j in every if (u := _use(j, samples)) is not None]
+    load = ranon.load()
+    return {
+        "slots_in_use": sum(1 for j in every if j.state == "running"),
+        "max_running": home.load_config().max_running,
+        "queued": sum(1 for j in every if j.state == "queued"),
+        "load": load.get("load"),
+        "cpus": load.get("cpus"),
+        "memory_total_bytes": usage.memory_total(runner),
+        "jobs_cpu_percent": round(sum(u.cpu_percent for u in used), 1) if samples else None,
+        "jobs_rss_bytes": sum(u.rss_bytes for u in used) if samples else None,
+    }
+
+
+def _machine_line(m: dict[str, Any]) -> str:
+    """`slots: 3 of 4 in use, 2 queued  load 5.2 on 10 CPUs  gates: cpu 412%  mem 5.6G of 32G`."""
+    parts = [f"slots: {m['slots_in_use']} of {m['max_running']} in use, {m['queued']} queued"]
+    if m["load"] is not None:
+        parts.append(f"load {m['load']} on {m['cpus']} CPUs")
+    if m["jobs_cpu_percent"] is not None:
+        total = f" of {_bytes(m['memory_total_bytes'])}" if m["memory_total_bytes"] else ""
+        parts.append(f"gates: cpu {m['jobs_cpu_percent']:.0f}%  mem {_bytes(m['jobs_rss_bytes'])}{total}")
+    return "  ".join(parts)
+
+
+def _print_job(
+    job: jobs.Job,
+    tree: str | None,
+    keys: dict[str, str | None] | None,
+    *,
+    where: bool = False,
+    use: usage.Usage | None = None,
+) -> None:
     state = job.state
     unfinished = state in jobs.UNFINISHED
     when = f"started {_ago(job.started)}" if unfinished else _ago(job.started)
     notes = ["stale"] if tree is not None and not unfinished and tree != job.tree else []
     if job.state == "queued" and (place := jobs.queue_position(job)) is not None:
         notes.append(f"queue {place[0]} of {place[1]}")
+    if use is not None:
+        notes.append(f"cpu {use.cpu_percent:.0f}%  mem {_bytes(use.rss_bytes)}")
     if where:
         notes.append(home.tilde(job.worktree) or "(worktree unknown)")
     print(f"job {job.id:<3} {state:<9} {job.commit_label:<14} {'  '.join([when, *notes])}")
@@ -764,9 +826,17 @@ def _print_job(job: jobs.Job, tree: str | None, keys: dict[str, str | None] | No
 
 
 def _job_json(
-    job: jobs.Job, tree: str | None, keys: dict[str, str | None] | None, local: bool = True
+    job: jobs.Job,
+    tree: str | None,
+    keys: dict[str, str | None] | None,
+    local: bool = True,
+    *,
+    use: usage.Usage | None = None,
 ) -> dict[str, object]:
-    """The job as `status --json` prints it. `stale` and `drift` are null for a job in another worktree."""
+    """The job as `status --json` prints it. `stale` and `drift` are null for a job in another worktree.
+
+    `usage` is null when the job's process group has no live process. See `[status-usage]`.
+    """
     state = job.state
     place = jobs.queue_position(job) if state == "queued" else None
     return {
@@ -802,6 +872,7 @@ def _job_json(
             }
             for g in job.gates
         ],
+        "usage": None if use is None else dataclasses.asdict(use),
     }
 
 

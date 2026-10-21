@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest import mock
 
-from tangier import cli, gate, git, home, jobs, ranon
+from tangier import cli, gate, git, home, jobs, ranon, usage
 from tangier.commands import gate_cmds
 from tangier.runner import Result, Subprocess
 from tangier.tests.support import RecordingRunner, make_git_repo
@@ -117,6 +117,11 @@ def hint(job_id: int, what: str = "starting") -> str:
 def log(job_id: int) -> str:
     """A job's log path, as tangier prints it."""
     return home.tilde(os.path.join(home.root(), "jobs", str(job_id), "output.log"))
+
+
+def machine(in_use: int = 0, queued: int = 0, of: int = 4) -> str:
+    """The machine line `gate status` starts with, on the quiet machine `JobCase` sets up, with no `ps` figures."""
+    return f"slots: {in_use} of {of} in use, {queued} queued  load 1.0 on 10 CPUs\n"
 
 
 def _timeless(status: str) -> str:
@@ -571,7 +576,15 @@ class TestWait(JobCase):
 class TestStatus(JobCase):
     # SPEC: gate#job-status
     def test_no_jobs(self) -> None:
-        self.assertEqual(self.tangier("gate", "status"), (0, "no jobs\n", ""))
+        self.assertEqual(self.tangier("gate", "status"), (0, machine() + "no jobs\n", ""))
+
+    # SPEC: gate#status-usage
+    def test_status_runs_no_ps_when_no_job_is_unfinished(self) -> None:
+        _ = self.run_gates("lint")
+        runner = RecordingRunner()
+        _ = self.tangier("gate", "status", "--all", runner=runner)
+        _ = self.tangier("gate", "status", "--json", runner=runner)
+        self.assertEqual([call for call in runner.calls if call[0] == "ps"], [])
 
     # SPEC: gate#job-status
     def test_status_shows_each_job_and_gate_with_its_key(self) -> None:
@@ -579,7 +592,7 @@ class TestStatus(JobCase):
         code, out, _ = self.tangier("gate", "status")
         self.assertEqual(code, 0)
         job = self.job()
-        lines = out.splitlines()
+        lines = out.splitlines()[1:]
         self.assertRegex(lines[0], rf"^job 1 +failed +{job.head[:7]} +\d+s ago$")
         self.assertRegex(lines[1], rf"^  lint +{job.gate('lint').key[:8]} +passed +[\d.]+s$")
         self.assertRegex(lines[2], rf"^  test +{job.gate('test').key[:8]} +failed\(4\) +[\d.]+s +log: .*output.log$")
@@ -591,6 +604,9 @@ class TestStatus(JobCase):
         self.assertEqual(code, 0)
         self.assertIn("job 1 ", out)
         self.assertIn("job 9: not found (pruned?)", out)
+        _, out, _ = self.tangier("gate", "status", "--job", "1,9", "--json")
+        data = json.loads(out)
+        self.assertEqual(([j["id"] for j in data["recent"]], data["not_found"]), ([1], [9]))
 
     # SPEC: gate#job-status
     def test_status_shows_recent_jobs_and_always_the_latest(self) -> None:
@@ -616,7 +632,7 @@ class TestStatus(JobCase):
             _ = self.run_gates("lint")
         self.edit()
         _, out, _ = self.tangier("gate", "status", "--json")
-        (data,) = json.loads(out)
+        (data,) = json.loads(out)["recent"]
         job = self.job()
         key = job.gate("lint").key
         times = ("pid", "started", "ended")
@@ -637,6 +653,7 @@ class TestStatus(JobCase):
                 "git_dir": os.path.realpath(os.path.join(self.repo, ".git")),
                 "queue_position": None,
                 "cancelled": None,
+                "usage": None,
                 "gates": [
                     {
                         "name": "lint",
@@ -656,7 +673,7 @@ class TestStatus(JobCase):
     def test_status_json_gives_a_failed_gate_its_failure_record(self) -> None:
         _ = self.run_gates("lint", runner=InProcessRunner({("bin/lint",): Result(3)}))
         _, out, _ = self.tangier("gate", "status", "--json")
-        (data,) = json.loads(out)
+        (data,) = json.loads(out)["recent"]
         key = self.job().gate("lint").key
         self.assertEqual(
             [(g["state"], g["ref"]) for g in data["gates"]], [("failed", f"refs/tangier/failures/lint/{key}")]
@@ -672,7 +689,8 @@ class TestStatus(JobCase):
         job = self.job()
         self.assertEqual(
             _timeless(out),
-            f"job 1   passed    {job.head[:7]}        <ago>  stale\n  lint  {job.gate('lint').key[:8]}  passed      <t>     stale\n",
+            machine()
+            + f"job 1   passed    {job.head[:7]}        <ago>  stale\n  lint  {job.gate('lint').key[:8]}  passed      <t>     stale\n",
         )
 
     # SPEC: gate#job-drift
@@ -686,7 +704,7 @@ class TestStatus(JobCase):
         job = self.job()
         self.assertEqual(
             _timeless(out),
-            f"job 1   running   {job.head[:7]}        started <ago>\n"
+            machine(1) + f"job 1   running   {job.head[:7]}        started <ago>\n"
             f"  lint  {job.gate('lint').key[:8]}  running     <t>     worktree changed since start: will not be recorded\n",
         )
 
@@ -709,6 +727,13 @@ class RealRunner(Subprocess):
     def __init__(self) -> None:
         super().__init__()
         self.slept: list[float] = []
+
+
+class RealPs(RecordingRunner):
+    """Runs `ps` for real, so a `SleeperRunner` job's process shows its use."""
+
+    def run(self, argv: list[str], **kwargs: Any) -> Result:
+        return Subprocess().run(argv, **kwargs) if argv[0] == "ps" else super().run(argv, **kwargs)
 
 
 class RealSleep(RecordingRunner):
@@ -795,7 +820,7 @@ class TestCancel(JobCase):
                     seen.append(test.tangier("gate", "status", runner=RecordingRunner())[1])
 
         self.assertEqual(self.tangier("gate", "cancel", runner=LooksMidCancel())[0], 0)
-        self.assertRegex(seen[0], r"^job 1 +stopping ")
+        self.assertRegex(seen[0], r"\njob 1 +stopping ")
         self.assertEqual(self.job().state, "cancelled")
 
     # SPEC: gate#cancel
@@ -1026,43 +1051,150 @@ class TestQueue(JobCase):
         _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other)
         _, out, _ = self.tangier("gate", "status", "--running", "--all")
         lines = out.splitlines()
-        self.assertEqual(lines[0], "slots: 1 of 1 in use, 1 queued")
+        self.assertEqual(lines[0] + "\n", machine(1, 1, of=1))
         self.assertRegex(lines[1], rf"^job 3 +queued .*  queue 1 of 1  {re.escape(self.shown(self.other))}$")
         self.assertRegex(lines[3], rf"^job 2 +running .*  {re.escape(self.shown(self.repo))}$")
         self.assertNotIn("job 1 ", out)
         _, out, _ = self.tangier("gate", "status")
+        # The machine line counts the other worktree's queued job, as the job list does not.
+        self.assertEqual(out.splitlines()[0] + "\n", machine(1, 1, of=1))
         self.assertEqual([line.split()[1] for line in out.splitlines() if line.startswith("job")], ["2"])
+        _, out, _ = self.tangier("gate", "status", "--running", "--all", "--json")
+        data = json.loads(out)
+        self.assertEqual([[j["id"] for j in data[g]] for g in ("running", "queued", "recent")], [[2], [3], []])
         _, out, _ = self.tangier("gate", "status", "--all", "--json")
-        fields = ("id", "state", "worktree", "git_dir", "queue_position", "stale")
+        fields = ("id", "state", "worktree", "git_dir", "queue_position", "stale", "usage")
+        data = json.loads(out)
         self.assertEqual(
-            [{**{k: job[k] for k in fields}, "drift": [g["drift"] for g in job["gates"]]} for job in json.loads(out)],
-            [
-                {
-                    **self.where(self.other),
-                    "id": 3,
-                    "state": "queued",
-                    "queue_position": 1,
-                    "stale": None,
-                    "drift": [None],
-                },
-                {
-                    **self.where(self.repo),
-                    "id": 2,
-                    "state": "running",
-                    "queue_position": None,
-                    "stale": False,
-                    "drift": [False],
-                },
-                {
-                    **self.where(self.other),
-                    "id": 1,
-                    "state": "passed",
-                    "queue_position": None,
-                    "stale": None,
-                    "drift": [None],
-                },
-            ],
+            {
+                group: [{**{k: job[k] for k in fields}, "drift": [g["drift"] for g in job["gates"]]} for job in listed]
+                for group, listed in data.items()
+                if group not in ("machine", "not_found")
+            },
+            {
+                "running": [
+                    {
+                        **self.where(self.repo),
+                        "id": 2,
+                        "state": "running",
+                        "queue_position": None,
+                        "stale": False,
+                        "usage": None,
+                        "drift": [False],
+                    }
+                ],
+                "queued": [
+                    {
+                        **self.where(self.other),
+                        "id": 3,
+                        "state": "queued",
+                        "queue_position": 1,
+                        "stale": None,
+                        "usage": None,
+                        "drift": [None],
+                    }
+                ],
+                "recent": [
+                    {
+                        **self.where(self.other),
+                        "id": 1,
+                        "state": "passed",
+                        "queue_position": None,
+                        "stale": None,
+                        "usage": None,
+                        "drift": [None],
+                    }
+                ],
+            },
         )
+        self.assertEqual(data["not_found"], [])
+        self.assertEqual(
+            {k: data["machine"][k] for k in ("slots_in_use", "max_running", "queued", "load", "cpus")},
+            {"slots_in_use": 1, "max_running": 1, "queued": 1, "load": 1.0, "cpus": 10},
+        )
+
+    # SPEC: gate#status-usage
+    def test_status_gives_each_unfinished_job_its_process_groups_use(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        self.end(1)
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        third = self.other_repo()
+        _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other)
+        _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=third)
+        pids = {n: self.job(n).pid for n in (1, 2, 3, 4)}
+        # Job 1 finished, so its pid's group now belongs to someone else. Group 0 is Linux's kernel threads.
+        ps = "".join(
+            f"{group} {cpu} {kib}\n"
+            for group, cpu, kib in (
+                (pids[1], 99.0, 4096),
+                (pids[2], 120.0, 1024),
+                (pids[2], 0.4, 1024),
+                (pids[3], 0.1, 512),
+                (pids[4], 0.1, 512),
+                (0, 50.0, 0),
+                (999999, 30.0, 2048),
+            )
+        )
+        runner = RecordingRunner({("ps",): Result(0, ps)})
+        with mock.patch.object(usage, "memory_total", return_value=32 * 1024**3):
+            _, out, _ = self.tangier("gate", "status", "--all", "--json", runner=runner)
+            _, text, _ = self.tangier("gate", "status", "--all", runner=runner)
+        data = json.loads(out)
+        self.assertEqual(
+            data["machine"],
+            {
+                "slots_in_use": 1,
+                "max_running": 1,
+                "queued": 2,
+                "load": 1.0,
+                "cpus": 10,
+                "memory_total_bytes": 32 * 1024**3,
+                "jobs_cpu_percent": 120.6,
+                "jobs_rss_bytes": 3072 * 1024,
+            },
+        )
+        self.assertEqual(
+            {g: [(j["id"], j["usage"]) for j in data[g]] for g in ("running", "queued", "recent")},
+            {
+                "running": [(2, {"cpu_percent": 120.4, "rss_bytes": 2048 * 1024, "processes": 2})],
+                "queued": [
+                    (3, {"cpu_percent": 0.1, "rss_bytes": 512 * 1024, "processes": 1}),
+                    (4, {"cpu_percent": 0.1, "rss_bytes": 512 * 1024, "processes": 1}),
+                ],
+                "recent": [(1, None)],
+            },
+        )
+        lines = text.splitlines()
+        self.assertEqual(
+            lines[0], "slots: 1 of 1 in use, 2 queued  load 1.0 on 10 CPUs  gates: cpu 121%  mem 3.0M of 32G"
+        )
+        self.assertRegex(lines[1], r"^job 4 +queued .*  queue 2 of 2  cpu 0%  mem 512K  ")
+        self.assertRegex(lines[3], r"^job 3 +queued .*  queue 1 of 2  cpu 0%  mem 512K  ")
+        self.assertRegex(lines[5], r"^job 2 +running .*  started \S+ ago  cpu 120%  mem 2.0M  ")
+        self.assertRegex(lines[7], r"^job 1 +passed ")
+        self.assertNotIn("cpu", lines[7])
+
+    # SPEC: gate#status-usage
+    def test_status_reads_a_real_jobs_use_from_ps(self) -> None:
+        if not usage.sample(Subprocess()):
+            self.skipTest("`ps` cannot run here, as in a sandbox")
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other)
+        _, out, _ = self.tangier("gate", "status", "--all", "--json", runner=RealPs())
+        data = json.loads(out)
+        (running,) = data["running"]
+        self.assertGreaterEqual(running["usage"]["processes"], 1)
+        self.assertGreater(running["usage"]["rss_bytes"], 0)
+        # The queued job's group is sampled too: here, the fixture's one `sleep`.
+        self.assertEqual(data["queued"][0]["usage"]["processes"], 1)
+        self.assertGreaterEqual(data["machine"]["jobs_rss_bytes"], running["usage"]["rss_bytes"])
+        self.assertIsNotNone(data["machine"]["jobs_cpu_percent"])
+        with mock.patch.object(usage, "memory_total", return_value=32 * 1024**3):
+            _, out, _ = self.tangier("gate", "status", "--all", runner=RealPs())
+        lines = out.splitlines()
+        self.assertRegex(lines[0], r"  gates: cpu \d+%  mem [\d.]+[BKMG] of 32G$")
+        self.assertRegex(lines[1], r"^job 2 +queued .*  queue 1 of 1  cpu \d+%  mem ")
+        self.assertRegex(lines[3], r"^job 1 +running .*  cpu \d+%  mem [\d.]+[BKMG]  ")
 
     def where(self, repo: str) -> dict[str, str]:
         return {"worktree": os.path.realpath(repo), "git_dir": os.path.realpath(os.path.join(repo, ".git"))}
@@ -1109,7 +1241,7 @@ class TestQueue(JobCase):
             r"\(GitHub Actions\) run the gates\.\n",
         )
         _, out, _ = self.tangier("gate", "status", "--job", "2", "--json")
-        (cancelled,) = [job["cancelled"] for job in json.loads(out)]
+        (cancelled,) = [job["cancelled"] for job in json.loads(out)["recent"]]
         self.assertEqual(
             {**cancelled, "time": "<t>"},
             {"by": "tangier gate cancel --all", "reason": "load test", "user": getpass.getuser(), "time": "<t>"},

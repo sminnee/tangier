@@ -140,7 +140,7 @@ member. An unknown selector exits 2.
 | --- | --- | --- | --- |
 | `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--fail-fast`, `--dry-run`, `--debug`, `--accept`, `--wait` | Run each gate on the working tree, unless it is verified or not needed. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. Outside CI and `--dry-run`, start a job and return once it starts; `--wait` waits for it, up to an hour. While another job in this worktree runs, `--wait` queues behind it, and a plain run starts nothing and exits 2. Over the machine's `max-running` limit, the job is `queued` until a slot frees. | the first non-zero code, 2 when another job runs, or 3 when the job is still queued or running |
 | `gate wait [<selector>...]` | `--job N[,N...]` | Wait up to an hour for this worktree's latest job, or the listed jobs from any worktree, or only the selected gates. Print a queued job's place when it changes. On a terminal, stream the log. Elsewhere, print each gate's start and result and the log tail of a failure. After a failed gate that ran with more load than CPUs, print a load note. For a job stopped by `gate cancel`, print who cancelled it and why. | 0 passed, 1 failed or cancelled, 2 no such job, 3 still queued or running |
-| `gate status` | `--job N[,N...]`, `--since` (default `8h`), `--running`, `--all`, `--json` | Print this worktree's recent jobs, each gate's key and state, and which results are stale. The latest job always shows. `--running` shows only queued and running jobs. `--all` shows every worktree's jobs, each with its worktree, after a `slots: 3 of 4 in use, 2 queued` line. | 0 |
+| `gate status` | `--job N[,N...]`, `--since` (default `8h`), `--running`, `--all`, `--json` | Print this worktree's recent jobs, each gate's key and state, and which results are stale. The latest job always shows. `--running` shows only queued and running jobs. `--all` shows every worktree's jobs, each with its worktree. The first line gives the machine's slots, load, and the CPU and memory its gate jobs use; each unfinished job line adds its own `cpu 230%  mem 1.2G`. `--json` prints `{"machine", "running", "queued", "recent", "not_found"}`; see below. | 0 |
 | `gate cancel` | `--job N` or `--all`, `--reason TEXT` | Stop this worktree's latest job, job N, or with `--all` every queued and running job on the machine, in one 10-second grace period. Unfinished gates become `cancelled`. Each job's waiter prints who cancelled it, with the reason. | 0 |
 | `gate list` | | Print every gate in config order, with a group's members indented under a `<group> (group)` line. | 0 |
 | `gate key [<selector>]` | `--head` | Print the key. A group, or no selector, prints `<name> <key>` per gate, and nothing when any gate fails closed. | 0, or 2 when a scope entry matches no file |
@@ -186,6 +186,29 @@ Jobs live in `~/.tangier/` (`TANGIER_HOME` moves it). `[jobs] max-running` in
 `gate run` exits 1 without a record when the working tree changed during the run. A gate with a
 placeholder exits 2 when `--base` has no merge base and no record covers the tree; `--full` avoids
 this.
+
+### `gate status --json`
+
+```json
+{
+  "machine": {"slots_in_use": 3, "max_running": 4, "queued": 2,
+              "load": 5.2, "cpus": 10, "memory_total_bytes": 34359738368,
+              "jobs_cpu_percent": 412.0, "jobs_rss_bytes": 6012340224},
+  "running": [{"id": 14, "state": "running", "usage": {"cpu_percent": 230.4, "rss_bytes": 1288490188, "processes": 7}, ...}],
+  "queued": [...],
+  "recent": [...],
+  "not_found": [9]
+}
+```
+
+`machine` covers every worktree, whatever the flags. `running` holds `running`, `stopping` and
+`orphaned` jobs, `queued` is in queue order, and `recent` holds finished jobs, newest first.
+Each job also has `pid`, `head`, `tree`, `dirty`, `base`, `started`, `code`, `stale`, `log`,
+`worktree`, `git_dir`, `queue_position`, `cancelled` and `gates`. `usage` sums the job's process
+group from one `ps`: CPU as a percentage of one CPU (a recent average on macOS, a lifetime
+average on Linux) and resident memory. It is null once no process in the group lives. Work a job
+hands to a daemon, such as Docker's, is not counted. `jobs_cpu_percent` and `jobs_rss_bytes` are
+null when no job is unfinished or `ps` cannot run.
 
 ### `gate github-outputs`
 
