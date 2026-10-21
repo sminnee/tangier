@@ -27,8 +27,8 @@ from tangier.runner import Runner, Subprocess
 clock = time.monotonic
 
 
-def _runner(args: argparse.Namespace) -> Runner:
-    return getattr(args, "runner", None) or Subprocess(echo=True)
+def _runner(args: argparse.Namespace, *, echo: bool = True) -> Runner:
+    return getattr(args, "runner", None) or Subprocess(echo=echo)
 
 
 def cmd_list(config: Config, args: argparse.Namespace) -> int:
