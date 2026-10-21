@@ -46,6 +46,8 @@ Ctrl-C in `gate run` cancels it.
 - Do not edit the worktree while a job is queued or runs. A gate whose tree changes under it writes no record.
 - Run `tangier gate status` to see each recent job and its gates. A `stale` result no longer
   matches your working tree. Run the gate again.
+- To follow jobs as they run, run `tangier gate status --watch --json` in the background rather
+  than polling `gate status`. It prints one JSON object per job or gate change, and runs until stopped.
 - `tangier gate cancel` stops the job.
 
 ## Failure history

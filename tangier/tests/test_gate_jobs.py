@@ -745,6 +745,204 @@ class TestStatus(JobCase):
         self.assertEqual(self.job().gate("lint").state, "unrecorded")
 
 
+class TestWatch(JobCase):
+    """`gate status --watch`. A fake wait moves the jobs along one step per call, then stops the watch with Ctrl-C."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.max_running(1)
+        self.other = self.other_repo()
+
+    def watch(self, *argv: str, steps: list[Any], stdout: io.StringIO | None = None) -> tuple[int, str]:
+        left = iter(steps)
+
+        def wait(_watcher: watch.Watcher, timeout: float) -> None:
+            step = next(left, None)
+            if step is None:
+                raise KeyboardInterrupt
+            step()
+
+        with mock.patch.object(watch.Watcher, "wait", wait):
+            if stdout is None:
+                code, out, err = self.tangier("gate", "status", "--watch", *argv, runner=RecordingRunner())
+                self.assertEqual(err, "")
+                return code, out
+            with contextlib.chdir(self.repo), contextlib.redirect_stdout(stdout):
+                return cli.main(["gate", "status", "--watch", *argv], runner=RecordingRunner()), ""
+
+    def events(self, out: str) -> list[str]:
+        """The event lines, without their times."""
+        found = []
+        for line in out.splitlines():
+            match = re.match(r"^\d\d:\d\d:\d\d (.*)$", line)
+            if match:
+                found.append(re.sub(r"\b\d+(\.\d)?s\b|\b\d+m\d\ds\b", "<t>", match.group(1)))
+        return found
+
+    def a_job_runs(self) -> list[Any]:
+        """Job 2, in this worktree, queues behind job 1 in another, runs both its gates, and fails."""
+
+        def slot_frees() -> None:
+            self.end(1)
+            self.take_slot(2)
+
+        def finishes() -> None:
+            self.report(2, "lint", "passed")
+            self.report(2, "test", "failed", 3)
+            _reap(self.job(2).pid)
+            jobs.finish(self.job(2).dir, 1)
+
+        return [
+            lambda: self.run_gates("lint", "test", runner=SleeperRunner(self)),
+            slot_frees,
+            lambda: self.report(2, "lint"),
+            finishes,
+        ]
+
+    def setup_other(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other)
+
+    # SPEC: gate#status-watch
+    def test_watch_prints_the_status_then_each_change(self) -> None:
+        self.setup_other()
+        code, out = self.watch(steps=self.a_job_runs())
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith(machine(1, of=1) + "no jobs\n"), out)
+        self.assertEqual(
+            self.events(out),
+            [
+                "job 2 queued  queue 1 of 1",
+                "job 2 running",
+                "job 2 lint running",
+                "job 2 lint passed <t>",
+                f"job 2 test failed(3) <t>  log: {log(2)}",
+                "job 2 failed",
+            ],
+        )
+
+    # SPEC: gate#status-watch
+    def test_watch_json_prints_one_event_per_line(self) -> None:
+        self.setup_other()
+        code, out = self.watch("--json", steps=self.a_job_runs())
+        self.assertEqual(code, 0)
+        events = [json.loads(line) for line in out.splitlines()]
+        status = events[0]
+        self.assertEqual(
+            (status["type"], status["running"], status["queued"], status["recent"]), ("status", [], [], [])
+        )
+        self.assertEqual(status["machine"]["slots_in_use"], 1)
+
+        def brief(e: dict[str, Any]) -> tuple[Any, ...]:
+            if e["type"] == "job":
+                return ("job", e["previous"], e["job"]["state"])
+            return ("gate", e["previous"], e["gate"]["name"], e["gate"]["state"])
+
+        self.assertEqual(
+            [brief(e) for e in events[1:]],
+            [
+                ("job", None, "queued"),
+                ("job", "queued", "running"),
+                ("gate", "pending", "lint", "running"),
+                ("gate", "running", "lint", "passed"),
+                ("gate", "pending", "test", "failed"),
+                ("job", "running", "failed"),
+            ],
+        )
+        self.assertEqual(events[1]["job"]["queue_position"], 1)
+        for e in events:
+            datetime.fromisoformat(e["time"])
+        # Each event's job and gate are as `status --json` gives them.
+        _, now, _ = self.tangier("gate", "status", "--json", runner=RecordingRunner())
+        (job,) = json.loads(now)["recent"]
+        self.assertEqual(events[-1]["job"], job)
+        self.assertEqual((events[4]["job_id"], events[4]["gate"]), (2, job["gates"][0]))
+
+    # SPEC: gate#status-watch
+    def test_watch_all_shows_each_worktree_oldest_job_first(self) -> None:
+        def both_start() -> None:
+            _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other)
+            _ = self.run_gates("lint", runner=SleeperRunner(self))
+
+        _, out = self.watch(steps=[both_start])
+        self.assertEqual(self.events(out), ["job 2 queued  queue 1 of 1"])
+        self.end(1)
+        self.end(2)
+        _, out = self.watch("--all", steps=[both_start])
+        self.assertEqual(
+            self.events(out),
+            [f"job 3 running  {self.shown(self.other)}", f"job 4 queued  queue 1 of 1  {self.shown(self.repo)}"],
+        )
+
+    # SPEC: gate#status-watch
+    def test_watch_shows_a_job_whose_process_died(self) -> None:
+        steps = [
+            lambda: self.run_gates("lint", "test", runner=SleeperRunner(self)),
+            lambda: self.report(1, "lint"),
+            # Killed: it writes nothing, and the watch's own reap finds it.
+            lambda: _reap(self.job(1).pid),
+        ]
+        _, out = self.watch(steps=steps)
+        self.assertEqual(
+            self.events(out),
+            [
+                "job 1 running",
+                "job 1 lint running",
+                f"job 1 lint died <t>  log: {log(1)}",
+                f"job 1 test died  log: {log(1)}",
+                "job 1 died",
+            ],
+        )
+
+    # SPEC: gate#status-watch
+    def test_watch_job_shows_only_those_jobs_from_any_worktree(self) -> None:
+        def other_runs() -> None:
+            self.end(1)
+            _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other)
+
+        def other_ends() -> None:
+            self.report(2, "lint", "passed")
+            self.end(2)
+
+        steps = [lambda: self.run_gates("lint", runner=SleeperRunner(self)), other_runs, other_ends]
+        _, out = self.watch("--job", "2", steps=steps)
+        self.assertEqual(out.splitlines()[1], "job 2: not found (pruned?)")
+        self.assertEqual(self.events(out), ["job 2 running", "job 2 lint passed <t>", "job 2 passed"])
+
+    # SPEC: gate#status-watch
+    def test_watch_since_and_running_limit_only_the_first_status(self) -> None:
+        self.old_job(1)
+        _ = self.run_gates("lint")
+        _, out = self.watch("--since", "1h", steps=[lambda: self.old_job(1)])
+        self.assertIn("job 2 ", out.splitlines()[1])
+        self.assertNotIn("job 1 ", out)
+        self.assertEqual(self.events(out), [f"job 3 lint error  log: {log(3)}", "job 3 passed"])
+        _, out = self.watch("--running", steps=[lambda: self.run_gates("lint")])
+        self.assertTrue(out.startswith(machine(of=1) + "no jobs\n"), out)
+        self.assertEqual(self.events(out), ["job 4 lint passed <t>", "job 4 passed"])
+
+    # SPEC: gate#status-watch
+    def test_watch_exits_0_when_its_reader_goes(self) -> None:
+        class Closes(io.StringIO):
+            """A pipe whose reader goes after the first status."""
+
+            def write(self, s: str) -> int:
+                if re.match(r"\d\d:", s):
+                    raise BrokenPipeError
+                return super().write(s)
+
+        stdout = Closes()
+        code, _ = self.watch(steps=[lambda: self.run_gates("lint", runner=SleeperRunner(self))], stdout=stdout)
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout.getvalue(), machine(of=1) + "no jobs\n")
+        self.assertEqual(os.listdir(os.path.join(self.home, "watch")), [])
+
+    # SPEC: gate#status-watch
+    def test_sigterm_stops_a_watch_as_ctrl_c_does(self) -> None:
+        code, _ = self.watch(steps=[lambda: os.kill(os.getpid(), signal.SIGTERM)])
+        self.assertEqual((code, self.uncaught), (0, []))
+        self.assertEqual(os.listdir(os.path.join(self.home, "watch")), [])
+
+
 class TestNotify(JobCase):
     """A real watcher socket. Where one cannot be bound, as in a sandbox, these skip."""
 

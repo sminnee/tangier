@@ -366,7 +366,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | `gate key [<selector>]` | Print the key. With no selector, print `<name> <key>` for every gate. |
 | `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--no-fail-fast`, `--dry-run`, `--debug`, `--accept` and `--wait`. Outside CI the gates run as a [job](#jobs). |
 | `gate wait [<selector> ...]` | Wait for a job, or for some of its gates, up to an hour. Takes `--job`. |
-| `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since` and `--json`. |
+| `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since`, `--running`, `--all`, `--json` and `--watch`. |
 | `gate cancel` | Stop a running job. Takes `--job`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
 | `gate sync` | Sync gate and failure records with `origin`: pull, merge runs, push, and prune expired records. |
@@ -591,6 +591,26 @@ to an hour.
   `memory_total_bytes` (null where it cannot be read), and `jobs_cpu_percent` and
   `jobs_rss_bytes`, the sums over every unfinished job on the machine. Those two are null when no
   `ps` sample was taken, and the text line then leaves out its `gates:` part. `[status-usage]`
+- `gate status --watch` prints the status, then each change as it happens, until Ctrl-C. A change
+  is a new job, a job that changes state, or a gate that changes state. Usage changes are not
+  changes.
+  - A text event is one line that starts with the local time: `12:03:04 job 14 queued  queue 1 of
+    2`, `12:03:05 job 14 running`, `12:03:09 job 14 lint passed 4.2s` or `12:03:09 job 14 lint
+    failed(1) 4.2s  log: ~/...`. With `--all`, a new job's line adds its worktree.
+  - With `--json`, each line is one compact JSON object. The first is `{"type": "status", "time",
+    ...}` with the keys of `status --json`. Then come `{"type": "job", "time", "previous", "job"}`
+    and `{"type": "gate", "time", "job_id", "previous", "gate"}`, where `job` and `gate` are as
+    `status --json` gives them. `previous` is null for a new job. `time` is UTC.
+  - Events come oldest job first. An unfinished job's event comes before its gates' events. A
+    finished job's event comes after them.
+  - The scope is this worktree, or the machine with `--all`. `--job` limits the events to those
+    jobs, including one that does not exist yet. `--since` and `--running` limit only the first
+    status: a job that starts later always shows.
+  - Each write to a job, and the start of a cancel, wakes the watcher through a Unix socket in
+    `~/.tangier/watch/`, so a change prints at once. The watcher also re-reads the jobs every 2
+    seconds, to catch a job process that died. Where the socket cannot be bound, as in a sandbox,
+    the watcher only polls.
+  - Ctrl-C, SIGTERM, SIGHUP, or a reader that closes the pipe, exits 0. `[status-watch]`
 - A finished job is `stale` when the working tree differs from the tree it keyed. A gate result
   is `stale` when the gate's key for the working tree differs from the key it ran against. A
   stale result does not apply to the work in hand. `[job-stale]`
