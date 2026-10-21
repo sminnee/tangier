@@ -265,10 +265,17 @@ class TestRun(JobCase):
 
     # SPEC: gate#job-run-waits
     def test_fail_fast_cancels_the_gates_it_does_not_run(self) -> None:
-        code, _, _ = self.run_gates("--all", "--fail-fast", runner=InProcessRunner({("bin/lint",): Result(4)}))
+        code, _, _ = self.run_gates("--all", runner=InProcessRunner({("bin/lint",): Result(4)}))
         self.assertEqual(code, 4)
         self.assertEqual([g.state for g in self.job().gates], ["failed", "cancelled"])
-        self.assertEqual(self.job().gate("test").line, "gate `test`: not run (--fail-fast)")
+        self.assertEqual(self.job().gate("test").line, "gate `test`: not run (fail-fast)")
+
+    # SPEC: gate#job-run-waits
+    # SPEC: gate#run-fail-fast
+    def test_no_fail_fast_reaches_the_job_and_runs_every_gate(self) -> None:
+        code, _, _ = self.run_gates("--all", "--no-fail-fast", runner=InProcessRunner({("bin/lint",): Result(4)}))
+        self.assertEqual(code, 4)
+        self.assertEqual([g.state for g in self.job().gates], ["failed", "passed"])
 
     # SPEC: gate#job-run-waits
     def test_a_gate_that_exits_3_is_not_read_as_still_running(self) -> None:

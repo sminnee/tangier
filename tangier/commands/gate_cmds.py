@@ -63,7 +63,7 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
     """Run each selected gate on the working tree, unless the diff from its comparator does not need it.
 
     The key describes the working tree, uncommitted work included. `--dry-run`
-    runs nothing. A failing gate does not stop the rest, unless `--fail-fast`.
+    runs nothing. A failing gate stops the rest, unless `--no-fail-fast`.
     The exit code is the first non-zero one.
 
     Once every gate has run, the records this invocation wrote are published
@@ -107,10 +107,10 @@ def _run_inline(
             written.add(ref)
         if first and args.fail_fast:
             if rest := names[i + 1 :]:
-                print(f"--fail-fast: not run: {', '.join(rest)}", file=sys.stderr)
+                print(f"fail-fast: not run: {', '.join(rest)}; --no-fail-fast runs them", file=sys.stderr)
             for skipped in rest:
                 reporter.finished(
-                    skipped, "cancelled", jobs.CANCELLED_CODE, line=f"gate `{skipped}`: not run (--fail-fast)"
+                    skipped, "cancelled", jobs.CANCELLED_CODE, line=f"gate `{skipped}`: not run (fail-fast)"
                 )
             break
     if written:
@@ -1255,7 +1255,12 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         help="reuse a record, but write none",
     )
     add_full(rp, "run with complete lists, as if every tag changed; reads no record and no diff")
-    _ = rp.add_argument("--fail-fast", action="store_true", help="stop at the first failing gate")
+    _ = rp.add_argument(
+        "--fail-fast",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="stop at the first failing gate (default); --no-fail-fast runs every gate",
+    )
     _ = rp.add_argument(
         "--dry-run", action="store_true", help="print each gate's status, base and commands; run and write nothing"
     )

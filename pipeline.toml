@@ -1,7 +1,7 @@
 # tangier's own gates. `tangier gate run <name>` runs one and records the pass;
 # CI runs the same command. See `docs/specs/gate.md`.
 
-# Cheap gates first, so `gate run --all --fail-fast` stops before the slow test gates.
+# Cheap gates first, so `gate run --all` stops before the slow test gates.
 [gate.lint]
 scope = ["gate-inputs"]
 

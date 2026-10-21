@@ -222,6 +222,9 @@ Rules:
 - A scope entry that is a file-set, names nothing, or is a tag with no `paths` is an error.
 - A scope bucket brings in every tag in that bucket, plus each tag's transitive `depends`.
 
+Order matters: `gate run` runs gates in config order and stops at the first failure, so put fast
+gates first.
+
 ### Placeholders
 
 A placeholder is a whole argument:
