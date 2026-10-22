@@ -8,10 +8,12 @@ that `unittest.mock.patch.object` cannot reach.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterable, Mapping
 
 
 class GitError(RuntimeError):
@@ -210,12 +212,51 @@ def cat_blob(sha: str) -> str:
     return _git_checked("cat-file", "blob", sha)
 
 
+def cat_blobs(shas: Iterable[str]) -> dict[str, str]:
+    """The text of each blob in `shas`, read in one `git cat-file --batch`.
+
+    A SHA that is missing, is not a blob, or is not UTF-8 has no entry: the
+    caller treats it as unreadable.
+    """
+    wanted = list(dict.fromkeys(shas))
+    if not wanted:
+        return {}
+    stdin = "".join(f"{sha}\n" for sha in wanted).encode()
+    res = subprocess.run(["git", "cat-file", "--batch"], input=stdin, capture_output=True, check=False)
+    if res.returncode != 0:
+        detail = res.stderr.decode(errors="replace").strip() or f"exit {res.returncode}"
+        raise GitError(f"git cat-file --batch: {detail}")
+    out, pos = res.stdout, 0
+    blobs: dict[str, str] = {}
+    for sha in wanted:
+        end = out.find(b"\n", pos)
+        if end < 0:
+            raise GitError("git cat-file --batch: truncated output")
+        header = out[pos:end].split()
+        pos = end + 1
+        # `<sha> missing` and `<sha> ambiguous` carry no content.
+        if len(header) != 3:
+            continue
+        size = int(header[2])
+        content = out[pos : pos + size]
+        if len(content) != size:
+            raise GitError("git cat-file --batch: truncated output")
+        pos += size + 1
+        if header[1] == b"blob":
+            with contextlib.suppress(UnicodeDecodeError):
+                blobs[sha] = content.decode()
+    return blobs
+
+
 def update_ref(ref: str, sha: str) -> None:
     _ = _git_checked("update-ref", ref, sha)
 
 
-def delete_ref(ref: str) -> None:
-    _ = _git_checked("update-ref", "-d", ref)
+def update_refs(updates: Mapping[str, str], deletes: Iterable[str]) -> None:
+    """Point each ref in `updates` at its SHA and delete each ref in `deletes`, in one `git update-ref --stdin`."""
+    lines = [f"update {ref} {sha}\n" for ref, sha in updates.items()] + [f"delete {ref}\n" for ref in deletes]
+    if lines:
+        _ = _git_checked("update-ref", "--stdin", input="".join(lines))
 
 
 def ref_exists(ref: str) -> bool:

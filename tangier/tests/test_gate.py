@@ -153,11 +153,19 @@ def _summary(*rows: str, accept: str = "") -> str:
     )
 
 
+def _hash_blob(root: str, content: str | bytes) -> str:
+    """Write a blob of `content` and return its SHA."""
+    data = content.encode() if isinstance(content, str) else content
+    return (
+        subprocess.run(["git", "-C", root, "hash-object", "-w", "--stdin"], input=data, capture_output=True, check=True)
+        .stdout.decode()
+        .strip()
+    )
+
+
 def _put_blob(root: str, ref: str, content: str, *, remote: str | None = None) -> None:
     """Point `ref` at a blob of `content`, here or, with `remote`, on that remote."""
-    blob = subprocess.run(
-        ["git", "-C", root, "hash-object", "-w", "--stdin"], input=content, capture_output=True, text=True, check=True
-    ).stdout.strip()
+    blob = _hash_blob(root, content)
     args = ("push", "-q", "-f", remote, f"{blob}:{ref}") if remote else ("update-ref", ref, blob)
     _ = _git(root, *args)
 
@@ -1936,6 +1944,66 @@ class TestStore(GateCase):
             [(run["time"], run["runner"], run["duration"]) for run in _runs(self.origin, ref)],
             [("2026-03-01T00:00:00+00:00", GITHUB_PUSH_RAN_ON, 12.3), ("2026-03-02T00:00:00+00:00", LOCAL_RAN_ON, 1.0)],
         )
+
+    def test_cat_blobs_reads_each_blob_in_one_call(self) -> None:
+        texts = {"plain": "{}", "utf8": '{"note": "t\u00eate \u2713"}\n'}
+        shas = {name: _hash_blob(self.repo, text) for name, text in texts.items()}
+        not_utf8 = _hash_blob(self.repo, b"\xff\n")
+        tree = _git(self.repo, "rev-parse", "HEAD^{tree}")
+        missing = "0" * 40
+        with contextlib.chdir(self.repo):
+            found = git.cat_blobs([shas["plain"], tree, missing, not_utf8, shas["utf8"], shas["plain"]])
+        self.assertEqual(found, {shas[name]: text for name, text in texts.items()})
+
+    def test_sync_reads_and_writes_records_in_batches(self) -> None:
+        """Sync, prune and `every_run` read blobs and write refs in batches, never one record at a time.
+
+        Of 30 keys, a third are on origin only, a third local only, and a third on both with one run each.
+        """
+        other = self.clone()
+        prefix = "refs/tangier/gates/backend"
+        for i in range(30):
+            if i % 3 != 1:
+                _put_blob(self.repo, f"{prefix}/k{i}", _record(f"k{i}", "2026-03-01T00:00:00+00:00"), remote="origin")
+            if i % 3 != 0:
+                _put_blob(other, f"{prefix}/k{i}", _record(f"k{i}", "2026-03-02T00:00:00+00:00"))
+        _put_blob(self.repo, f"{prefix}/junk", "not json", remote="origin")
+        one_at_a_time = AssertionError("a per-record git call")
+        per_record = (
+            mock.patch.object(git, "cat_blob", side_effect=one_at_a_time),
+            mock.patch.object(git, "update_ref", side_effect=one_at_a_time),
+        )
+
+        with per_record[0], per_record[1]:
+            code, out, err = self.tangier("gate", "sync", cwd=other)
+        self.assertEqual(
+            (code, out, err), (0, "synced gate records with origin: pushed 10, pulled 11, merged 10\n", "")
+        )
+        expected = {f"{prefix}/k{i}": 2 if i % 3 == 2 else 1 for i in range(30)}
+        self.assertEqual({ref: len(_runs(other, ref)) for ref in expected}, expected)
+        self.assertEqual(
+            {ref: _git(other, "rev-parse", ref) for ref in [*expected, f"{prefix}/junk"]},
+            {ref: _git(self.origin, "rev-parse", ref) for ref in [*expected, f"{prefix}/junk"]},
+        )
+
+        err = io.StringIO()
+        with contextlib.chdir(other), per_record[0], contextlib.redirect_stderr(err):
+            found = gate.every_run(fetch=False)
+        self.assertEqual(
+            {key: len(runs) for _, _, key, runs in found},
+            {**{ref.rpartition("/")[2]: n for ref, n in expected.items()}, "junk": 0},
+        )
+        self.assertIn(f"warning: skipped {prefix}/junk", err.getvalue())
+
+        with (
+            per_record[0],
+            per_record[1],
+            mock.patch.object(gate, "now", return_value=datetime(2026, 7, 1, tzinfo=UTC)),
+        ):
+            code, out, _ = self.tangier("gate", "sync", "--prune", cwd=other)
+        self.assertEqual((code, out), (0, "synced gate records with origin: pushed 0, pulled 0, merged 0, pruned 30\n"))
+        self.assertEqual(_gate_refs(other), [f"{prefix}/junk"])
+        self.assertEqual(self.origin_refs(), [f"{prefix}/junk"])
 
     # SPEC: gate#sync-merges-runs
     def test_sync_overwrites_an_unreadable_record_on_origin(self) -> None:

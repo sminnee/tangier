@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -559,8 +559,17 @@ def merge_runs(*lists: list[dict[str, object]]) -> list[dict[str, object]]:
 def read_record(sha: str) -> dict[str, object]:
     """The record a gate ref points at. Raises `GateError` when it is not one."""
     try:
-        record = json.loads(git.cat_blob(sha))
+        text = git.cat_blob(sha)
     except (git.GitError, ValueError) as e:
+        raise GateError(f"not a gate record: {e}") from e
+    return _parse_record(text)
+
+
+def _parse_record(text: str) -> dict[str, object]:
+    """The record in a gate blob's text. Raises `GateError` when it is not one."""
+    try:
+        record = json.loads(text)
+    except ValueError as e:
         raise GateError(f"not a gate record: {e}") from e
     if not isinstance(record, dict):
         raise GateError("not a gate record: the blob is not a JSON object")
@@ -573,7 +582,11 @@ def read_runs(sha: str) -> list[dict[str, object]]:
     A legacy blob, with no `runs`, is one `local` run. See `docs/specs/gate.md#store`.
     A newer format than this tangier writes is not one.
     """
-    record = read_record(sha)
+    return _parse_runs(read_record(sha))
+
+
+def _parse_runs(record: dict[str, object]) -> list[dict[str, object]]:
+    """The runs in a parsed record. Raises `GateError` when it is not a gate record. See `read_runs`."""
     version = record.get("format", RECORD_FORMAT)
     if not isinstance(version, int) or version > RECORD_FORMAT:
         raise GateError(f"record format {version} is newer than this tangier reads ({RECORD_FORMAT})")
@@ -586,6 +599,21 @@ def read_runs(sha: str) -> list[dict[str, object]]:
     ):
         raise GateError("not a gate record: `runs` is not a list of runs, each with a `runner`")
     return runs
+
+
+def _runs_by_sha(shas: Iterable[str]) -> dict[str, list[dict[str, object]] | GateError]:
+    """The runs in each record of `shas`, read in one git call, or the `GateError` that reading it raised."""
+    wanted = set(shas)
+    texts = git.cat_blobs(wanted)
+    found: dict[str, list[dict[str, object]] | GateError] = {}
+    for sha in wanted:
+        try:
+            if sha not in texts:
+                raise GateError(f"not a gate record: {sha} is not a readable blob")
+            found[sha] = _parse_runs(_parse_record(texts[sha]))
+        except GateError as e:
+            found[sha] = e
+    return found
 
 
 def fetch_origin(*patterns: str) -> None:
@@ -651,20 +679,24 @@ def every_run(*, fetch: bool = True) -> list[tuple[Store, str, str, list[dict[st
                 f"warning: cannot read gate records from {REMOTE}, so its records count as last fetched: {e}",
                 file=sys.stderr,
             )
-    found: list[tuple[Store, str, str, list[dict[str, object]]]] = []
+    refs_by_store: dict[Store, dict[str, list[str]]] = {}
     for store in STORES:
-        blobs: dict[str, list[str]] = {}
+        refs = refs_by_store[store] = {}
         for sha, ref in git.for_each_ref(store.prefix):
-            blobs.setdefault(ref, []).append(sha)
+            refs.setdefault(ref, []).append(sha)
         for sha, ref in git.for_each_ref(store.mirror):
-            blobs.setdefault(store.unmirrored(ref), []).append(sha)
-        for ref, shas in sorted(blobs.items()):
+            refs.setdefault(store.unmirrored(ref), []).append(sha)
+    read = _runs_by_sha(sha for refs in refs_by_store.values() for shas in refs.values() for sha in shas)
+    found: list[tuple[Store, str, str, list[dict[str, object]]]] = []
+    for store, refs in refs_by_store.items():
+        for ref, shas in sorted(refs.items()):
             runs: list[dict[str, object]] = []
             for sha in shas:
-                try:
-                    runs = merge_runs(runs, read_runs(sha))
-                except GateError as e:
-                    print(f"warning: skipped {ref}: {e}", file=sys.stderr)
+                got = read[sha]
+                if isinstance(got, GateError):
+                    print(f"warning: skipped {ref}: {got}", file=sys.stderr)
+                else:
+                    runs = merge_runs(runs, got)
             name, _, key = ref[len(store.prefix) + 1 :].rpartition("/")
             found.append((store, name, key, runs))
     return found
@@ -807,29 +839,40 @@ def _reconcile(patterns: list[str], cutoff: datetime | None) -> tuple[dict[str, 
         store, prefix = store_of(pattern), pattern.removesuffix("/*")
         mine.update({ref: sha for sha, ref in git.for_each_ref(prefix)})
         theirs.update({store.unmirrored(ref): sha for sha, ref in git.for_each_ref(store.mirrored(prefix))})
+    # Both sides of each ref that needs a merge, and every record when pruning, since any of them can expire.
+    read = _runs_by_sha(
+        sha
+        for ref in mine.keys() | theirs.keys()
+        if cutoff is not None or (ref in mine and ref in theirs and mine[ref] != theirs[ref])
+        for sha in (mine.get(ref), theirs.get(ref))
+        if sha
+    )
     leases: dict[str, str] = {}
     expired: set[str] = set()
+    updates: dict[str, str] = {}
+    deletes: list[str] = []
     for ref in sorted(mine.keys() | theirs.keys()):
         sha, other = mine.get(ref), theirs.get(ref)
         if sha == other and cutoff is None:
             continue
-        result = _reconciled(ref, sha, other) if sha and other and sha != other else sha or other or ""
-        if cutoff is not None and _expired(ref, result, cutoff):
+        result = _reconciled(ref, sha, other, read) if sha and other and sha != other else sha or other or ""
+        if cutoff is not None and _expired(ref, read[result], cutoff):
             if sha is not None:
-                git.delete_ref(ref)
+                deletes.append(ref)
             # Leased on origin's SHA, so a record that gained a fresh run since the fetch is not deleted.
             if other is not None:
                 leases[ref] = other
             expired.add(ref)
             continue
         if result != sha:
-            git.update_ref(ref, result)
+            updates[ref] = result
         if result != other:
             leases[ref] = other or ""
+    git.update_refs(updates, deletes)
     return leases, expired
 
 
-def _expired(ref: str, sha: str, cutoff: datetime) -> bool:
+def _expired(ref: str, runs: list[dict[str, object]] | GateError, cutoff: datetime) -> bool:
     """Whether the record's newest run is older than `cutoff`.
 
     Age is the run's own `time`, not a ref or commit date: a record is a blob
@@ -837,27 +880,30 @@ def _expired(ref: str, sha: str, cutoff: datetime) -> bool:
     warning.
     """
     try:
-        return max(datetime.fromisoformat(str(run["time"])) for run in read_runs(sha)) < cutoff
+        if isinstance(runs, GateError):
+            raise runs
+        return max(datetime.fromisoformat(str(run["time"])) for run in runs) < cutoff
     except (GateError, KeyError, ValueError, TypeError) as e:
         print(f"warning: skipped {ref}: {e}", file=sys.stderr)
         return False
 
 
-def _reconciled(ref: str, sha: str, other: str) -> str:
+def _reconciled(ref: str, sha: str, other: str, read: dict[str, list[dict[str, object]] | GateError]) -> str:
     """The record to keep at `ref`, given the local record `sha` and origin's `other`: both their runs.
 
-    An unreadable local record yields origin's, so it never overwrites a readable
-    one. An unreadable origin record yields the local one, which then replaces it.
+    `read` holds the runs of both, and gains the merged record's. An unreadable
+    local record yields origin's, so it never overwrites a readable one. An
+    unreadable origin record yields the local one, which then replaces it.
     """
-    try:
-        mine = read_runs(sha)
-    except GateError as e:
-        print(f"warning: kept {REMOTE}'s {ref}, because the local one is unreadable: {e}", file=sys.stderr)
+    mine, theirs = read[sha], read[other]
+    if isinstance(mine, GateError):
+        print(f"warning: kept {REMOTE}'s {ref}, because the local one is unreadable: {mine}", file=sys.stderr)
         return other
-    try:
-        runs = merge_runs(mine, read_runs(other))
-    except GateError as e:
-        print(f"warning: {REMOTE}'s {ref} is unreadable, so the local one replaces it: {e}", file=sys.stderr)
+    if isinstance(theirs, GateError):
+        print(f"warning: {REMOTE}'s {ref} is unreadable, so the local one replaces it: {theirs}", file=sys.stderr)
         return sha
+    runs = merge_runs(mine, theirs)
     name, _, key = ref[len(store_of(ref).prefix) + 1 :].rpartition("/")
-    return _write_blob(name, key, runs)
+    merged = _write_blob(name, key, runs)
+    read[merged] = runs
+    return merged
