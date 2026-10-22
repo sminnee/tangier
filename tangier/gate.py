@@ -718,7 +718,8 @@ class Synced:
     pushed: int
     pulled: int
     merged: int
-    pruned: int
+    # None when the sync did not prune.
+    pruned: int | None
 
 
 def publish(refs: set[str]) -> Synced:
@@ -739,28 +740,28 @@ def publish(refs: set[str]) -> Synced:
             # A pattern, not the exact ref: a fetch of an exact ref that origin lacks fails.
             patterns = sorted({ref.rpartition("/")[0] + "/*" for ref in refs})
             continue
-        return _counted(before, set(wanted), set())
+        return _counted(before, set(wanted), None)
     raise GateError(f"{REMOTE}'s gate records kept changing")
 
 
-def sync(prune_after_days: int) -> Synced:
-    """Sync every record, in every store, with origin: pull, merge runs, push what changed, and prune expired records.
+def sync(prune_after_days: int | None) -> Synced:
+    """Sync every record, in every store, with origin: pull, merge runs, and push what changed.
 
-    See `docs/specs/gate.md#store`.
+    With `prune_after_days`, also prune records whose newest run is older than
+    that many days, in the same push. See `docs/specs/gate.md#store`.
     """
     before = _local_refs()
     pruned: set[str] = set()
+    cutoff = None if prune_after_days is None else now() - timedelta(days=prune_after_days)
     for _ in range(SYNC_ATTEMPTS):
-        leases, expired = _reconcile(
-            [f"{store.prefix}/*" for store in STORES], now() - timedelta(days=prune_after_days)
-        )
+        leases, expired = _reconcile([f"{store.prefix}/*" for store in STORES], cutoff)
         pruned |= expired
         try:
             _push(leases, expired)
         except git.PushRejected:
             continue
         # A retry can pull back a record an earlier attempt deleted, because origin's copy gained a fresh run.
-        return _counted(before, set(leases), pruned - _local_refs().keys())
+        return _counted(before, set(leases), None if cutoff is None else pruned - _local_refs().keys())
     raise GateError(f"{REMOTE}'s gate records kept changing; run `gate sync` again")
 
 
@@ -771,13 +772,16 @@ def _push(leases: dict[str, str], deletes: set[str]) -> None:
         git.push(REMOTE, refspecs, leases=leases, atomic=True)
 
 
-def _counted(before: dict[str, str], pushed: set[str], pruned: set[str]) -> Synced:
+def _counted(before: dict[str, str], pushed: set[str], pruned: set[str] | None) -> Synced:
     # A ref whose local record changed took runs from origin. A retry can change it more than once.
     after = _local_refs()
-    changed = {ref for ref in before.keys() | after.keys() if after.get(ref) != before.get(ref)} - pruned
-    pushed -= pruned
+    changed = {ref for ref in before.keys() | after.keys() if after.get(ref) != before.get(ref)} - (pruned or set())
+    pushed -= pruned or set()
     return Synced(
-        pushed=len(pushed - changed), pulled=len(changed - pushed), merged=len(pushed & changed), pruned=len(pruned)
+        pushed=len(pushed - changed),
+        pulled=len(changed - pushed),
+        merged=len(pushed & changed),
+        pruned=None if pruned is None else len(pruned),
     )
 
 

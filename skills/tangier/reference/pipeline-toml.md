@@ -192,7 +192,7 @@ A `[tailnet.<env>]` that names no `[deploy.<env>]` warns, when any deploy enviro
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `prune-after-days` | `90` | `gate sync` deletes a record whose newest run is older than this. 1 or more. |
+| `prune-after-days` | `90` | `gate sync --prune` deletes a record whose newest run is older than this. 1 or more. |
 
 Any other scalar under `[gate]` is an error.
 

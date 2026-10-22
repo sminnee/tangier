@@ -37,8 +37,8 @@ scope = ["core", "backend-gate-inputs"]
 paths = ["uv.lock", "pyproject.toml", "bin/test", "pipeline.toml"]
 ```
 
-- `[gate] prune-after-days` is how old a record's newest run may be before `gate sync` prunes it.
-  It is a whole number of days, 1 or more, and defaults to 90. It is the one scalar `[gate]`
+- `[gate] prune-after-days` is how old a record's newest run may be before `gate sync --prune`
+  prunes it.  It is a whole number of days, 1 or more, and defaults to 90. It is the one scalar `[gate]`
   takes: any other is an unknown field. `[prune-after-days]`
 - `[gate.<name>]` takes `cmd`, `env`, `scope` and `junit` only. `cmd` and `scope` are required and
   non-empty, and each accepts a bare string for one entry. `env` is a table of strings. The name
@@ -265,8 +265,8 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   `--accept` can match on them.
 
 - `gate run` writes a local ref. Once every gate in the invocation has run, an invocation that
-  wrote a record, a pass or a [failure](#failure-records), publishes it: it pulls and merges `origin`'s gate records, as `gate sync` does but
-  without pruning, and pushes only the refs it wrote, leased. A rejected push fetches and merges
+  wrote a record, a pass or a [failure](#failure-records), publishes it: it pulls and merges `origin`'s gate records, as `gate sync` does,
+  and pushes only the refs it wrote, leased. A rejected push fetches and merges
   the written gates' refs alone and pushes again, up to 3 attempts. Other local records stay
   local. A failed publish is a warning that names `gate sync`, and the records stay local. The
   exit code is the gates'. `--read-only` and `--dry-run` write no record, so they never publish.
@@ -283,13 +283,15 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   another clone pushed after the fetch, the push is rejected, and `gate sync` fetches and merges
   again. So a race never overwrites another clone's runs. After 3 rejected attempts it exits 2,
   and this sync has written nothing to `origin`. `[sync-retries-on-race]`
-- `gate sync` prunes. A record expires when its newest run's `time` is older than
+- `gate sync --prune` prunes, and a plain `gate sync` does not. A record expires when its newest run's `time` is older than
   `prune-after-days`. A record with one recent run stays whole. An expired record is deleted
   locally and on `origin`, in the same atomic push. The delete is leased on the SHA the fetch saw,
   so a record that gained a fresh run since then is not deleted: the push is rejected, and the
   retry keeps it. A ref that is not a readable record is kept, with a warning. `[sync-prunes]`
-- An expired record that `origin` lacks is deleted locally, not pushed. So a clone that synced
-  before a prune never puts the pruned record back. `[sync-drops-expired-local]`
+- Under `--prune`, an expired record that `origin` lacks is deleted locally, not pushed. So a
+  clone that synced before a prune does not put the pruned record back when it syncs with
+  `--prune`. A plain `gate sync` pushes it, as it pushes any record only this clone holds.
+  `[sync-drops-expired-local]`
 - A gate is verified when the local record holds an accepted run, or when `origin`'s record does.
   The local check runs first. The first lookup that reaches `origin` fetches its gate refs, in one
   call, into `refs/tangier/origin-gates/*`, and every later lookup reads that mirror.
@@ -315,8 +317,8 @@ A failed run is recorded too, so `gate stats` can report on it. It never verifie
   reconciles only the namespaces its records are in, so an invocation that only passed fetches no
   failure records. In a job, the failed gate's `ref` in `gate status --json` is the failure
   record's. `[failure-publishes]`
-- `gate sync` syncs, merges and prunes failure records with the same rules as gate records, in the
-  same fetch and the same atomic push. Its counts cover both kinds. A fetch mirrors `origin`'s failure
+- `gate sync` syncs and merges failure records, and `gate sync --prune` prunes them, with the same
+  rules as gate records, in the same fetch and the same atomic push. Its counts cover both kinds. A fetch mirrors `origin`'s failure
   records into `refs/tangier/origin-failures/*`. `[sync-failures]`
 
 | Namespace | Holds | Mirror of `origin` |
@@ -369,7 +371,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since`, `--running`, `--all`, `--json` and `--watch`. |
 | `gate cancel` | Stop a running job. Takes `--job`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
-| `gate sync` | Sync gate and failure records with `origin`: pull, merge runs, push, and prune expired records. |
+| `gate sync` | Sync gate and failure records with `origin`: pull, merge runs, and push. `--prune` also deletes expired records. |
 | `gate stats [<selector> ...]` | Report how runs went: pass rates, durations, load, flaky keys, and the tests and files that fail most. Takes `--since`, `--ci`, `--local`, `--top`, `--no-fetch` and `--json`. See [Statistics](#statistics). |
 | `gate github-outputs` | Emit `<gate>-status`, `<gate>-run`, `<gate>-verified` and `<gate>-key` for every gate, and `<group>-status`, `<group>-run` and `<group>-verified` for every group. Takes `--accept`, `--full` and `--summary`. |
 
@@ -496,7 +498,7 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   last failed. Then come the files that failed most, grouped by `file`. Each list holds `--top`
   entries, default 20, most frequent first. Ties go to the most recent. `[stats-top-failures]`
 - A note says what the numbers leave out. A record keeps its newest 20 runs per key, and
-  `gate sync` prunes it after `prune-after-days`. A verified or not-needed gate ran nothing, so it
+  `gate sync --prune` prunes it after `prune-after-days`. A verified or not-needed gate ran nothing, so it
   is not counted. `--json` prints the same figures as one object, with `gates`, `top_tests` and
   `top_files`. It exits 0. `[stats-output]`
 
