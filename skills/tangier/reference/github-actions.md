@@ -260,8 +260,8 @@ Run it on every event, not behind a `-run` output. It needs the plan only for `f
 
 ### Syncing records
 
-`gate sync` deletes records whose newest run is older than `[gate] prune-after-days`. A monthly
-run keeps them pruned when nobody syncs by hand:
+`gate sync --prune` deletes records whose newest run is older than `[gate] prune-after-days`. A monthly
+run keeps them pruned:
 
 ```yaml
 name: Sync gate records
@@ -276,7 +276,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uvx tangier gate sync
+      - run: uvx tangier gate sync --prune
 ```
 
 ## Checkout depth

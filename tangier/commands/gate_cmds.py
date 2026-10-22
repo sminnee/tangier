@@ -1171,8 +1171,7 @@ def cmd_verified(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_sync(config: Config, args: argparse.Namespace) -> int:
-    del args
-    _print_synced(gate.sync(config.gate_prune_after_days))
+    _print_synced(gate.sync(config.gate_prune_after_days if args.prune else None))
     return 0
 
 
@@ -1248,7 +1247,7 @@ def _print_stats(data: dict[str, Any], since: timedelta, prune_after_days: int) 
             print(f"{f['count']:>4}  {f['file']}  {', '.join(f['gates'])}{last}")
     print()
     print(
-        f"A record keeps its newest {gate.MAX_RUNS} runs per key, and `gate sync` prunes it after "
+        f"A record keeps its newest {gate.MAX_RUNS} runs per key, and `gate sync --prune` prunes it after "
         f"{prune_after_days} days. A verified or not-needed gate ran nothing, so it is not counted."
     )
 
@@ -1272,9 +1271,10 @@ def _age(age: timedelta) -> str:
 def _print_synced(synced: gate.Synced, *, quiet: bool = False) -> None:
     """The counts, or that nothing moved. `quiet` prints nothing when nothing moved."""
     if synced.pushed or synced.pulled or synced.merged or synced.pruned:
+        pruned = "" if synced.pruned is None else f", pruned {synced.pruned}"
         print(
             f"synced gate records with {gate.REMOTE}: pushed {synced.pushed}, pulled {synced.pulled}, "
-            f"merged {synced.merged}, pruned {synced.pruned}"
+            f"merged {synced.merged}{pruned}"
         )
     elif not quiet:
         print(f"gate records already in sync with {gate.REMOTE}")
@@ -1521,8 +1521,9 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _add_accept(vp)
     vp.set_defaults(func=cmd_verified)
 
-    sp = gsub.add_parser(
-        "sync", help="sync gate records with origin: pull, merge runs, push, and prune expired records"
+    sp = gsub.add_parser("sync", help="sync gate records with origin: pull, merge runs, and push")
+    _ = sp.add_argument(
+        "--prune", action="store_true", help="also delete records whose newest run is older than prune-after-days"
     )
     sp.set_defaults(func=cmd_sync)
 

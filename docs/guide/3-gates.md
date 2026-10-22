@@ -47,9 +47,9 @@ Once its gates have run, `gate run` pulls `origin`'s records and pushes the ones
 finds them. When `origin` cannot be reached or refuses the push, it warns, keeps the records local,
 and still exits with the gates' result. `tangier gate sync` then sends them.
 
-`gate sync` also pulls every record, merges runs and prunes. A record expires when its newest run
-is older than `[gate] prune-after-days`, 90 by default. `gate sync` then deletes it locally and on
-`origin`.
+`gate sync` also pulls every record and merges runs. `gate sync --prune` also deletes expired
+records, locally and on `origin`. A record expires when its newest run is older than
+`[gate] prune-after-days`, 90 by default.
 
 Gates the diff does not touch cost nothing, so a pre-push hook can run them all. askastro's
 `bin/pre-push-gates`:
@@ -162,8 +162,8 @@ failures, and its median load per CPU. Its **flaky keys** are the keys with both
 failure: the same content gave both results. Then come the tests and files that failed most, for
 gates that write a report.
 
-The numbers have limits. A record keeps its newest 20 runs per key, and `gate sync` prunes it after
-`prune-after-days`. A verified or not-needed gate ran nothing, so it is not counted. A
+The numbers have limits. A record keeps its newest 20 runs per key, and `gate sync --prune` prunes it
+after `prune-after-days`. A verified or not-needed gate ran nothing, so it is not counted. A
 `--read-only` run writes no record, so a CI job that runs `--read-only` adds nothing to `--ci`.
 
 ## Scope and `*-inputs` packages

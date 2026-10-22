@@ -1519,7 +1519,7 @@ class TestStore(GateCase):
     def setUp(self) -> None:
         super().setUp()
         self.origin = make_origin(self, self.repo)
-        # `gate sync` prunes by age, so the March 2026 records these tests write must not age out.
+        # `gate sync --prune` prunes by age, so the March 2026 records these tests write must not age out.
         patcher = mock.patch.object(gate, "now", return_value=datetime(2026, 3, 10, tzinfo=UTC))
         _ = patcher.start()
         self.addCleanup(patcher.stop)
@@ -1552,7 +1552,7 @@ class TestStore(GateCase):
 
         code, out, err = self.tangier("gate", "run", "backend", "--base", self.base)
         self.assertEqual(code, 0, err)
-        self.assertIn("synced gate records with origin: pushed 1, pulled 0, merged 0, pruned 0\n", out)
+        self.assertIn("synced gate records with origin: pushed 1, pulled 0, merged 0\n", out)
         self.assertEqual(self.tangier(*args, cwd=other)[:2], (0, "verified\n"))
 
     # SPEC: gate#run-publishes
@@ -1807,7 +1807,7 @@ class TestStore(GateCase):
         self.assertIn(f"refs/tangier/gates/backend/{old}", _gate_refs(other))
 
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
-            code, out, err = self.tangier("gate", "sync")
+            code, out, err = self.tangier("gate", "sync", "--prune")
 
         self.assertEqual(code, 0)
         self.assertIn("pruned 1\n", out)
@@ -1819,7 +1819,7 @@ class TestStore(GateCase):
 
         # A clone that synced before the prune holds the old record, and does not put it back.
         with mock.patch.object(gate, "now", return_value=datetime(2026, 3, 1, tzinfo=UTC)):
-            self.assertEqual(self.tangier("gate", "sync", cwd=other)[0], 0)
+            self.assertEqual(self.tangier("gate", "sync", "--prune", cwd=other)[0], 0)
         self.assertNotIn(f"refs/tangier/gates/backend/{old}", self.origin_refs())
         self.assertEqual(_gate_refs(other), kept)
 
@@ -1831,16 +1831,27 @@ class TestStore(GateCase):
             self.assertEqual(self.tangier("gate", "run", "backend", "--base", self.base, "--full")[0], 0)
         # The default limit is 90 days: past January's run, within March's.
         with mock.patch.object(gate, "now", return_value=datetime(2026, 5, 1, tzinfo=UTC)):
-            self.assertEqual(self.tangier("gate", "sync")[1], "gate records already in sync with origin\n")
+            self.assertEqual(self.tangier("gate", "sync", "--prune")[1], "gate records already in sync with origin\n")
         self.assertEqual(self.origin_refs(), [f"refs/tangier/gates/backend/{key}"])
         self.assertEqual(len(_runs(self.origin, f"refs/tangier/gates/backend/{key}")), 2)
+
+    # SPEC: gate#sync-prunes
+    # SPEC: gate#sync-drops-expired-local
+    def test_sync_without_prune_keeps_expired_records(self) -> None:
+        ref = "refs/tangier/gates/backend/stale"
+        _put_blob(self.repo, ref, _record("stale", "2026-01-01T00:00:00+00:00"))
+        with mock.patch.object(gate, "now", return_value=datetime(2026, 5, 1, tzinfo=UTC)):
+            code, out, _ = self.tangier("gate", "sync")
+        self.assertEqual((code, out), (0, "synced gate records with origin: pushed 1, pulled 0, merged 0\n"))
+        self.assertEqual(_gate_refs(self.repo), [ref])
+        self.assertEqual(self.origin_refs(), [ref])
 
     # SPEC: gate#sync-drops-expired-local
     def test_sync_deletes_an_expired_local_record_and_does_not_push_it(self) -> None:
         ref = "refs/tangier/gates/backend/stale"
         _put_blob(self.repo, ref, _record("stale", "2026-01-01T00:00:00+00:00"))
         with mock.patch.object(gate, "now", return_value=datetime(2026, 5, 1, tzinfo=UTC)):
-            code, out, _ = self.tangier("gate", "sync")
+            code, out, _ = self.tangier("gate", "sync", "--prune")
         self.assertEqual((code, out), (0, "synced gate records with origin: pushed 0, pulled 0, merged 0, pruned 1\n"))
         self.assertEqual(_gate_refs(self.repo), [])
         self.assertEqual(self.origin_refs(), [])
@@ -1857,7 +1868,7 @@ class TestStore(GateCase):
             self.race_after_fetch(lambda _: _put_blob(self.repo, ref, fresh, remote="origin")),
             mock.patch.object(gate, "now", return_value=datetime(2026, 5, 1, tzinfo=UTC)),
         ):
-            code, out, err = self.tangier("gate", "sync")
+            code, out, err = self.tangier("gate", "sync", "--prune")
         self.assertEqual(
             (code, out, err), (0, "synced gate records with origin: pushed 0, pulled 1, merged 0, pruned 0\n", "")
         )
@@ -1908,11 +1919,11 @@ class TestStore(GateCase):
         with self.offline():
             self.run_on(self.repo, 2)
         self.assertEqual(
-            self.tangier("gate", "sync")[1], "synced gate records with origin: pushed 0, pulled 0, merged 1, pruned 0\n"
+            self.tangier("gate", "sync")[1], "synced gate records with origin: pushed 0, pulled 0, merged 1\n"
         )
         self.assertEqual(
             self.tangier("gate", "sync", cwd=other)[1],
-            "synced gate records with origin: pushed 0, pulled 1, merged 0, pruned 0\n",
+            "synced gate records with origin: pushed 0, pulled 1, merged 0\n",
         )
 
         on_origin = _git(self.origin, "rev-parse", ref)
@@ -1933,7 +1944,7 @@ class TestStore(GateCase):
         with self.offline():
             _ = self.tangier("gate", "run", "backend", "--base", self.base)
         code, out, err = self.tangier("gate", "sync")
-        self.assertEqual((code, out), (0, "synced gate records with origin: pushed 1, pulled 0, merged 0, pruned 0\n"))
+        self.assertEqual((code, out), (0, "synced gate records with origin: pushed 1, pulled 0, merged 0\n"))
         self.assertIn(f"origin's {ref} is unreadable, so the local one replaces it", err)
         self.assertEqual([run["runner"] for run in _runs(self.origin, ref)], [LOCAL_RAN_ON])
 
@@ -1943,7 +1954,7 @@ class TestStore(GateCase):
         _ = self.record_and_push(datetime(2026, 3, 1, tzinfo=UTC))
         _put_blob(self.repo, ref, "not json")
         code, out, err = self.tangier("gate", "sync")
-        self.assertEqual((code, out), (0, "synced gate records with origin: pushed 0, pulled 1, merged 0, pruned 0\n"))
+        self.assertEqual((code, out), (0, "synced gate records with origin: pushed 0, pulled 1, merged 0\n"))
         self.assertIn(f"kept origin's {ref}", err)
         self.assertEqual(_git(self.repo, "rev-parse", ref), _git(self.origin, "rev-parse", ref))
         self.assertEqual([run["runner"] for run in _runs(self.origin, ref)], [LOCAL_RAN_ON])
@@ -1956,7 +1967,7 @@ class TestStore(GateCase):
         self.assertEqual(_gate_refs(other), [])
         self.assertEqual(
             self.tangier("gate", "sync", cwd=other)[:2],
-            (0, "synced gate records with origin: pushed 0, pulled 1, merged 0, pruned 0\n"),
+            (0, "synced gate records with origin: pushed 0, pulled 1, merged 0\n"),
         )
         self.assertEqual(_git(other, "rev-parse", ref), _git(self.origin, "rev-parse", ref))
 
@@ -1975,9 +1986,7 @@ class TestStore(GateCase):
 
         with self.race_after_fetch(lambda _: self.assertEqual(self.tangier("gate", "sync", cwd=third)[0], 0)):
             code, out, err = self.tangier("gate", "sync")
-        self.assertEqual(
-            (code, out, err), (0, "synced gate records with origin: pushed 0, pulled 1, merged 1, pruned 0\n", "")
-        )
+        self.assertEqual((code, out, err), (0, "synced gate records with origin: pushed 0, pulled 1, merged 1\n", ""))
         self.assertEqual(
             [run["time"] for run in _runs(self.origin, ref)],
             ["2026-03-01T00:00:00+00:00", "2026-03-02T00:00:00+00:00", "2026-03-03T00:00:00+00:00"],
@@ -1994,9 +2003,7 @@ class TestStore(GateCase):
         # Origin lacked the ref at the fetch, so the lease says it must not exist.
         with self.race_after_fetch(lambda _: self.assertEqual(self.tangier("gate", "sync", cwd=other)[0], 0)):
             code, out, err = self.tangier("gate", "sync")
-        self.assertEqual(
-            (code, out, err), (0, "synced gate records with origin: pushed 0, pulled 0, merged 1, pruned 0\n", "")
-        )
+        self.assertEqual((code, out, err), (0, "synced gate records with origin: pushed 0, pulled 0, merged 1\n", ""))
         self.assertEqual(
             [run["time"] for run in _runs(self.origin, ref)], ["2026-03-01T00:00:00+00:00", "2026-03-02T00:00:00+00:00"]
         )
@@ -2219,11 +2226,11 @@ class TestFailures(GateCase):
     def test_a_failure_publishes_to_origin_and_a_second_clone_syncs_it(self) -> None:
         code, out, _ = self.run_gate()
         self.assertEqual(code, 3)
-        self.assertIn("synced gate records with origin: pushed 1, pulled 0, merged 0, pruned 0\n", out)
+        self.assertIn("synced gate records with origin: pushed 1, pulled 0, merged 0\n", out)
         self.assertEqual(self.origin_refs(), [self.failure])
         other = self.clone_origin(self.origin)
         _, out, _ = self.tangier("gate", "sync", cwd=other)
-        self.assertEqual(out, "synced gate records with origin: pushed 0, pulled 1, merged 0, pruned 0\n")
+        self.assertEqual(out, "synced gate records with origin: pushed 0, pulled 1, merged 0\n")
         self.assertEqual(_git(other, "rev-parse", self.failure), _git(self.origin, "rev-parse", self.failure))
 
     # SPEC: gate#sync-failures
@@ -2234,7 +2241,7 @@ class TestFailures(GateCase):
         self.assertEqual(self.tangier("gate", "sync", cwd=other)[0], 0)
         stale = "refs/tangier/failures/backend/stale"
         _put_blob(self.repo, stale, _record("stale", "2025-01-01T00:00:00+00:00"), remote="origin")
-        code, out, _ = self.tangier("gate", "sync")
+        code, out, _ = self.tangier("gate", "sync", "--prune")
         self.assertEqual((code, out), (0, "synced gate records with origin: pushed 0, pulled 0, merged 1, pruned 1\n"))
         self.assertEqual(self.origin_refs(), [self.failure])
         self.assertEqual(

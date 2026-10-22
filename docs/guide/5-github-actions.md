@@ -156,8 +156,8 @@ No push step is needed.
 - Jobs that record the same content at the same time are safe. Each push is leased, and a rejected
   one merges `origin`'s runs and tries again.
 - A push to `refs/tangier/` triggers no workflow.
-- Records age out on the next `gate sync`, wherever it runs. When nobody syncs by hand, a scheduled
-  job keeps them pruned. See the
+- Records age out on the next `gate sync --prune`, wherever it runs. A scheduled job keeps them
+  pruned. See the
   [canonical workflow](../../skills/tangier/reference/github-actions.md#syncing-records).
 
 ## CI-only gates
