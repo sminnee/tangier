@@ -90,7 +90,7 @@ starts when a slot frees, oldest first. To see and stop what runs on the machine
 ```sh
 tangier gate status --running --all   # every queued and running job, with its worktree and CPU and memory use
 tangier gate status --all --json      # every worktree's recent jobs, grouped as running, queued and recent, for a dashboard
-tangier gate status --watch --json    # the status, then one JSON line per job or gate change, until Ctrl-C
+tangier gate status --watch --json    # the status, then one JSON line per job or gate change, plus usage ticks, until Ctrl-C
 tangier gate cancel --all --reason "machine overloaded"
 ```
 
