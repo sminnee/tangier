@@ -607,7 +607,8 @@ to an hour.
     finished job's event comes after them.
   - The scope is this worktree, or the machine with `--all`. `--job` limits the events to those
     jobs, including one that does not exist yet. `--since` and `--running` limit only the first
-    status: a job that starts later always shows.
+    status, and never hide an unfinished job from it, so a reader that starts mid-run knows every
+    job that can still end. A job that starts later always shows.
   - Each write to a job, and the start of a cancel, wakes the watcher through a Unix socket in
     `~/.tangier/watch/`, so a change prints at once. The watcher also re-reads the jobs every 2
     seconds, to catch a job process that died. Where the socket cannot be bound, as in a sandbox,

@@ -921,6 +921,15 @@ class TestWatch(JobCase):
         self.assertEqual(self.events(out), ["job 4 lint passed <t>", "job 4 passed"])
 
     # SPEC: gate#status-watch
+    def test_watch_first_status_lists_every_unfinished_job(self) -> None:
+        with mock.patch.object(gate, "now", return_value=datetime.now(UTC) - timedelta(days=2)):
+            _ = self.run_gates("lint", runner=SleeperRunner(self))
+            _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other)
+        _, out = self.watch("--json", "--all", "--running", "--since", "1h", steps=[])
+        status = json.loads(out.splitlines()[0])
+        self.assertEqual(([j["id"] for j in status["running"]], [j["id"] for j in status["queued"]]), ([1], [2]))
+
+    # SPEC: gate#status-watch
     def test_watch_exits_0_when_its_reader_goes(self) -> None:
         class Closes(io.StringIO):
             """A pipe whose reader goes after the first status."""

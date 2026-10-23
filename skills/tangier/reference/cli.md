@@ -224,7 +224,8 @@ One JSON object per line. The first is the status, then one per change, as it ha
 ```
 
 `job` and `gate` are as `gate status --json` gives them. A job's event comes before its gates'
-while it is unfinished, and after them once it finishes. `--since` and `--running` limit only the first line.
+while it is unfinished, and after them once it finishes. `--since` and `--running` limit only the first line, which
+always lists every queued and running job in scope.
 Ctrl-C, or closing the pipe, exits 0.
 
 ### `gate github-outputs`
