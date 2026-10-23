@@ -753,10 +753,16 @@ class TestWatch(JobCase):
         self.max_running(1)
         self.other = self.other_repo()
 
-    def watch(self, *argv: str, steps: list[Any], stdout: io.StringIO | None = None) -> tuple[int, str]:
+    def watch(
+        self, *argv: str, steps: list[Any], stdout: io.StringIO | None = None, runner: Any = None
+    ) -> tuple[int, str]:
+        """The watch's clock is `self.lag`, so it moves only when a step moves it. `self.waits` gets each timeout."""
         left = iter(steps)
+        runner = runner if runner is not None else RecordingRunner()
+        self.waits: list[float] = []
 
         def wait(_watcher: watch.Watcher, timeout: float) -> None:
+            self.waits.append(timeout)
             step = next(left, None)
             if step is None:
                 raise KeyboardInterrupt
@@ -764,11 +770,19 @@ class TestWatch(JobCase):
 
         with mock.patch.object(watch.Watcher, "wait", wait):
             if stdout is None:
-                code, out, err = self.tangier("gate", "status", "--watch", *argv, runner=RecordingRunner())
+                code, out, err = self.tangier("gate", "status", "--watch", *argv, runner=runner)
                 self.assertEqual(err, "")
                 return code, out
             with contextlib.chdir(self.repo), contextlib.redirect_stdout(stdout):
-                return cli.main(["gate", "status", "--watch", *argv], runner=RecordingRunner()), ""
+                return cli.main(["gate", "status", "--watch", *argv], runner=runner), ""
+
+    def later(self, seconds: float) -> Any:
+        """A step that moves the clock on."""
+
+        def step() -> None:
+            self.lag += seconds
+
+        return step
 
     def events(self, out: str) -> list[str]:
         """The event lines, without their times."""
@@ -919,6 +933,90 @@ class TestWatch(JobCase):
         _, out = self.watch("--running", steps=[lambda: self.run_gates("lint")])
         self.assertTrue(out.startswith(machine(of=1) + "no jobs\n"), out)
         self.assertEqual(self.events(out), ["job 4 lint passed <t>", "job 4 passed"])
+
+    # SPEC: gate#status-watch
+    def test_watch_json_ticks_each_unfinished_jobs_usage(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        self.end(1)
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other)
+        # Job 3 queues in another worktree. Its pid is not in `ps`, so its `usage` is null.
+        figures = {"cpu_percent": 12.5, "rss_bytes": 2048 * 1024, "processes": 1}
+        runner = RecordingRunner({("ps",): Result(0, f"{self.job(2).pid} 12.5 2048\n")})
+
+        def finish() -> None:
+            self.end(2)
+            self.end(3)
+            self.lag += 5
+
+        def stream(*argv: str, steps: list[Any]) -> list[tuple[Any, ...]]:
+            with mock.patch.object(usage, "memory_total", return_value=None):
+                _, out = self.watch("--json", *argv, steps=steps, runner=runner)
+            events = [json.loads(line) for line in out.splitlines()]
+            for e in events:
+                datetime.fromisoformat(e["time"])
+            return [(e["type"], e.get("job_id"), e.get("usage")) for e in events]
+
+        # Without `--all`, the other worktree's job gets no tick.
+        self.assertEqual(stream(steps=[self.later(5)]), [("status", None, None), ("usage", 2, figures)])
+        runner.calls.clear()
+        self.assertEqual(
+            stream("--all", steps=[self.later(5), finish]),
+            [
+                ("status", None, None),
+                ("usage", 2, figures),
+                ("usage", 3, None),
+                ("gate", 2, None),
+                ("job", None, None),
+                ("gate", 3, None),
+                ("job", None, None),
+            ],
+        )
+        # One `ps` for the first status, one for the tick, and none once no job is unfinished.
+        self.assertEqual(len(runner.commands(binary="ps")), 2)
+
+    # SPEC: gate#status-watch
+    def test_watch_json_skips_the_tick_when_ps_fails(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        _, out = self.watch("--json", steps=[self.later(5)], runner=RecordingRunner({("ps",): Result(1)}))
+        self.assertEqual([json.loads(line)["type"] for line in out.splitlines()], ["status"])
+
+    # SPEC: gate#status-watch
+    def test_watch_usage_every_sets_the_cadence(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        steps = [self.later(0.5), self.later(0.5), self.later(0.5)]
+        runner = RecordingRunner({("ps",): Result(0, f"{self.job().pid} 1.0 1024\n")})
+        _, out = self.watch("--json", "--usage-every", "1", steps=steps, runner=runner)
+        self.assertEqual([json.loads(line)["type"] for line in out.splitlines()], ["status", "usage"])
+        # The loop wakes for the next tick when it comes before the next poll.
+        self.assertEqual(self.waits, [1.0, 0.5, 1.0, 0.5])
+
+    # SPEC: gate#status-watch
+    def test_watch_text_has_no_usage_ticks(self) -> None:
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        runner = RecordingRunner()
+        _, out = self.watch(steps=[self.later(10), self.later(10)], runner=runner)
+        self.assertEqual(len(out.splitlines()), 3, out)
+        self.assertEqual(len(runner.commands(binary="ps")), 1)
+        self.assertEqual(self.waits, [watch.POLL] * 3)
+
+    # SPEC: gate#status-watch
+    def test_watch_first_status_lists_every_unfinished_job(self) -> None:
+        with mock.patch.object(gate, "now", return_value=datetime.now(UTC) - timedelta(days=2)):
+            _ = self.run_gates("lint", runner=SleeperRunner(self))
+            _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other)
+        _, out = self.watch("--json", "--all", "--running", "--since", "1h", steps=[])
+        status = json.loads(out.splitlines()[0])
+        self.assertEqual(([j["id"] for j in status["running"]], [j["id"] for j in status["queued"]]), ([1], [2]))
+
+    # SPEC: gate#status-watch
+    def test_usage_every_must_be_a_finite_number_more_than_0(self) -> None:
+        for value in ("0", "-1", "nan", "inf", "5s"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as raised:
+                _ = cli.main(["gate", "status", "--watch", "--json", "--usage-every", value])
+            self.assertEqual(raised.exception.code, 2, value)
+            self.assertIn("--usage-every", err.getvalue())
 
     # SPEC: gate#status-watch
     def test_watch_exits_0_when_its_reader_goes(self) -> None:

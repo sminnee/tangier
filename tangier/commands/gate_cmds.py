@@ -808,6 +808,8 @@ def _print_status(view: _StatusView, args: argparse.Namespace) -> None:
 def _watch_status(config: Config, args: argparse.Namespace) -> int:
     """Print the status, then each change to a job or gate as it happens, until Ctrl-C. See `[status-watch]`.
 
+    With `--json`, it also prints each unfinished job's usage every `--usage-every` seconds.
+
     SIGTERM and SIGHUP stop it as Ctrl-C does, so its socket goes with it.
     """
 
@@ -846,8 +848,9 @@ def _watch(config: Config, args: argparse.Namespace, watcher: watch.Watcher) -> 
     # A job that is not on the machine yet always shows once it is, whatever `--since` or `--running` say.
     known = {j.id for j in view.machine_jobs}
     tracked = {j.id: j for j in view.shown}
+    next_tick = clock() + args.usage_every
     while True:
-        watcher.wait(watch.POLL)
+        watcher.wait(min(watch.POLL, max(0.0, next_tick - clock())) if args.json else watch.POLL)
         jobs.reap(runner)
         now = {j.id: j for j in jobs.all_jobs(worktree_only=False)}
         watched = [
@@ -860,6 +863,9 @@ def _watch(config: Config, args: argparse.Namespace, watcher: watch.Watcher) -> 
         tracked = {j.id: j for j in watched}
         if changes:
             _emit_changes(config, args, view.mine, changes)
+        if args.json and clock() >= next_tick:
+            _emit_usage(args, tracked)
+            next_tick = clock() + args.usage_every
 
 
 def _in_scope(job: jobs.Job, args: argparse.Namespace, mine: str | None) -> bool:
@@ -919,6 +925,20 @@ def _emit_job_json(c: _Change, local: _Local, samples: dict[int, usage.Usage]) -
     data = _job_json(c.job, local, use=_use(c.job, samples))
     previous = None if c.before is None else c.before.state
     _emit({"type": "job", "time": gate.now().isoformat(), "previous": previous, "job": data})
+
+
+def _emit_usage(args: argparse.Namespace, tracked: dict[int, jobs.Job]) -> None:
+    """A usage tick for each unfinished job the watch follows. No `ps` when there is none. See `[status-watch]`."""
+    unfinished = [j for _, j in sorted(tracked.items()) if j.state in jobs.UNFINISHED]
+    if not unfinished:
+        return
+    samples = usage.sample(_runner(args, echo=False))
+    if not samples:
+        return  # `ps` failed: a null `usage` would read as a dead process group.
+    for job in unfinished:
+        use = _use(job, samples)
+        data = None if use is None else dataclasses.asdict(use)
+        _emit({"type": "usage", "time": gate.now().isoformat(), "job_id": job.id, "usage": data})
 
 
 def _emit_gate_json(job: jobs.Job, g: jobs.GateState, previous: str, local: _Local) -> None:
@@ -1383,6 +1403,17 @@ def _timeout(value: str) -> int | None:
     return seconds
 
 
+def _seconds(value: str) -> float:
+    """A finite number of seconds, more than 0."""
+    try:
+        seconds = float(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"`{value}` is not a number of seconds") from e
+    if not 0 < seconds < math.inf:
+        raise argparse.ArgumentTypeError("must be a finite number more than 0")
+    return seconds
+
+
 def _job_ids(value: str) -> list[int]:
     """A comma-separated list of job numbers."""
     try:
@@ -1504,6 +1535,13 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         "--watch",
         action="store_true",
         help="keep running and print each change as it happens; with --json, one JSON object per line",
+    )
+    _ = sp.add_argument(
+        "--usage-every",
+        type=_seconds,
+        default=5.0,
+        metavar="SECONDS",
+        help="with --watch --json, print each unfinished job's usage every SECONDS (default 5)",
     )
     # Without `--all`, status keys this worktree's gates to find the stale ones, so it needs the config.
     sp.set_defaults(func=cmd_status, config_optional=lambda a: a.all)
