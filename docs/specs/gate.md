@@ -368,7 +368,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | `gate key [<selector>]` | Print the key. With no selector, print `<name> <key>` for every gate. |
 | `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--no-fail-fast`, `--dry-run`, `--debug`, `--accept` and `--wait`. Outside CI the gates run as a [job](#jobs). |
 | `gate wait [<selector> ...]` | Wait for a job, or for some of its gates, up to an hour. Takes `--job`. |
-| `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since`, `--running`, `--all`, `--json` and `--watch`. |
+| `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since`, `--running`, `--all`, `--json`, `--watch` and `--usage-every`. |
 | `gate cancel` | Stop a running job. Takes `--job`. |
 | `gate verified <selector>` | Print `verified` or `unverified`, and exit 0 or 1. The working tree is verified when its key has an accepted run. Takes `--accept`. |
 | `gate sync` | Sync gate and failure records with `origin`: pull, merge runs, and push. `--prune` also deletes expired records. |
@@ -594,8 +594,8 @@ to an hour.
   `jobs_rss_bytes`, the sums over every unfinished job on the machine. Those two are null when no
   `ps` sample was taken, and the text line then leaves out its `gates:` part. `[status-usage]`
 - `gate status --watch` prints the status, then each change as it happens, until Ctrl-C. A change
-  is a new job, a job that changes state, or a gate that changes state. Usage changes are not
-  changes.
+  is a new job, a job that changes state, or a gate that changes state. A change in usage is not
+  a change: with `--json`, usage ticks carry it.
   - A text event is one line that starts with the local time: `12:03:04 job 14 queued  queue 1 of
     2`, `12:03:05 job 14 running`, `12:03:09 job 14 lint passed 4.2s` or `12:03:09 job 14 lint
     failed(1) 4.2s  log: ~/...`. With `--all`, a new job's line adds its worktree.
@@ -603,6 +603,10 @@ to an hour.
     ...}` with the keys of `status --json`. Then come `{"type": "job", "time", "previous", "job"}`
     and `{"type": "gate", "time", "job_id", "previous", "gate"}`, where `job` and `gate` are as
     `status --json` gives them. `previous` is null for a new job. `time` is UTC.
+  - With `--json`, every `--usage-every` seconds (default 5, a finite number more than 0) comes
+    `{"type": "usage", "time", "job_id", "usage"}`, once for each unfinished job the watch follows.
+    `usage` is as in `[status-usage]`. With no unfinished job, the watch runs no `ps`. When `ps`
+    cannot run, there is no tick. Text mode has no ticks.
   - Events come oldest job first. An unfinished job's event comes before its gates' events. A
     finished job's event comes after them.
   - The scope is this worktree, or the machine with `--all`. `--job` limits the events to those
