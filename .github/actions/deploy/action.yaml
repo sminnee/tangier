@@ -26,6 +26,12 @@ inputs:
       pinned in tailnet/resolve.sh.
     required: false
     default: ""
+  uv-version:
+    description: >-
+      uv release for setup-uv. Empty reads the caller's `[tool.uv] required-version`
+      and falls back to the latest release.
+    required: false
+    default: ""
   tangier-ref:
     description: >-
       The tangier ref to install the CLI from. Defaults to the ref this action
@@ -70,9 +76,11 @@ runs:
         tailscale configure kubeconfig "$OPERATOR"
         kubectl config current-context
 
-    - uses: astral-sh/setup-uv@v5
+    # uv itself is not pinned: this uv stays on PATH for the caller's later steps,
+    # and any uv call in the caller's checkout must satisfy its `required-version`.
+    - uses: astral-sh/setup-uv@v10.3.1
       with:
-        version: "0.5.29"
+        version: ${{ inputs.uv-version }}
 
     - name: Install tangier
       shell: bash
