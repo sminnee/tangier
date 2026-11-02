@@ -69,7 +69,7 @@ jobs:
         package: ${{ fromJSON(inputs.packages) }}
     name: build ${{ matrix.package }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # tangier hashes the git tree to derive the tag, so a shallow checkout
           # would produce a different hash from a local run.

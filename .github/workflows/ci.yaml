@@ -13,10 +13,10 @@ jobs:
     steps:
       # Depth 20 follows the checkout-depth rule in skills/tangier/reference/
       # github-actions.md. These gates have no placeholder, so they need only HEAD^1.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 20
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.1
         with:
           # A verified gate never calls uv, and an empty cache fails the post step.
           enable-cache: false
@@ -52,7 +52,7 @@ jobs:
     # The check is `[gate.no-dependencies]` in pipeline.toml.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 20
       - name: Run no-dependencies
@@ -67,10 +67,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 20
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: false
       - run: uv tool install ruff
@@ -95,7 +95,7 @@ jobs:
     # which is the higher-value of the two given these actions are mostly shell.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: action-validator
         # One file per invocation — the CLI takes a single path.
         run: |
