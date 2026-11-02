@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 from tangier import junit
 
@@ -109,6 +110,23 @@ class TestUnittestJunit(unittest.TestCase):
         self.assertEqual(code, 0)
         assert report is not None
         self.assertEqual(report.counts(), {"tests": 1, "failures": 0, "errors": 0, "skipped": 0})
+
+    def test_dirs_discovers_each_listed_directory_and_no_other(self) -> None:
+        passing = "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n"
+        for name in ("a", "b", "c"):
+            os.makedirs(os.path.join(self.dir, name))
+            open(os.path.join(self.dir, name, "__init__.py"), "w").close()
+            with open(os.path.join(self.dir, name, "test_x.py"), "w") as fh:
+                _ = fh.write(passing)
+        done = subprocess.run(
+            [sys.executable, SCRIPT, "build/report.xml", "--dirs", "a,c", "-p", "test_*.py", "-t", "."],
+            cwd=self.dir,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        tree = ET.parse(os.path.join(self.dir, "build", "report.xml"))
+        self.assertEqual(sorted(c.get("classname") for c in tree.iter("testcase")), ["a.test_x.T", "c.test_x.T"])
 
     def test_no_tests_exits_5_as_unittest_does(self) -> None:
         code, report = self.run_suite(None)

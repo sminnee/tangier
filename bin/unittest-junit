@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Run `python -m unittest discover` with its usual output, and also write a JUnit XML report.
 
-    bin/unittest-junit <report.xml> [discover args ...]
+    bin/unittest-junit <report.xml> [--dirs <dir>,<dir>...] [discover args ...]
+
+`--dirs` discovers each comma-separated directory in turn, as a gate's
+`{<name>-items}` placeholder lists them, in place of discover's one `-s`.
 
 Stdlib only, like tangier itself. The gate's `junit` field reads the report,
 so `gate stats` can name the tests that fail. The exit code is unittest's.
@@ -90,6 +93,17 @@ class JUnitRunner(unittest.TextTestRunner):
     resultclass = JUnitResult
 
 
+class DirsLoader(unittest.TestLoader):
+    """Discovers each of `dirs` with discover's pattern and top-level directory, as one suite."""
+
+    def __init__(self, dirs: list[str]) -> None:
+        super().__init__()
+        self.dirs = dirs
+
+    def discover(self, start_dir, pattern="test*.py", top_level_dir=None):
+        return self.suiteClass(super(DirsLoader, self).discover(d, pattern, top_level_dir) for d in self.dirs)
+
+
 def _classname(test: unittest.TestCase) -> str:
     """`tangier.tests.test_gate.TestRun`, or for an import or fixture error, what unittest names it."""
     if hasattr(test, "_testMethodName") and type(test).__name__ != "_FailedTest":
@@ -138,11 +152,15 @@ def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1].startswith("-"):
         print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
         return 2
-    path = argv[1]
+    path, rest = argv[1], argv[2:]
+    loader = unittest.defaultTestLoader
+    if rest[:1] == ["--dirs"] and len(rest) > 1:
+        loader, rest = DirsLoader([d for d in rest[1].split(",") if d]), rest[2:]
     start = time.perf_counter()
     program = unittest.main(
         module=None,
-        argv=["unittest-junit", "discover", *argv[2:]],
+        argv=["unittest-junit", "discover", *rest],
+        testLoader=loader,
         # A class, not an instance, so unittest passes it `-v`, `-f`, `--locals` and its default warnings filter.
         testRunner=JUnitRunner,
         exit=False,

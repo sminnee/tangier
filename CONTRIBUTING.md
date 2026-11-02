@@ -4,10 +4,14 @@
 
 ```sh
 bin/test                  # stdlib unittest, no dependencies; one Python, any tree
-tangier gate run test --wait     # the suite on 3.11, 3.12 and 3.13, one member each; needs uv
+tangier gate run test --wait     # the tests the change reaches, on 3.11, 3.12 and 3.13; needs uv
 tangier gate run lint --wait     # lint.check and lint.format
 tangier gate run no-dependencies --wait  # no declared dependency, and no third-party import
 ```
+
+The tests sit in one directory for each area under `tangier/tests/`. The `test` gate runs only the
+directories a change reaches, through the `*-tests` and `*-src` tags in `pipeline.toml`. A new
+module goes in the matching `*-src` tag, or no area's tests run when it changes.
 
 Each `gate run` publishes its passes and failures to `origin`, so CI reuses the passes. If it
 warns, run `tangier gate sync` before the PR push. When `pipeline.toml` uses a field the installed
