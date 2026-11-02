@@ -23,7 +23,7 @@ jobs:
     steps:
       # The workflow's own ref, not head_sha: bin/release-plan comes from the
       # same commit as this workflow, and judges head_sha through git show.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Every tag, to compare against the highest released version.
           fetch-depth: 0
@@ -46,7 +46,7 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       # Planned again: "Re-run failed jobs" reuses the plan job's old outputs, and
@@ -60,7 +60,7 @@ jobs:
           SHA: ${{ github.event.workflow_run.head_sha }}
         run: git checkout --detach "$SHA"
       - if: steps.recheck.outputs.release == 'true'
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: false
       - if: steps.recheck.outputs.release == 'true'
