@@ -305,6 +305,7 @@ A reusable workflow: one matrix leg per bucket, each calling the `build` action.
 | `registry-username` | `registry` | Registry user. |
 | `extra-secrets` | `""` | Space-separated buildx secret ids. |
 | `regctl-version` | `v0.6.1` | `regctl` release. |
+| `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
 | `tangier-ref` | the workflow's ref | tangier ref to install. |
 | `fail-fast` | `false` | Cancel other legs when one fails. |
 | `runs-on` | `ubuntu-latest` | Runner label. |
@@ -325,6 +326,7 @@ Builds and pushes one bucket's image, unless its tag is already published.
 | `registry-username` | `registry` | Registry user. |
 | `extra-secrets` | `""` | Space-separated buildx secret ids. Pass values through the step's `env:`. |
 | `regctl-version` | `v0.6.1` | `regctl` release. |
+| `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
 | `tangier-ref` | the action's ref | Required when the action is called by local path. |
 
 | Output | Meaning |
@@ -364,5 +366,6 @@ as `deploy`, so pinning `deploy` pins the tailnet connect too.
 | `client-id` | required | As for `tailnet`. |
 | `audience` | required | As for `tailnet`. |
 | `tailscale-version` | `1.104.4` | Tailscale release. Needs 1.90.1 or later. |
+| `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
 | `tangier-ref` | the action's ref | Required when the action is called by local path. |
 
