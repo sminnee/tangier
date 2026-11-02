@@ -1,0 +1,7 @@
+# `required-version` is what the `build-action` job in ci.yaml checks against.
+[project]
+name = "uv-caller"
+version = "0"
+
+[tool.uv]
+required-version = ">=0.13"
