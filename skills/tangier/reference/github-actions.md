@@ -36,13 +36,15 @@ permissions:
   contents: read
 
 env:
-  # The latest release from PyPI.
+  # The latest release from PyPI. Only the plan job reads it: the plan resolves it
+  # to one version, and every later job pins `TANGIER` to that version.
   TANGIER: tangier
 
 jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
+      tangier-version: ${{ steps.tangier.outputs.version }}
       full: ${{ steps.scope.outputs.full }}
       e2e-items: ${{ steps.changes.outputs.e2e-items }}
       k8s-touched: ${{ steps.changes.outputs.k8s-touched }}
@@ -56,6 +58,13 @@ jobs:
           fetch-depth: 0
           filter: blob:none
       - uses: astral-sh/setup-uv@v6
+      - name: Resolve tangier
+        id: tangier
+        run: |
+          # One version for the whole run: a release that lands mid-run must not
+          # give the build and e2e jobs different tag hashes.
+          installed="$(uvx "$TANGIER" --version)"
+          echo "version=${installed##* }" >> "$GITHUB_OUTPUT"
       - name: Choose the scope
         id: scope
         env:
@@ -100,6 +109,8 @@ jobs:
     needs: plan
     if: needs.plan.outputs.test-backend-run == 'true'
     runs-on: ubuntu-latest
+    env:
+      TANGIER: tangier==${{ needs.plan.outputs.tangier-version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,6 +130,7 @@ jobs:
     if: needs.plan.outputs.lint-run == 'true'
     runs-on: ubuntu-latest
     env:
+      TANGIER: tangier==${{ needs.plan.outputs.tangier-version }}
       FULL: ${{ needs.plan.outputs.full }}
     steps:
       - uses: actions/checkout@v4
@@ -150,6 +162,7 @@ jobs:
     uses: sminnee/tangier/.github/workflows/build.yaml@v0
     with:
       packages: ${{ needs.plan.outputs.build-packages }}
+      tangier-version: ${{ needs.plan.outputs.tangier-version }}
     secrets:
       registry-password: ${{ secrets.REGISTRY_PASSWORD }}
 
@@ -160,6 +173,8 @@ jobs:
       !cancelled() && !failure() &&
       needs.plan.outputs.e2e-items != ''
     runs-on: ubuntu-latest
+    env:
+      TANGIER: tangier==${{ needs.plan.outputs.tangier-version }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -173,7 +188,7 @@ jobs:
         run: bin/e2e-test --dirs "$E2E_ITEMS"
 
   deploy-uat:
-    needs: build
+    needs: [plan, build]
     if: >-
       !cancelled() && !failure() &&
       github.event_name == 'push'
@@ -189,11 +204,17 @@ jobs:
           env: uat
           client-id: ${{ vars.TS_DEPLOY_CLIENT_ID }}
           audience: ${{ vars.TS_DEPLOY_AUDIENCE }}
+          tangier-version: ${{ needs.plan.outputs.tangier-version }}
 ```
 
 On the nightly, `--full` makes every items list complete and every `-run` output `true`, so the
 same `if:` conditions run everything. Each job's `if:` reads a plan output and never repeats the
 need logic.
+
+The plan resolves `TANGIER` to one version, and every later job runs that version: each sets
+`TANGIER` to `tangier==<version>`, and passes it to the shipped actions as `tangier-version`. The
+image tag hashing can change between releases, so a build and an e2e job that ran different
+versions could look for different tags.
 
 ### The prod deploy after a green nightly
 
@@ -243,6 +264,7 @@ and needs `contents: write` to publish the record:
     permissions:
       contents: write
     env:
+      TANGIER: tangier==${{ needs.plan.outputs.tangier-version }}
       FULL: ${{ needs.plan.outputs.full }}
     steps:
       - uses: actions/checkout@v4

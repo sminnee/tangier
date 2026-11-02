@@ -21,6 +21,7 @@ One job asks tangier what the change needs, and exposes the answers as job outpu
 ```yaml
 plan:
   outputs:
+    tangier-version: ${{ steps.tangier.outputs.version }}
     full: ${{ steps.scope.outputs.full }}
     e2e-items: ${{ steps.changes.outputs.e2e-items }}
     k8s-touched: ${{ steps.changes.outputs.k8s-touched }}
@@ -31,6 +32,10 @@ plan:
     - uses: actions/checkout@v4
       with: { fetch-depth: 0, filter: blob:none }
     - uses: astral-sh/setup-uv@v6
+    - id: tangier
+      run: |
+        installed="$(uvx "$TANGIER" --version)"
+        echo "version=${installed##* }" >> "$GITHUB_OUTPUT"
     - id: changes
       run: uvx "$TANGIER" changemap github-outputs
     - id: gates
@@ -45,6 +50,11 @@ run's summary page.
 The checkout needs the merge base; see
 [checkout depth](../../skills/tangier/reference/github-actions.md#checkout-depth).
 
+The plan also fixes the tangier version for the run. Every later job sets
+`TANGIER: tangier==${{ needs.plan.outputs.tangier-version }}`, and passes the version to the shipped
+actions as `tangier-version`. Image tags can hash differently from one release to the next, so a
+build and an e2e job on different versions could disagree about a tag.
+
 Every later job takes its path decisions from these outputs. The path rules stay in
 `pipeline.toml`; a job that repeats them in YAML drifts from them.
 
@@ -56,6 +66,8 @@ A gate job runs when its gate is `required`:
 test-backend:
   needs: plan
   if: needs.plan.outputs.test-backend-run == 'true'
+  env:
+    TANGIER: tangier==${{ needs.plan.outputs.tangier-version }}
   steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 20 }
