@@ -21,9 +21,11 @@ inputs:
     description: OIDC audience for this environment. Pass `${{ vars.TS_DEPLOY_AUDIENCE }}`.
     required: true
   tailscale-version:
-    description: Tailscale release to install. Pinned, never `latest`.
+    description: >-
+      As the `tailnet` action's `version` input. Defaults to the release
+      pinned in tailnet/resolve.sh.
     required: false
-    default: "1.78.1"
+    default: ""
   tangier-ref:
     description: >-
       The tangier ref to install the CLI from. Defaults to the ref this action

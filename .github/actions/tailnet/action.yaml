@@ -41,9 +41,12 @@ inputs:
     required: false
     default: ""
   version:
-    description: Tailscale release to install. Pinned, never `latest`.
+    description: >-
+      Tailscale release to install. Defaults to the release pinned in
+      resolve.sh. The OIDC exchange needs 1.90.1 or later, so do not pin
+      below that, and never pass `latest`.
     required: false
-    default: "1.78.1"
+    default: ""
 
 outputs:
   tag:
@@ -53,25 +56,25 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Resolve the tag and operator
+    - name: Resolve the tag, operator and version
       id: resolve
       shell: bash
       env:
         INPUT_TAG: ${{ inputs.tag }}
         INPUT_ENV: ${{ inputs.env }}
         INPUT_OPERATOR: ${{ inputs.operator }}
+        INPUT_VERSION: ${{ inputs.version }}
       run: bash "$GITHUB_ACTION_PATH/resolve.sh"
 
     - name: Connect to the tailnet
-      uses: tailscale/github-action@v3
+      uses: tailscale/github-action@v4
       with:
         oauth-client-id: ${{ inputs.client-id }}
+        audience: ${{ inputs.audience }}
         tags: ${{ steps.resolve.outputs.tag }}
-        version: ${{ inputs.version }}
+        version: ${{ steps.resolve.outputs.version }}
         use-cache: "true"
         args: --advertise-tags=${{ steps.resolve.outputs.tag }}
-      env:
-        TS_EXPERIMENT_OAUTH_AUDIENCE: ${{ inputs.audience }}
 
     - name: Point kubectl at the operator
       shell: bash
