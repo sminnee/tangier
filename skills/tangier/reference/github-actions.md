@@ -291,7 +291,9 @@ jobs:
 
 ## Shipped actions
 
-Pin `@v0`, a moving alias that every release updates, or an exact `@v0.3.2`.
+Pin `@v0`, a moving alias that every release updates, or an exact `@v0.3.2`. The pin sets only
+the action YAML. The CLI the actions install is set by `tangier-version`, and is the latest on
+PyPI when that is empty. Pass the version the plan resolved, as the canonical workflow does.
 
 ### `sminnee/tangier/.github/workflows/build.yaml@v0`
 
@@ -306,7 +308,8 @@ A reusable workflow: one matrix leg per bucket, each calling the `build` action.
 | `extra-secrets` | `""` | Space-separated buildx secret ids. |
 | `regctl-version` | `v0.6.1` | `regctl` release. |
 | `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
-| `tangier-ref` | the workflow's ref | tangier ref to install. |
+| `tangier-version` | PyPI latest | The CLI release to install. Pass the plan's resolved version. |
+| `tangier-ref` | `""` | Git ref to install the CLI from instead of PyPI, for testing an unreleased change. |
 | `fail-fast` | `false` | Cancel other legs when one fails. |
 | `runs-on` | `ubuntu-latest` | Runner label. |
 
@@ -327,7 +330,8 @@ Builds and pushes one bucket's image, unless its tag is already published.
 | `extra-secrets` | `""` | Space-separated buildx secret ids. Pass values through the step's `env:`. |
 | `regctl-version` | `v0.6.1` | `regctl` release. |
 | `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
-| `tangier-ref` | the action's ref | Required when the action is called by local path. |
+| `tangier-version` | PyPI latest | The CLI release to install. Pass the plan's resolved version. |
+| `tangier-ref` | `""` | Git ref to install the CLI from instead of PyPI, for testing an unreleased change. |
 
 | Output | Meaning |
 | --- | --- |
@@ -367,5 +371,6 @@ as `deploy`, so pinning `deploy` pins the tailnet connect too.
 | `audience` | required | As for `tailnet`. |
 | `tailscale-version` | `1.104.4` | Tailscale release. Needs 1.90.1 or later. |
 | `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
-| `tangier-ref` | the action's ref | Required when the action is called by local path. |
+| `tangier-version` | PyPI latest | The CLI release to install. Pass the plan's resolved version. |
+| `tangier-ref` | `""` | Git ref to install the CLI from instead of PyPI, for testing an unreleased change. |
 

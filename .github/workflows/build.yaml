@@ -32,8 +32,15 @@ on:
         required: false
         type: string
         default: ""
+      tangier-version:
+        description: >-
+          PyPI release of the CLI to install. Empty installs the latest. Pass the
+          version the caller's `uvx` calls use.
+        required: false
+        type: string
+        default: ""
       tangier-ref:
-        description: tangier ref to install the CLI from. Defaults to this workflow's ref.
+        description: Git ref to install the CLI from instead of PyPI. Cannot be combined with tangier-version.
         required: false
         type: string
         default: ""
@@ -88,6 +95,7 @@ jobs:
           extra-secrets: ${{ inputs.extra-secrets }}
           regctl-version: ${{ inputs.regctl-version }}
           uv-version: ${{ inputs.uv-version }}
+          tangier-version: ${{ inputs.tangier-version }}
           tangier-ref: ${{ inputs.tangier-ref }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.sentry-auth-token }}

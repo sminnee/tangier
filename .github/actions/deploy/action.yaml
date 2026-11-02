@@ -32,11 +32,17 @@ inputs:
       and falls back to the latest release.
     required: false
     default: ""
+  tangier-version:
+    description: >-
+      PyPI release of the CLI to install, such as `0.3.2`. Empty (the default)
+      installs the latest. Pass the version the caller's `uvx` calls use: two
+      versions can hash tags apart.
+    required: false
+    default: ""
   tangier-ref:
     description: >-
-      The tangier ref to install the CLI from. Defaults to the ref this action
-      was called at. Required when calling the action locally (`uses: ./...`),
-      because `github.action_ref` is empty for a local path.
+      Git ref to install the CLI from instead of PyPI, for testing an unreleased
+      change. Cannot be combined with `tangier-version`.
     required: false
     default: ""
 
@@ -85,7 +91,7 @@ runs:
     - name: Install tangier
       shell: bash
       env:
-        ACTION_REF: ${{ github.action_ref }}
+        INPUT_VERSION: ${{ inputs.tangier-version }}
         INPUT_REF: ${{ inputs.tangier-ref }}
       run: bash "$GITHUB_ACTION_PATH/../build/install-tangier.sh"
 
