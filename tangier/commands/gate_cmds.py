@@ -273,10 +273,8 @@ def _create_when_free(
 
 
 def _job_env() -> dict[str, str]:
-    """The job's environment: `-m tangier` finds this process's package, whatever the job's cwd and sys.path."""
-    package_root = os.path.dirname(os.path.dirname(os.path.abspath(tangier.__file__)))
-    pythonpath = os.pathsep.join(p for p in (package_root, os.environ.get("PYTHONPATH")) if p)
-    return {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": pythonpath}
+    """The job's environment: this one, unbuffered for the log. Its gate commands inherit it. See `[job-env]`."""
+    return {**os.environ, "PYTHONUNBUFFERED": "1"}
 
 
 def _warn_load() -> None:
@@ -291,9 +289,15 @@ def _warn_load() -> None:
 
 
 def _job_argv(argv: list[str], job_dir: str) -> list[str]:
-    """The job process's command: this one, with `--job-dir` straight after `run`, ahead of any `--`."""
+    """The job process's command: this one, with `--job-dir` straight after `run`, ahead of any `--`.
+
+    It imports this process's tangier by path, whatever the job's cwd. `PYTHONPATH` would do the
+    same, but the gate commands would inherit it. See `[job-env]`.
+    """
     at = argv.index("run", argv.index("gate")) + 1
-    return [sys.executable, "-m", "tangier", *argv[:at], "--job-dir", job_dir, *argv[at:]]
+    package_root = os.path.dirname(os.path.dirname(os.path.abspath(tangier.__file__)))
+    boot = f"import sys; sys.path.insert(0, {package_root!r}); from tangier.cli import cli_main; cli_main()"
+    return [sys.executable, "-c", boot, *argv[:at], "--job-dir", job_dir, *argv[at:]]
 
 
 def _cancel_started(job: jobs.Job, runner: Runner) -> int:
