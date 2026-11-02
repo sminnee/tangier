@@ -90,6 +90,22 @@ jobs:
           if [ "$EVENT" = pull_request ]; then flags+=(--base HEAD^1); else flags+=(--full); fi
           python3 -m tangier gate run lint.format "${flags[@]}"
 
+  plan:
+    # The touched tags in pipeline.toml, for the jobs below that are not gates.
+    # `--base HEAD^1` on every event: on a pull request it is the merge base, and
+    # on a push to main it is the previous main, so the diff is what merged.
+    runs-on: ubuntu-latest
+    outputs:
+      build-action-touched: ${{ steps.changes.outputs.build-action-touched }}
+      install-tangier-touched: ${{ steps.changes.outputs.install-tangier-touched }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - name: Changed tags
+        id: changes
+        run: python3 -m tangier changemap github-outputs --base HEAD^1
+
   build-action:
     # Runs the build action as a caller whose `[tool.uv] required-version` is
     # `>=0.13`, then runs the uv it left on PATH in that checkout. The job fails
@@ -97,8 +113,13 @@ jobs:
     #
     # GHCR rather than a `registry:2` service: the action's docker-container
     # buildx builder cannot reach `localhost:5000`. A fork's token cannot push
-    # to GHCR, so forks skip.
-    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
+    # to GHCR, so forks skip. It also skips unless the diff touches the
+    # `build-action` tag in pipeline.toml: a real docker build is too slow to
+    # run for a change the build action cannot see.
+    needs: plan
+    if: >-
+      needs.plan.outputs.build-action-touched == 'true' &&
+      (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -135,6 +156,47 @@ jobs:
         run: |
           test -n "$TAG" || { echo "::error::the build action emitted no tag"; exit 1; }
           echo "tag=$TAG"
+
+  install-tangier:
+    # Runs the install script each way it can install, and checks the version
+    # each one gives. The build-action job covers only the git ref.
+    needs: plan
+    if: needs.plan.outputs.install-tangier-touched == 'true'
+    runs-on: ubuntu-latest
+    env:
+      INSTALL: .github/actions/build/install-tangier.sh
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v10.3.1
+        with:
+          enable-cache: false
+      - name: A pinned release
+        env:
+          INPUT_VERSION: "0.3.0"
+        run: |
+          set -euo pipefail
+          bash "$INSTALL"
+          test "$(tangier --version)" = "tangier 0.3.0"
+      - name: The latest release
+        # After the pinned one, so this also checks that `--upgrade` moves an existing install.
+        run: |
+          set -euo pipefail
+          bash "$INSTALL"
+          want="$(curl -fsSL https://pypi.org/pypi/tangier/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')"
+          test "$(tangier --version)" = "tangier $want"
+      - name: This commit, by ref
+        env:
+          INPUT_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          bash "$INSTALL"
+          test "$(tangier --version)" = "tangier $(python3 -c 'import tangier; print(tangier.__version__)')"
+      - name: A version and a ref together fail
+        env:
+          INPUT_VERSION: "0.3.0"
+          INPUT_REF: ${{ github.sha }}
+        run: |
+          if bash "$INSTALL"; then echo "::error::the script accepted both a version and a ref"; exit 1; fi
 
   lint-actions:
     # `action-validator` covers `actions/*/action.yaml`, the file type nothing

@@ -129,6 +129,18 @@ paths = "tangier/tests/gate/**"
 depends = "gate-src"
 unittest_items = "tangier/tests/gate"
 
+# Touched tags for the CI jobs in .github/workflows/ci.yaml that are not gates.
+# `build-action` runs a real docker build with this commit's tangier, so it also
+# follows the image code; `install-tangier` runs the install script each way.
+[build-action]
+paths = [".github/actions/build/**", ".github/fixtures/uv-caller/**"]
+depends = "image-src"
+touched = true
+
+[install-tangier]
+paths = ".github/actions/build/install-tangier.sh"
+touched = true
+
 [no-dependencies-inputs]
 paths = ["bin/check-no-dependencies"]
 
