@@ -66,7 +66,7 @@ class InProcessRunner(RecordingRunner):
         self, argv: list[str], *, log: str, env: dict[str, str] | None = None, pass_fds: tuple[int, ...] = ()
     ) -> int:
         self.spawned.append(list(argv))
-        # [python, -m, tangier, *args]
+        # [python, -c, <boot>, *args]
         with open(log, "a") as fh, contextlib.redirect_stdout(fh), contextlib.redirect_stderr(fh):
             _ = cli.main(argv[3:], runner=self)
         return 0
@@ -261,7 +261,7 @@ class TestRun(JobCase):
         runner = InProcessRunner()
         _ = self.run_gates("lint", runner=runner)
         argv = runner.spawned[0]
-        self.assertEqual(argv[:3], [sys.executable, "-m", "tangier"])
+        self.assertEqual(argv[:2], [sys.executable, "-c"])
         self.assertEqual(argv[3:], ["gate", "run", "--job-dir", self.job().dir, "lint", "--base", "HEAD", "--full"])
 
     # SPEC: gate#job-run-waits
@@ -1319,6 +1319,23 @@ class TestEndToEnd(JobCase):
         self.assertEqual(job.state, "passed")
         with contextlib.chdir(self.repo):
             self.assertIn("linted", jobs.output(job, "lint"))
+
+    # SPEC: gate#job-env
+    def test_a_real_job_gives_its_gates_the_environment_it_was_started_with(self) -> None:
+        with open(os.path.join(self.repo, "pipeline.toml"), "w") as fh:
+            _ = fh.write(CONFIG.replace('cmd = "bin/lint"', "cmd = \"sh -c 'echo PYTHONPATH=[$PYTHONPATH]'\""))
+        out = io.StringIO()
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            contextlib.chdir(self.repo),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(out),
+        ):
+            code = cli.main(["gate", "run", "lint", "--base", "HEAD", "--full", "--timeout", "none"])
+        self.assertEqual(code, 0, out.getvalue())
+        with contextlib.chdir(self.repo):
+            self.assertIn("PYTHONPATH=[]", jobs.output(self.job(), "lint"))
 
 
 class TestQueue(JobCase):

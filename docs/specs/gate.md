@@ -547,6 +547,10 @@ to an hour.
 - In CI, by `[runner-detect]`, and with `--dry-run`, `gate run` runs inline, with no
   job. CI has no tool timeout and wants a streamed log, and a dry run runs nothing.
   `[job-inline-ci]`
+- The job process runs the same tangier as the `gate run` that started it, whatever the job's cwd.
+  Its gate commands get the environment `gate run` had: the job does not put tangier's own path
+  on `PYTHONPATH`. Otherwise a project's tests, run from another checkout, would import that
+  checkout's tangier, not their own. `[job-env]`
 - One job runs at a time in a worktree. Two jobs on one tree would fight over its ports,
   databases and caches. `gate run --wait` started while a job runs prints `job <n> is running:
   <phase>; waiting for it before starting`, waits for that job quietly, without its results,
