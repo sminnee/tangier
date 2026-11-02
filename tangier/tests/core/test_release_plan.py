@@ -9,7 +9,7 @@ import unittest
 from tangier.tests.support import make_git_repo
 
 SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
     "bin",
     "release-plan",
 )
