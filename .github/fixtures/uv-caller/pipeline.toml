@@ -1,0 +1,12 @@
+# The caller repo that the `build-action` CI job builds with the build action.
+
+[registry]
+url = "ghcr.io/sminnee/tangier-ci-fixture"
+
+[fixture]
+paths = "app/**"
+sha   = true
+
+[image.fixture]
+dockerfile = "app/Dockerfile"
+context    = "app"

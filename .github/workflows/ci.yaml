@@ -89,6 +89,52 @@ jobs:
           if [ "$EVENT" = pull_request ]; then flags+=(--base HEAD^1); else flags+=(--full); fi
           python3 -m tangier gate run lint.format "${flags[@]}"
 
+  build-action:
+    # Runs the build action as a caller whose `[tool.uv] required-version` is
+    # `>=0.13`, then runs the uv it left on PATH in that checkout. The job fails
+    # if the action installs a uv the caller rejects.
+    #
+    # GHCR rather than a `registry:2` service: the action's docker-container
+    # buildx builder cannot reach `localhost:5000`. A fork's token cannot push
+    # to GHCR, so forks skip.
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: tangier
+      - name: Make the workspace the fixture caller
+        # tangier hashes the git tree, so the fixture needs a repo of its own.
+        run: |
+          set -euo pipefail
+          cp -R tangier/.github/fixtures/uv-caller/. .
+          git init -q
+          git add -A
+          git -c user.name=tangier-ci -c user.email=ci@tangier.invalid commit -q -m fixture
+      - id: build
+        uses: ./tangier/.github/actions/build
+        with:
+          package: fixture
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          tangier-ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Run the action's uv in the caller's checkout
+        # The command setup-uv's post step used to run. setup-uv no longer prunes
+        # by default, so the job runs it itself; uv exits 2 if its version fails
+        # the caller's `required-version`.
+        run: uv cache prune --ci
+      - name: Check the tag output
+        # Not `published`: the tag is content-addressed, so every run after the
+        # first skips the build.
+        env:
+          TAG: ${{ steps.build.outputs.tag }}
+        run: |
+          test -n "$TAG" || { echo "::error::the build action emitted no tag"; exit 1; }
+          echo "tag=$TAG"
+
   lint-actions:
     # `action-validator` covers `actions/*/action.yaml`, the file type nothing
     # in this estate lints today. `actionlint` shellchecks every `run:` body,
