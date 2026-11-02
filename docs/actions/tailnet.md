@@ -51,7 +51,7 @@ GitHub environment called `production` using a tag containing `prod`, and
 | `env` | no | `""` | Environment name, used to look up `[tailnet.<env>] tag` |
 | `tag` | no | `""` | Tailnet tag, overriding config. For repos with no `pipeline.toml` |
 | `operator` | no | `""` | Operator hostname, overriding `[tailnet] operator` |
-| `version` | no | `1.78.1` | Tailscale release to install |
+| `version` | no | `1.104.4` | Tailscale release to install. Needs 1.90.1 or later for the OIDC exchange |
 
 The action outputs `tag`: the tailnet tag the runner authenticated as.
 

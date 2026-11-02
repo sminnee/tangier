@@ -1,8 +1,9 @@
 #!/bin/bash
-# Resolve the tailnet tag and operator for the tailnet action.
+# Resolve the tailnet tag, operator and Tailscale version for the tailnet
+# action.
 #
-# Reads INPUT_TAG, INPUT_ENV and INPUT_OPERATOR; writes tag and
-# operator to $GITHUB_OUTPUT.
+# Reads INPUT_TAG, INPUT_ENV, INPUT_OPERATOR and INPUT_VERSION; writes tag,
+# operator and version to $GITHUB_OUTPUT.
 #
 # Read with inline tomllib rather than through the CLI: four of the eight
 # call sites want the tailnet connect ALONE, and making them install uv
@@ -37,6 +38,12 @@ if [ -z "$TAG" ]; then
   echo "::error::no tailnet tag for env [${INPUT_ENV:-<unset>}]. Add a [tailnet.<env>] table to pipeline.toml, or pass the tag input." >&2
   exit 1
 fi
-echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-echo "operator=$OPERATOR" >> "$GITHUB_OUTPUT"
+# The version default is the one place the Tailscale pin lives.
+# docs/actions/tailnet.md and the skill reference state it too; move them with
+# it. The OIDC exchange needs 1.90.1 or later.
+{
+  echo "tag=$TAG"
+  echo "operator=$OPERATOR"
+  echo "version=${INPUT_VERSION:-1.104.4}"
+} >> "$GITHUB_OUTPUT"
 echo "Connecting as $TAG via $OPERATOR"

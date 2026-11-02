@@ -345,7 +345,7 @@ environment holds its own `TS_DEPLOY_CLIENT_ID` and `TS_DEPLOY_AUDIENCE`, so nev
 | `env` | `""` | Reads `[tailnet.<env>] tag`. |
 | `tag` | `""` | The tag itself, for a repo with no `pipeline.toml`. |
 | `operator` | `[tailnet] operator` | Operator hostname. |
-| `version` | `1.78.1` | Tailscale release. |
+| `version` | `1.104.4` | Tailscale release. Needs 1.90.1 or later. |
 
 | Output | Meaning |
 | --- | --- |
@@ -362,6 +362,6 @@ The `tailnet` action, then `tangier deploy <env> --summary`.
 | `env` | required | Needs a `[deploy.<env>]` table. |
 | `client-id` | required | As for `tailnet`. |
 | `audience` | required | As for `tailnet`. |
-| `tailscale-version` | `1.78.1` | Tailscale release. |
+| `tailscale-version` | `1.104.4` | Tailscale release. Needs 1.90.1 or later. |
 | `tangier-ref` | the action's ref | Required when the action is called by local path. |
 
