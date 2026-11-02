@@ -1,6 +1,7 @@
 #!/bin/bash
-# Resolve the tailnet tag, operator and Tailscale version for the tailnet
-# action.
+# Resolve the tailnet tag, operator and Tailscale version for the tailnet and
+# deploy actions. Both run this file from their own checkout, so a caller who
+# pins either action at a ref gets this script at that same ref.
 #
 # Reads INPUT_TAG, INPUT_ENV, INPUT_OPERATOR and INPUT_VERSION; writes tag,
 # operator and version to $GITHUB_OUTPUT.

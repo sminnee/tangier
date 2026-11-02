@@ -355,7 +355,8 @@ The job needs `permissions: id-token: write`.
 
 ### `sminnee/tangier/.github/actions/deploy@v0`
 
-The `tailnet` action, then `tangier deploy <env> --summary`.
+The `tailnet` action's steps, then `tangier deploy <env> --summary`. They run at the same ref
+as `deploy`, so pinning `deploy` pins the tailnet connect too.
 
 | Input | Default | Meaning |
 | --- | --- | --- |

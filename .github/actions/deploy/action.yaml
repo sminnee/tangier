@@ -56,12 +56,38 @@ runs:
         fi
         echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
-    - uses: sminnee/tangier/.github/actions/tailnet@v0
+    # The tailnet action's steps, not `uses: .../tailnet@v0`: a nested `uses:`
+    # cannot follow this action's ref, so a caller pinning deploy would still
+    # get whatever tailnet@v0 is now. resolve.sh comes from this checkout.
+    # Keep these steps in step with .github/actions/tailnet/action.yaml.
+    - name: Resolve the tag, operator and version
+      id: resolve
+      shell: bash
+      env:
+        INPUT_TAG: ""
+        INPUT_ENV: ${{ inputs.env }}
+        INPUT_OPERATOR: ""
+        INPUT_VERSION: ${{ inputs.tailscale-version }}
+      run: bash "$GITHUB_ACTION_PATH/../tailnet/resolve.sh"
+
+    - name: Connect to the tailnet
+      uses: tailscale/github-action@v4
       with:
-        client-id: ${{ inputs.client-id }}
+        oauth-client-id: ${{ inputs.client-id }}
         audience: ${{ inputs.audience }}
-        env: ${{ inputs.env }}
-        version: ${{ inputs.tailscale-version }}
+        tags: ${{ steps.resolve.outputs.tag }}
+        version: ${{ steps.resolve.outputs.version }}
+        use-cache: "true"
+        args: --advertise-tags=${{ steps.resolve.outputs.tag }}
+
+    - name: Point kubectl at the operator
+      shell: bash
+      env:
+        OPERATOR: ${{ steps.resolve.outputs.operator }}
+      run: |
+        set -euo pipefail
+        tailscale configure kubeconfig "$OPERATOR"
+        kubectl config current-context
 
     - uses: astral-sh/setup-uv@v5
       with:
