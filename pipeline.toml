@@ -21,24 +21,113 @@ scope = ["gate-inputs", "no-dependencies-inputs"]
 # is what a bare GitHub runner provides. Each member keeps its own record, so
 # one version's pass is recorded even when another version fails.
 #
+# `{unittest-items}` lists the test directories the diff reaches: each area's
+# `*-tests` tag below, plus every area whose `*-src` it depends on. A gate-logic
+# change runs only tangier/tests/gate; a core change runs them all.
+#
 # `python`, not `bin/test`: `uv run` resolves `python` to the requested version,
 # but `bin/test` calls `python3`, which another interpreter on PATH can shadow.
 # `bin/unittest-junit` is `unittest discover` that also writes the JUnit report
 # `gate stats` reads.
 [gate.test]
-scope = ["gate-inputs"]
+scope = ["core-tests", "changemap-tests", "image-tests", "deploy-tests", "tailnet-tests", "gate-tests"]
 
 [gate.test.py311]
-cmd = "uv run --no-project --python 3.11 python bin/unittest-junit build/junit-py311.xml -s tangier -p test_*.py -t ."
+cmd = "uv run --no-project --python 3.11 python bin/unittest-junit build/junit-py311.xml --dirs {unittest-items} -p test_*.py -t ."
 junit = "build/junit-py311.xml"
 
 [gate.test.py312]
-cmd = "uv run --no-project --python 3.12 python bin/unittest-junit build/junit-py312.xml -s tangier -p test_*.py -t ."
+cmd = "uv run --no-project --python 3.12 python bin/unittest-junit build/junit-py312.xml --dirs {unittest-items} -p test_*.py -t ."
 junit = "build/junit-py312.xml"
 
 [gate.test.py313]
-cmd = "uv run --no-project --python 3.13 python bin/unittest-junit build/junit-py313.xml -s tangier -p test_*.py -t ."
+cmd = "uv run --no-project --python 3.13 python bin/unittest-junit build/junit-py313.xml --dirs {unittest-items} -p test_*.py -t ."
 junit = "build/junit-py313.xml"
+
+# Source tags for the test areas. Each lists an area's own modules, and
+# `depends` names the areas whose modules it imports. `cli.py` imports every
+# `*_cmds` module, and the tags ignore that edge: a broken import fails other
+# areas' tests too, and the owning area's tests catch it.
+[core-src]
+paths = [
+    "tangier/__init__.py",
+    "tangier/__main__.py",
+    "tangier/cli.py",
+    "tangier/config.py",
+    "tangier/git.py",
+    "tangier/github.py",
+    "tangier/globs.py",
+    "tangier/runner.py",
+    "tangier/commands/__init__.py",
+    "tangier/commands/args.py",
+    "tangier/tests/__init__.py",
+    "tangier/tests/support.py",
+    "pyproject.toml",
+    "bin/unittest-junit",
+]
+
+[changemap-src]
+paths = ["tangier/changemap.py", "tangier/commands/changemap_cmds.py"]
+depends = "core-src"
+
+[image-src]
+paths = ["tangier/image.py", "tangier/commands/image_cmds.py"]
+depends = "changemap-src"
+
+[deploy-src]
+paths = ["tangier/deploy.py", "tangier/commands/deploy_cmds.py"]
+depends = "image-src"
+
+[tailnet-src]
+paths = ["tangier/tailnet.py", "tangier/commands/tailnet_cmds.py"]
+depends = "core-src"
+
+[gate-src]
+paths = [
+    "tangier/gate.py",
+    "tangier/home.py",
+    "tangier/jobs.py",
+    "tangier/junit.py",
+    "tangier/ranon.py",
+    "tangier/stats.py",
+    "tangier/usage.py",
+    "tangier/watch.py",
+    "tangier/commands/gate_cmds.py",
+]
+depends = "changemap-src"
+
+# Test areas: each is one `{unittest-items}` directory, run when its tests or
+# the source they import change.
+[core-tests]
+# `pipeline.toml` because test_test_scopes reads it.
+paths = ["tangier/tests/core/**", "bin/release-plan", "pipeline.toml"]
+depends = "core-src"
+unittest_items = "tangier/tests/core"
+
+[changemap-tests]
+paths = "tangier/tests/changemap/**"
+depends = "changemap-src"
+unittest_items = "tangier/tests/changemap"
+
+[image-tests]
+paths = "tangier/tests/image/**"
+depends = "image-src"
+unittest_items = "tangier/tests/image"
+
+[deploy-tests]
+paths = "tangier/tests/deploy/**"
+depends = "deploy-src"
+unittest_items = "tangier/tests/deploy"
+
+[tailnet-tests]
+paths = "tangier/tests/tailnet/**"
+depends = "tailnet-src"
+unittest_items = "tangier/tests/tailnet"
+
+[gate-tests]
+paths = "tangier/tests/gate/**"
+depends = "gate-src"
+unittest_items = "tangier/tests/gate"
 
 [no-dependencies-inputs]
 paths = ["bin/check-no-dependencies"]

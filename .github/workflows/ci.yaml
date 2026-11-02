@@ -9,6 +9,7 @@ jobs:
   test:
     # The Python versions are members of the `[gate.test]` group in pipeline.toml.
     # One step for each member, so each version reports and reuses its own record.
+    # Each member runs only the test directories the diff reaches.
     runs-on: ubuntu-latest
     steps:
       # Depth 20 follows the checkout-depth rule in skills/tangier/reference/
