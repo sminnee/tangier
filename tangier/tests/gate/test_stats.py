@@ -8,8 +8,8 @@ from datetime import UTC, datetime
 from unittest import mock
 
 from tangier import gate, stats
+from tangier.tests.gate.test_gate import GateCase, _put_blob
 from tangier.tests.support import make_origin
-from tangier.tests.test_gate import GateCase, _put_blob
 
 LOCAL = {"kind": "local", "host": "dev"}
 CI = {"kind": "ci", "provider": "github-actions"}

@@ -13,7 +13,7 @@ import unittest
 from tangier import junit
 
 SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
     "bin",
     "unittest-junit",
 )
