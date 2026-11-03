@@ -30,7 +30,7 @@ scope = ["gate-inputs", "no-dependencies-inputs"]
 # `bin/unittest-junit` is `unittest discover` that also writes the JUnit report
 # `gate stats` reads.
 [gate.test]
-scope = ["core-tests", "changemap-tests", "image-tests", "deploy-tests", "tailnet-tests", "gate-tests"]
+scope = ["core-tests", "changemap-tests", "image-tests", "deploy-tests", "tailnet-tests", "actions-tests", "gate-tests"]
 
 [gate.test.py311]
 cmd = "uv run --no-project --python 3.11 python bin/unittest-junit build/junit-py311.xml --dirs {unittest-items} -p test_*.py -t ."
@@ -82,6 +82,9 @@ depends = "image-src"
 paths = ["tangier/tailnet.py", "tangier/commands/tailnet_cmds.py"]
 depends = "core-src"
 
+[actions-src]
+paths = ".github/actions/**"
+
 [gate-src]
 paths = [
     "tangier/gate.py",
@@ -123,6 +126,11 @@ unittest_items = "tangier/tests/deploy"
 paths = "tangier/tests/tailnet/**"
 depends = "tailnet-src"
 unittest_items = "tangier/tests/tailnet"
+
+[actions-tests]
+paths = "tangier/tests/actions/**"
+depends = ["actions-src", "core-src"]
+unittest_items = "tangier/tests/actions"
 
 [gate-tests]
 paths = "tangier/tests/gate/**"
