@@ -44,43 +44,43 @@ class TestReleasePlan(unittest.TestCase):
 
     def test_a_first_version_with_no_tags_releases(self) -> None:
         head = _commit_version(self.repo, "0.1.0")
-        self.assertEqual(self.plan(head), {"version": "0.1.0", "release": "true"})
+        self.assertEqual(self.plan(head), {"version": "0.1.0", "previous": "", "release": "true"})
 
     def test_a_new_version_above_the_highest_tag_releases(self) -> None:
         _tag(self.repo, "v0.2.1", _commit_version(self.repo, "0.2.1"))
         head = _commit_version(self.repo, "0.2.2")
-        self.assertEqual(self.plan(head), {"version": "0.2.2", "release": "true"})
+        self.assertEqual(self.plan(head), {"version": "0.2.2", "previous": "0.2.1", "release": "true"})
 
     def test_the_highest_tagged_commit_releases_again(self) -> None:
         head = _commit_version(self.repo, "0.2.1")
         _tag(self.repo, "v0.2.1", head)
-        self.assertEqual(self.plan(head), {"version": "0.2.1", "release": "true"})
+        self.assertEqual(self.plan(head), {"version": "0.2.1", "previous": "", "release": "true"})
 
     def test_an_older_tagged_commit_does_not_release(self) -> None:
         old = _commit_version(self.repo, "0.2.0")
         _tag(self.repo, "v0.2.0", old)
         _tag(self.repo, "v0.2.1", _commit_version(self.repo, "0.2.1"))
-        self.assertEqual(self.plan(old), {"version": "0.2.0", "release": "false"})
+        self.assertEqual(self.plan(old), {"version": "0.2.0", "previous": "", "release": "false"})
 
     def test_an_unchanged_version_does_not_release(self) -> None:
         _tag(self.repo, "v0.2.1", _commit_version(self.repo, "0.2.1"))
         head = _commit_version(self.repo, "0.2.1")
-        self.assertEqual(self.plan(head), {"version": "0.2.1", "release": "false"})
+        self.assertEqual(self.plan(head), {"version": "0.2.1", "previous": "", "release": "false"})
 
     def test_an_untagged_version_below_the_highest_does_not_release(self) -> None:
         superseded = _commit_version(self.repo, "0.2.2")
         _tag(self.repo, "v0.2.3", _commit_version(self.repo, "0.2.3"))
-        self.assertEqual(self.plan(superseded), {"version": "0.2.2", "release": "false"})
+        self.assertEqual(self.plan(superseded), {"version": "0.2.2", "previous": "", "release": "false"})
 
     def test_a_lightweight_tag_counts(self) -> None:
         head = _commit_version(self.repo, "0.2.1")
         _ = _git(self.repo, "tag", "v0.2.1", head)
-        self.assertEqual(self.plan(head), {"version": "0.2.1", "release": "true"})
+        self.assertEqual(self.plan(head), {"version": "0.2.1", "previous": "", "release": "true"})
 
     def test_a_pre_release_tag_is_ignored(self) -> None:
         _tag(self.repo, "v0.3.0rc1", _commit_version(self.repo, "0.2.9"))
         head = _commit_version(self.repo, "0.3.0")
-        self.assertEqual(self.plan(head), {"version": "0.3.0", "release": "true"})
+        self.assertEqual(self.plan(head), {"version": "0.3.0", "previous": "", "release": "true"})
 
     def test_a_later_commit_at_an_unreleased_version_does_not_release(self) -> None:
         # Its CI can finish before the version commit's: only the commit that moved the version releases.
@@ -88,6 +88,14 @@ class TestReleasePlan(unittest.TestCase):
         version_commit = _commit_version(self.repo, "0.2.2")
         later = _commit_version(self.repo, "0.2.2")
         self.assertEqual((self.plan(later)["release"], self.plan(version_commit)["release"]), ("false", "true"))
+
+    def test_previous_is_the_highest_plain_tag_below_the_version(self) -> None:
+        _tag(self.repo, "v0.2.0", _commit_version(self.repo, "0.2.0"))
+        _tag(self.repo, "v0.2.1", _commit_version(self.repo, "0.2.1"))
+        _tag(self.repo, "v0.3.0rc1", _commit_version(self.repo, "0.2.9"))
+        head = _commit_version(self.repo, "0.3.0")
+        _tag(self.repo, "v0.3.0", head)
+        self.assertEqual(self.plan(head), {"version": "0.3.0", "previous": "0.2.1", "release": "true"})
 
     def test_mismatched_versions_fail(self) -> None:
         head = _commit_version(self.repo, "0.2.2", module_version="0.2.3")
