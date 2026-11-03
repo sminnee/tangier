@@ -1,44 +1,134 @@
 name: Release
 
-# Release when CI passes on a push to main and bin/release-plan says the version
-# is new. CONTRIBUTING.md has the process, re-runs, and the trusted publishing setup.
+# Run from Actions -> Release -> Run workflow. CONTRIBUTING.md has the process,
+# re-runs, and the one-time setup.
 # This must stay the top-level workflow: the publisher is registered to release.yaml.
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version moves
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: An exact version, such as 1.2.3, in place of the bump
+        type: string
+        default: ""
+      reason:
+        description: Why the version moves, for the commit body
+        type: string
+        default: ""
 
 jobs:
-  plan:
-    # event == 'push': a fork PR from a branch named main also matches branches: [main].
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+  prepare:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      actions: read
+      contents: write
     outputs:
-      version: ${{ steps.plan.outputs.version }}
-      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.bump.outputs.version }}
+      previous: ${{ steps.bump.outputs.previous }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
-      # The workflow's own ref, not head_sha: bin/release-plan comes from the
-      # same commit as this workflow, and judges head_sha through git show.
+      # main only: the version commit must fast-forward main when it is approved.
+      - if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Release runs from main, not $GITHUB_REF"
+          exit 1
+      # No saved credentials: the tests and the build run without a write token,
+      # and only the steps that push get one, as a credential helper in their env.
       - uses: actions/checkout@v5
         with:
           # Every tag, to compare against the highest released version.
           fetch-depth: 0
-      - id: plan
+          persist-credentials: false
+      # The version commit differs from main only in the version strings, so
+      # main's CI stands for it.
+      - name: Check CI passed on main
         env:
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: bin/release-plan "$SHA" >> "$GITHUB_OUTPUT"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A version commit's push starts no CI, so a main still at the last
+          # release has no run to find, and nothing new to release.
+          released="$(git tag -l --points-at HEAD 'v*.*.*')"
+          if [ -n "$released" ]; then
+            echo "::error::main is still at $released: nothing to release"
+            exit 1
+          fi
+          ci="$(gh run list --workflow ci.yaml --event push --commit "$GITHUB_SHA" --limit 1 --json status,conclusion --jq '.[0] // {} | "\(.status // "") \(.conclusion // "")"')"
+          case "$ci" in
+            "completed success") ;;
+            " ")
+              # An untagged version commit is a release that failed after moving main.
+              echo "::error::$GITHUB_SHA has no CI run. If it is a version commit, re-run the failed jobs of its Release run."
+              exit 1 ;;
+            completed*)
+              echo "::error::CI on $GITHUB_SHA ended as ${ci#completed }, not success"
+              exit 1 ;;
+            *)
+              echo "::error::CI on $GITHUB_SHA is still ${ci% *}: run Release once it passes"
+              exit 1 ;;
+          esac
+      - id: bump
+        env:
+          BUMP: ${{ inputs.version || inputs.bump }}
+        run: bin/release-bump "$BUMP" >> "$GITHUB_OUTPUT"
+      - id: commit
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$REASON" ]; then
+            git commit -qam "chore: version $VERSION" -m "$REASON"
+          else
+            git commit -qam "chore: version $VERSION"
+          fi
+          # Refuses a version that is already tagged, or not above the highest tag.
+          if ! bin/release-plan HEAD | grep -x 'release=true' >/dev/null; then
+            echo "::error::bin/release-plan will not release $VERSION"
+            exit 1
+          fi
+          # Core tests on the commit that ships: some read the version files.
+          python3 -m unittest discover -s tangier/tests/core -p 'test_*.py' -t .
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Push the release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
+          VERSION: ${{ steps.bump.outputs.version }}
+        # Forced: the branch is scratch, left behind by a run that was not approved.
+        run: git push -f origin "HEAD:refs/heads/release/v$VERSION"
+      - name: Preview the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          PREVIOUS: ${{ steps.bump.outputs.previous }}
+        run: |
+          set -euo pipefail
+          args=(-f "tag_name=v$VERSION" -f "target_commitish=release/v$VERSION")
+          if git rev-parse -q --verify "refs/tags/v$PREVIOUS" >/dev/null; then
+            args+=(-f "previous_tag_name=v$PREVIOUS")
+          fi
+          {
+            echo "## v$PREVIOUS -> v$VERSION"
+            echo
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body
+          } >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    needs: plan
-    if: needs.plan.outputs.release == 'true'
+    needs: prepare
     runs-on: ubuntu-latest
+    # Required reviewers on this environment are the approval step.
     environment: pypi
-    # Job-level, so only real releases queue. A queued release may be replaced by
-    # a newer one, which re-plans; a running one is never cancelled mid-publish.
+    # A running release is never cancelled mid-publish.
     concurrency:
       group: release
       cancel-in-progress: false
@@ -48,35 +138,53 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 0
-      # Planned again: "Re-run failed jobs" reuses the plan job's old outputs, and
-      # a release may have queued behind a newer one. Either could move v0 backwards.
-      - id: recheck
+          persist-credentials: false
+      # Planned again: a release that waited for approval may have been overtaken.
+      - name: Check the version still releases
         env:
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: bin/release-plan "$SHA" >> "$GITHUB_OUTPUT"
-      - if: steps.recheck.outputs.release == 'true'
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! bin/release-plan "$SHA" | grep -x 'release=true' >/dev/null; then
+            echo "::error::bin/release-plan will not release $SHA"
+            exit 1
+          fi
+      # Before publishing, and not forced: a main that moved since the run began
+      # refuses the push, and stops the release.
+      - name: Move main to the version commit
         env:
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: git checkout --detach "$SHA"
-      - if: steps.recheck.outputs.release == 'true'
-        uses: astral-sh/setup-uv@v10.3.1
+          GH_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch -q origin main
+          # A re-run after a later step failed finds main already there.
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            git push origin "$SHA:refs/heads/main"
+          fi
+      - uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: false
-      - if: steps.recheck.outputs.release == 'true'
-        run: uv build
+      - run: uv build
       # Pinned by commit: this job can publish as tangier, so a moved tag must not change what runs.
-      - if: steps.recheck.outputs.release == 'true'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           # A re-run after a failed tag push finds the version already on PyPI.
           skip-existing: true
       # Tagged after publishing, so the alias never names a version PyPI lacks.
       - name: Tag the version and move the major alias
-        if: steps.recheck.outputs.release == 'true'
         env:
-          SHA: ${{ github.event.workflow_run.head_sha }}
-          VERSION: ${{ steps.recheck.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -89,3 +197,28 @@ jobs:
           git tag -f -a "$alias" -m "Alias for $tag" "$SHA"
           git push origin "refs/tags/$tag"
           git push -f origin "refs/tags/$alias"
+      # Skipped when the release exists, so a re-run is a no-op.
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PREVIOUS: ${{ needs.prepare.outputs.previous }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          # The same range as the preview the approver saw.
+          args=()
+          if git rev-parse -q --verify "refs/tags/v$PREVIOUS" >/dev/null; then
+            args+=(--notes-start-tag "v$PREVIOUS")
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag already has a release"
+          else
+            gh release create "$tag" --verify-tag --generate-notes --title "$tag" "${args[@]}"
+          fi
+          if git ls-remote --exit-code origin "refs/heads/release/$tag" >/dev/null; then
+            git push origin --delete "release/$tag"
+          fi
