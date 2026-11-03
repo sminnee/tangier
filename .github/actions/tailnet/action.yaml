@@ -76,7 +76,6 @@ runs:
         tags: ${{ steps.resolve.outputs.tag }}
         version: ${{ steps.resolve.outputs.version }}
         use-cache: "true"
-        args: --advertise-tags=${{ steps.resolve.outputs.tag }}
 
     - name: Point kubectl at the operator
       shell: bash

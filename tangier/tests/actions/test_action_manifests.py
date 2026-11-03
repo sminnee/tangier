@@ -93,5 +93,21 @@ class TestDescriptionExpressions(unittest.TestCase):
         self.assertEqual(found, {})
 
 
+class TestTailscaleArgs(unittest.TestCase):
+    def test_no_action_passes_advertise_tags_itself(self) -> None:
+        # tailscale/github-action@v4 adds `--advertise-tags` from its `tags:`
+        # input whenever `audience:` is set. A second one in `args:` makes
+        # `tailscale up` exit 2 with "flag provided multiple times".
+        actions = os.path.join(REPO_ROOT, ".github", "actions", "*", "action.y*ml")
+        paths = sorted(glob.glob(actions))
+        self.assertTrue(paths)
+        found = []
+        for path in paths:
+            with open(path, encoding="utf-8") as f:
+                if "--advertise-tags" in f.read():
+                    found.append(os.path.relpath(path, REPO_ROOT))
+        self.assertEqual(found, [])
+
+
 if __name__ == "__main__":
     unittest.main()
