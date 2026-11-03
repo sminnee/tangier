@@ -10,14 +10,16 @@ description: >-
 inputs:
   client-id:
     description: >-
-      OAuth client ID for this environment's deploy identity. Pass
-      `${{ vars.TS_DEPLOY_CLIENT_ID }}` — a composite action cannot read the
-      `vars` context at all (actions/runner#2551), so it must be forwarded.
+      OAuth client ID for this environment's deploy identity. Pass the
+      environment's `vars.TS_DEPLOY_CLIENT_ID` as an expression — a
+      composite action cannot read the `vars` context at all
+      (actions/runner#2551), so it must be forwarded.
       The value differs per environment; the NAME is deliberately the same.
     required: true
   audience:
     description: >-
-      OIDC audience for this environment. Pass `${{ vars.TS_DEPLOY_AUDIENCE }}`.
+      OIDC audience for this environment. Pass the environment's
+      `vars.TS_DEPLOY_AUDIENCE` as an expression.
       Same reasoning, and the same deliberate name-sharing, as `client-id`.
     required: true
   env:
