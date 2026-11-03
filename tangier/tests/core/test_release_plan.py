@@ -6,13 +6,9 @@ import os
 import subprocess
 import unittest
 
-from tangier.tests.support import make_git_repo
+from tangier.tests.support import REPO_ROOT, make_git_repo
 
-SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-    "bin",
-    "release-plan",
-)
+SCRIPT = os.path.join(REPO_ROOT, "bin", "release-plan")
 
 
 def _git(repo: str, *args: str) -> str:

@@ -5,17 +5,16 @@ import unittest
 
 from tangier.config import read_config
 from tangier.globs import matches
-
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from tangier.tests.support import REPO_ROOT
 
 
 class TestTestScopes(unittest.TestCase):
     def test_every_module_is_in_a_src_tag(self) -> None:
-        cfg = read_config(os.path.join(ROOT, "pipeline.toml"))
+        cfg = read_config(os.path.join(REPO_ROOT, "pipeline.toml"))
         src_globs = [g for tag, globs in cfg.paths.items() if tag.endswith("-src") for g in globs]
-        package = os.path.join(ROOT, "tangier")
+        package = os.path.join(REPO_ROOT, "tangier")
         modules = [
-            os.path.relpath(os.path.join(d, f), ROOT)
+            os.path.relpath(os.path.join(d, f), REPO_ROOT)
             for d, _, files in os.walk(package)
             if not os.path.relpath(d, package).startswith("tests")
             for f in files

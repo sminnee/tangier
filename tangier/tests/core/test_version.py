@@ -8,12 +8,12 @@ import unittest
 
 import tangier
 from tangier import cli
+from tangier.tests.support import REPO_ROOT
 
 
 class TestVersion(unittest.TestCase):
     def test_version_matches_pyproject(self) -> None:
-        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        with open(os.path.join(root, "pyproject.toml"), "rb") as fh:
+        with open(os.path.join(REPO_ROOT, "pyproject.toml"), "rb") as fh:
             self.assertEqual(tangier.__version__, tomllib.load(fh)["project"]["version"])
 
     def test_version_flag_prints_it_without_a_config(self) -> None:
