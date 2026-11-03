@@ -19,25 +19,23 @@ tangier does not know yet, run the checkout's own: `python3 -m tangier gate run 
 
 ## Releasing
 
-To release, wait for CI to pass on `main`, then open Actions → **Release** → **Run workflow** on
-`main`. Pick `patch`, `minor` or `major`, or give an exact version, and say why the version moves.
-The run:
+To release, open Actions → **Prepare release** → **Run workflow** on `main`. Pick `patch`, `minor`
+or `major`, or give an exact version, and say why the version moves. The run:
 
-1. Checks that CI passed on `main`'s head commit, and that the commit is not already released.
-2. Bumps the version with `bin/release-bump`, commits `chore: version X.Y.Z`, runs the core tests
-   on it, and pushes it to `release/vX.Y.Z`. The run summary previews the release notes since the
-   last tag.
-3. Waits for approval on the `pypi` environment. Approving is the deliberate act: it moves the
-   `@v0` alias that the Actions pin, which ships to every consumer at once.
-4. Fast-forwards `main` to the version commit, publishes to PyPI, tags `vX.Y.Z`, moves `@v0`,
-   creates the GitHub Release, and deletes the branch.
+1. Checks that `main`'s head commit is not already released.
+2. Bumps the version with `bin/release-bump`, commits `chore: version X.Y.Z`, and pushes it to
+   `release/vX.Y.Z`.
+3. Opens a version PR whose body previews the release notes since the last tag, and dispatches CI
+   on the branch.
 
-The version commit changes only the version strings, so `main`'s CI stands for it, and its push
-starts no CI run. A commit that lands on `main` while the run waits makes step 4 refuse, before it
-publishes: run the workflow again. A run that is rejected leaves its branch behind, and the next run
-overwrites it.
-`bin/release-bump <patch|minor|major|X.Y.Z>` makes the same bump locally, and
-`bin/release-plan [<commit>]` shows whether a commit releases.
+Merging the version PR is the deliberate act: it moves the `@v0` alias that the Actions pin, which
+ships to every consumer at once. When CI passes on `main`, `.github/workflows/release.yaml`
+publishes the version to PyPI, tags `vX.Y.Z`, moves `@v0`, creates the GitHub Release, and deletes
+the branch. Close the PR to call the release off; the next run overwrites its branch. A version PR
+with no checks is fixed by running Prepare release again. A branch that holds a commit of its own is
+never overwritten: merge or close its PR and delete the branch first.
+`bin/release-bump <patch|minor|major|X.Y.Z>` makes the same bump locally for a hand-made version PR,
+and `bin/release-plan [<commit>]` shows whether a commit releases.
 
 A failed release is fixed by re-running the failed jobs. Every step is idempotent, and the release
 job plans again before it publishes, so a stale re-run releases nothing.
@@ -47,9 +45,11 @@ One-time setup:
 - The workflow uses trusted publishing, so the repo holds no PyPI token. Register the publisher on
   pypi.org: project `tangier`, repository `sminnee/tangier`, workflow `release.yaml`, environment
   `pypi`.
-- Give the `pypi` environment required reviewers, or nothing waits for approval.
-- `main` must accept a push from `github-actions[bot]`. If a branch rule requires a PR or status
-  checks, add the bot to its bypass list: the version commit has no CI run of its own.
+- Allow GitHub Actions to create pull requests: Settings → Actions → General → Workflow
+  permissions.
+- Limit the `pypi` environment's deployment branches to `main`. PyPI trusts any run of
+  `release.yaml` on that environment, so without the limit a pushed branch could publish. Required
+  reviewers are then optional: with them, each release also waits for that approval after the merge.
 
 ### Pre-releases (not yet supported)
 
