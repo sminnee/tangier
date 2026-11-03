@@ -12,6 +12,7 @@ commit, and again before it publishes.
 
 import subprocess
 import sys
+import tomllib
 
 from release_version import package_version, parse, require_plain
 
@@ -29,6 +30,17 @@ def tagged_commit(tag: str) -> str | None:
         ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"], capture_output=True, text=True
     )
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def parent_version(commit: str) -> str | None:
+    """`pyproject.toml`'s version at the commit's first parent, or None when there is none to read."""
+    result = subprocess.run(["git", "show", f"{commit}^:pyproject.toml"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    try:
+        return tomllib.loads(result.stdout).get("project", {}).get("version")
+    except tomllib.TOMLDecodeError:
+        return None
 
 
 def plan(version: str, release: bool, reason: str) -> None:
@@ -56,6 +68,9 @@ def main(argv: list[str]) -> None:
         plan(version, True, f"{tag} already tags {commit}: releasing again, after a partial failure")
     elif tag_commit:
         plan(version, False, f"{tag} tags {commit} but v{highest} is newer: not releasing")
+    # A later commit whose CI beat the version commit's would ship its unreviewed change.
+    elif parent_version(commit) == version:
+        plan(version, False, f"{tag} is untagged, but {commit} did not move the version: not releasing")
     # Anything not above the highest release would move the alias backwards.
     elif highest_key is None or key > highest_key:
         plan(version, True, f"{tag} is new and above v{highest or '<none>'}: releasing")

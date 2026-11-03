@@ -82,6 +82,13 @@ class TestReleasePlan(unittest.TestCase):
         head = _commit_version(self.repo, "0.3.0")
         self.assertEqual(self.plan(head), {"version": "0.3.0", "release": "true"})
 
+    def test_a_later_commit_at_an_unreleased_version_does_not_release(self) -> None:
+        # Its CI can finish before the version commit's: only the commit that moved the version releases.
+        _tag(self.repo, "v0.2.1", _commit_version(self.repo, "0.2.1"))
+        version_commit = _commit_version(self.repo, "0.2.2")
+        later = _commit_version(self.repo, "0.2.2")
+        self.assertEqual((self.plan(later)["release"], self.plan(version_commit)["release"]), ("false", "true"))
+
     def test_mismatched_versions_fail(self) -> None:
         head = _commit_version(self.repo, "0.2.2", module_version="0.2.3")
         result = subprocess.run([SCRIPT, head], cwd=self.repo, capture_output=True, text=True)
