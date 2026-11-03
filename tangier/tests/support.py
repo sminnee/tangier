@@ -18,6 +18,9 @@ from typing import Any
 from tangier.config import Config, read_config
 from tangier.runner import Result
 
+# The checkout's root, for tests that read its files or run its `bin/` scripts.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 class Raw(str):
     """A TOML fragment to emit verbatim, for syntax the renderer can't express.

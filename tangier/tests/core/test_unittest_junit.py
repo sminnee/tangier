@@ -12,12 +12,9 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from tangier import junit
+from tangier.tests.support import REPO_ROOT
 
-SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-    "bin",
-    "unittest-junit",
-)
+SCRIPT = os.path.join(REPO_ROOT, "bin", "unittest-junit")
 
 SUITE = """\
 import unittest
