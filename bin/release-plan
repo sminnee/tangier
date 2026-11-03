@@ -9,8 +9,8 @@ highest plain tagged version below this one, or empty: release notes start
 there. The versions are read from the commit, not the working tree, so any
 commit can be checked locally after `git fetch --tags`.
 
-.github/workflows/release.yaml runs this on the version commit, and again
-before it publishes.
+.github/workflows/prepare-release.yaml runs this on the version commit.
+release.yaml runs it after CI passes on main, and again before it publishes.
 """
 
 import subprocess

@@ -5,7 +5,7 @@ Usage: bin/release-bump <patch|minor|major|X.Y.Z>
 
 Prints `version=X.Y.Z` and `previous=A.B.C` on stdout, in the form
 `$GITHUB_OUTPUT` takes. Each file must name the current version exactly once,
-or no file is changed. .github/workflows/release.yaml runs this.
+or no file is changed. .github/workflows/prepare-release.yaml runs this.
 """
 
 import os
