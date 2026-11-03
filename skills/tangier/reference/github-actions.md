@@ -313,7 +313,7 @@ jobs:
 
 ## Shipped actions
 
-Pin `@v0`, a moving alias that every release updates, or an exact `@v0.3.2`. The pin sets only
+Pin `@v0`, a moving alias that every release updates, or an exact `@v0.3.3`. The pin sets only
 the action YAML. The CLI the actions install is set by `tangier-version`, and is the latest on
 PyPI when that is empty. Pass the version the plan resolved, as the canonical workflow does.
 
