@@ -1,11 +1,9 @@
 name: CI
 
+# No push to main: release.yaml calls this as the full run on the commit it publishes.
 on:
-  push:
-    branches: [main]
   pull_request:
-  # Prepare release dispatches CI on the version PR's branch.
-  workflow_dispatch:
+  workflow_call:
 
 jobs:
   test:
@@ -94,8 +92,8 @@ jobs:
 
   plan:
     # The touched tags in pipeline.toml, for the jobs below that are not gates.
-    # `--base HEAD^1` on every event: on a pull request it is the merge base, and
-    # on a push to main it is the previous main, so the diff is what merged.
+    # A pull request diffs against HEAD^1, the merge base. A release is the full
+    # run, which touches every tag.
     runs-on: ubuntu-latest
     outputs:
       build-action-touched: ${{ steps.changes.outputs.build-action-touched }}
@@ -106,7 +104,11 @@ jobs:
           fetch-depth: 2
       - name: Changed tags
         id: changes
-        run: python3 -m tangier changemap github-outputs --base HEAD^1
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then flags=(--base HEAD^1); else flags=(--full); fi
+          python3 -m tangier changemap github-outputs "${flags[@]}"
 
   build-action:
     # Runs the build action as a caller whose `[tool.uv] required-version` is
@@ -121,7 +123,7 @@ jobs:
     needs: plan
     if: >-
       needs.plan.outputs.build-action-touched == 'true' &&
-      (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push')
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read

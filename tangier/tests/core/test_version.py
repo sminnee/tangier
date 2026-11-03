@@ -1,4 +1,4 @@
-"""`tangier.__version__` has no build step to set it, so a test keeps it equal to `pyproject.toml`."""
+"""`tangier.__version__` and `pyproject.toml` name the same version, which bin/release-version stamps into both."""
 
 import contextlib
 import io
