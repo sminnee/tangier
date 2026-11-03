@@ -3,11 +3,14 @@
 
 Usage: bin/release-plan [<commit>]   (default HEAD; run inside the repo)
 
-Prints `version=X.Y.Z` and `release=true|false` on stdout, in the form
-`$GITHUB_OUTPUT` takes, and the reason on stderr. The versions are read from
-the commit, not the working tree, so any commit can be checked locally after
-`git fetch --tags`. .github/workflows/release.yaml runs this on the version
-commit, and again before it publishes.
+Prints `version=X.Y.Z`, `previous=A.B.C` and `release=true|false` on stdout,
+in the form `$GITHUB_OUTPUT` takes, and the reason on stderr. `previous` is the
+highest plain tagged version below this one, or empty: release notes start
+there. The versions are read from the commit, not the working tree, so any
+commit can be checked locally after `git fetch --tags`.
+
+.github/workflows/release.yaml runs this on the version commit, and again
+before it publishes.
 """
 
 import subprocess
@@ -43,9 +46,10 @@ def parent_version(commit: str) -> str | None:
         return None
 
 
-def plan(version: str, release: bool, reason: str) -> None:
+def plan(version: str, previous: str, release: bool, reason: str) -> None:
     print(reason, file=sys.stderr)
     print(f"version={version}")
+    print(f"previous={previous}")
     print(f"release={'true' if release else 'false'}")
 
 
@@ -60,23 +64,24 @@ def main(argv: list[str]) -> None:
 
     released = [(k, t[1:]) for t in git("tag", "-l", "v*.*.*").split() if (k := parse(t[1:]))]
     highest_key, highest = max(released, default=(None, None))
+    previous = max(((k, v) for k, v in released if k < key), default=(None, ""))[1]
 
     tag_commit = tagged_commit(tag)
     if tag_commit and tag_commit != commit:
-        plan(version, False, f"{tag} tags {tag_commit}: the version is unchanged, nothing to release")
+        plan(version, previous, False, f"{tag} tags {tag_commit}: the version is unchanged, nothing to release")
     elif tag_commit and key == highest_key:
-        plan(version, True, f"{tag} already tags {commit}: releasing again, after a partial failure")
+        plan(version, previous, True, f"{tag} already tags {commit}: releasing again, after a partial failure")
     elif tag_commit:
-        plan(version, False, f"{tag} tags {commit} but v{highest} is newer: not releasing")
+        plan(version, previous, False, f"{tag} tags {commit} but v{highest} is newer: not releasing")
     # A later commit whose CI beat the version commit's would ship its unreviewed change.
     elif parent_version(commit) == version:
-        plan(version, False, f"{tag} is untagged, but {commit} did not move the version: not releasing")
+        plan(version, previous, False, f"{tag} is untagged, but {commit} did not move the version: not releasing")
     # Anything not above the highest release would move the alias backwards.
     elif highest_key is None or key > highest_key:
-        plan(version, True, f"{tag} is new and above v{highest or '<none>'}: releasing")
+        plan(version, previous, True, f"{tag} is new and above v{highest or '<none>'}: releasing")
     else:
         # A superseded commit whose CI finished late, or a version bumped downwards.
-        plan(version, False, f"warning: {tag} is untagged but not above v{highest}: not releasing")
+        plan(version, previous, False, f"warning: {tag} is untagged but not above v{highest}: not releasing")
 
 
 if __name__ == "__main__":
