@@ -99,8 +99,17 @@ depends = "changemap-src"
 # Test areas: each is one `{unittest-items}` directory, run when its tests or
 # the source they import change.
 [core-tests]
-# `pipeline.toml` because test_test_scopes reads it.
-paths = ["tangier/tests/core/**", "bin/release-plan", "bin/release_version.py", "pipeline.toml"]
+# `pipeline.toml` because test_test_scopes reads it, and the two skills files
+# because test_release_bump bumps them.
+paths = [
+    "tangier/tests/core/**",
+    "bin/release-plan",
+    "bin/release-bump",
+    "bin/release_version.py",
+    "pipeline.toml",
+    "skills/tangier/reference/cli.md",
+    "skills/tangier/reference/github-actions.md",
+]
 depends = "core-src"
 unittest_items = "tangier/tests/core"
 
