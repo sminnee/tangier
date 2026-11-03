@@ -313,9 +313,9 @@ jobs:
 
 ## Shipped actions
 
-Pin `@v0`, a moving alias that every release updates, or an exact `@v0.3.3`. The pin sets only
-the action YAML. The CLI the actions install is set by `tangier-version`, and is the latest on
-PyPI when that is empty. Pass the version the plan resolved, as the canonical workflow does.
+Pin `@v0`, a moving alias that every release updates, or an exact tag such as `@v0.3.1`. The pin
+sets only the action YAML. The CLI the actions install is set by `tangier-version`, and is the
+latest on PyPI when that is empty. Pass the version the plan resolved, as the canonical workflow does.
 
 ### `sminnee/tangier/.github/workflows/build.yaml@v0`
 

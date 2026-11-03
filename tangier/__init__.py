@@ -11,5 +11,5 @@ Five concerns, one config (`pipeline.toml`):
 Pure stdlib. See `docs/specs/changemap.md` and `docs/specs/gate.md`.
 """
 
-# Kept equal to `pyproject.toml` by a test. Gate records carry it.
-__version__ = "0.3.3"
+# A placeholder in source: bin/release-version stamps the release into the build. Gate records carry it.
+__version__ = "0.0.0.dev0"
