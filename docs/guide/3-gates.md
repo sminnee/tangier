@@ -213,7 +213,9 @@ gates = ["lint", "test-backend", "e2e"]
 gates = ["lint", "test-backend"]
 ```
 
-`tangier gate run @merge` runs the set's gates in config order.
+`tangier gate run @merge` runs the set's gates in config order. Have a build queue set
+`TANGIER_RUNNER_KIND=queue`: its runs then record the kind `queue`, and `--accept queue` counts
+only those.
 
 ## CI-only gates
 

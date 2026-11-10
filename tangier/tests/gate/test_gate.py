@@ -187,8 +187,8 @@ class GateCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         _ = os.environ.pop("GITHUB_OUTPUT", None)
         _ = os.environ.pop("GITHUB_STEP_SUMMARY", None)
-        # A run on a CI runner would record a `ci` runner.
-        for var in ("CI", "GITHUB_ACTIONS"):
+        # A run on a CI runner, or under a build queue, would record another kind.
+        for var in ("CI", "GITHUB_ACTIONS", ranon.KIND_VAR):
             _ = os.environ.pop(var, None)
         # These tests read a run's own output, so `gate run` runs inline, as in CI.
         # `test_gate_jobs` covers the background job.
@@ -435,6 +435,42 @@ class TestRanOn(unittest.TestCase):
     # SPEC: gate#runner-detect
     def test_another_ci_is_an_unknown_provider(self) -> None:
         self.assertEqual(ranon.detect({"CI": "1"}), {"kind": "ci", "provider": "unknown"})
+
+    # SPEC: gate#runner-kind-env
+    def test_the_kind_variable_replaces_only_the_kind(self) -> None:
+        self.assertEqual(ranon.detect({"TANGIER_RUNNER_KIND": "queue"}), {**LOCAL_RAN_ON, "kind": "queue"})
+        self.assertEqual(
+            ranon.detect({**GITHUB_PUSH, "TANGIER_RUNNER_KIND": "queue"}), {**GITHUB_PUSH_RAN_ON, "kind": "queue"}
+        )
+        self.assertEqual(ranon.detect({"TANGIER_RUNNER_KIND": ""}), LOCAL_RAN_ON)
+
+    # SPEC: gate#runner-kind-env
+    def test_a_bad_kind_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "TANGIER_RUNNER_KIND=robot is not a runner kind"):
+            _ = ranon.detect({"TANGIER_RUNNER_KIND": "robot"})
+
+
+class TestRunnerKind(GateCase):
+    # SPEC: gate#runner-kind-env
+    # SPEC: gate#accept-filter
+    def test_a_queue_run_records_queue_and_accept_queue_takes_it_alone(self) -> None:
+        with mock.patch.dict(os.environ, {"TANGIER_RUNNER_KIND": "queue"}):
+            code, out, err = self.tangier("gate", "run", "backend", "--base", self.base)
+        self.assertEqual(code, 0, err)
+        self.assertIn("(queue)", out)
+        (ref,) = _gate_refs(self.repo)
+        self.assertEqual(_runs(self.repo, ref)[0]["runner"], {**LOCAL_RAN_ON, "kind": "queue"})
+        for value, expected in (("queue", "verified"), ("kind=queue", "verified"), ("local", "unverified")):
+            with self.subTest(accept=value):
+                self.assertEqual(self.tangier("gate", "verified", "backend", "--accept", value)[1], f"{expected}\n")
+
+    # SPEC: gate#runner-kind-env
+    def test_a_bad_kind_exits_2_before_any_gate_runs(self) -> None:
+        runner = RecordingRunner()
+        with mock.patch.dict(os.environ, {"TANGIER_RUNNER_KIND": "robot"}):
+            code, _, err = self.tangier("gate", "run", "backend", "--base", self.base, runner=runner)
+        self.assertEqual((code, runner.calls), (2, []))
+        self.assertIn("TANGIER_RUNNER_KIND=robot is not a runner kind", err)
 
 
 class TestDuration(unittest.TestCase):

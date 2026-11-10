@@ -75,6 +75,10 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
     once it has started, and `--wait` waits for it, up to an hour. See
     `docs/specs/gate.md#jobs`.
     """
+    try:
+        ranon.kind_override()
+    except ValueError as e:
+        raise gate.GateError(str(e)) from e
     if args.job_dir:
         return _run_as_job(config, args)
     names = _selected(config, args)
@@ -84,8 +88,11 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
 
 
 def _in_background(args: argparse.Namespace) -> bool:
-    """Whether `gate run` starts a job: not in CI, and not for `--dry-run`. See `[job-inline-ci]`."""
-    return not (args.dry_run or ranon.detect()["kind"] == "ci")
+    """Whether `gate run` starts a job: not in CI, and not for `--dry-run`. See `[job-inline-ci]`.
+
+    `CI` alone decides, not `TANGIER_RUNNER_KIND`: a build queue reads the job's end.
+    """
+    return not (args.dry_run or ranon.in_ci())
 
 
 def _run_inline(

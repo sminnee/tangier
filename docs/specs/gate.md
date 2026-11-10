@@ -283,6 +283,11 @@ a list of runs: each pass of the same content, on a dev machine or in CI, is one
   runner holds `host`. A CI runner holds `provider`: `github-actions` under GitHub Actions, and
   `unknown` elsewhere. Under GitHub Actions it also holds `event`, `ref`, `repository`, `workflow`,
   `job`, `run_id`, `run_attempt`, `runner_name` and the run's `url`. `[runner-detect]`
+- `TANGIER_RUNNER_KIND` replaces the detected `kind` with `local`, `ci` or `queue`, and keeps every
+  other field. A build queue sets `queue`, so its runs can be told apart from CI's and a
+  developer's. An empty value is ignored. Any other value is an error, exit 2, before a job starts.
+  It does not decide whether `gate run` starts a job: `[job-inline-ci]` reads `CI`.
+  `[runner-kind-env]`
 
   A pull request and a merged branch are one store. `event` and `ref` tell their runs apart, and
   `--accept` can match on them.
@@ -423,7 +428,7 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   `ignored`. A run with no `duration` shows no time taken. It then prints the comparator, the
   changed files that touch the scope, and each placeholder's list. It combines with `--dry-run`.
   `[run-debug]`
-- `--accept` says which runs count. Its value is a bare kind, `ci` or `local`, or comma-separated
+- `--accept` says which runs count. Its value is a bare kind, `ci`, `local` or `queue`, or comma-separated
   `field=value` pairs over `kind`, `provider`, `event`, `ref`, `workflow` and `job`. A run is
   accepted when every named field equals its runner's. The flag repeats, and a run is accepted
   when any value takes it. With no `--accept`, every run counts. Any other field or kind is an
@@ -433,6 +438,7 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   tangier gate run e2e --accept ci                      # only CI runs count
   tangier gate run e2e --accept kind=ci,event=push      # only CI runs on merged branches
   tangier gate run e2e --accept ci --accept local       # any one may match
+  tangier gate run e2e --accept queue                   # only build-queue runs count
   ```
 
   `--accept` is not a key input: it changes which runs count, not what the content is. With
@@ -490,7 +496,7 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   has one row per gate, in config order. A group gets a `` `<group>` (group) `` row with the group
   status, before its members' rows, which show each member's full name. The `Recorded by` column
   is filled only for a `verified` gate. It names the newest accepted run in the record that
-  verified it: `ci` or `local`, the run's `head` as a 7-character SHA, then where it ran. A local
+  verified it: its kind, such as `ci`, `local` or `queue`, the run's `head` as a 7-character SHA, then where it ran. A local
   run shows its `host`. A CI run shows `<workflow> / <job>`, linked to the run's `url`. A part the
   record lacks is left out. With `--accept`, a line above the table names the filter, such as
   ``Only runs accepted by `--accept ci` or `--accept event=push` count.`` A note below the table
@@ -508,7 +514,8 @@ content a record can describe. `gate key` and `gate verified` take no `--base`, 
   ref's runs as `gate sync` does. `--no-fetch` reads the mirror as the last fetch left it. An
   `origin` that cannot be read is a warning, and the local records still count. A run counts when
   its `time` is within `--since`, which takes `90s`, `30m`, `8h` or `2d` and defaults to `30d`.
-  `--ci` counts only CI runs, and `--local` only dev machines. `[stats-filters]`
+  `--ci` counts only CI runs, and `--local` only dev machines. A `queue` run counts under neither,
+  only with no filter. `[stats-filters]`
 - With no selector it reports every configured gate in config order, then, in name order, any
   gate that only records name. Selectors work as for `gate run`. Each gate's row gives its runs, passes, failures
   and pass rate. It also gives the median and nearest-rank 90th percentile `duration`, for passes
@@ -567,8 +574,10 @@ to an hour.
   terminal, where the log does not stream, `gate wait` and `gate run --wait` print what the job wrote
   after its last gate on stderr, such as `warning: gate records stay local`. A job cut off by a
   cancel prints nothing more, and `gate wait <selector>` does not print it. With fail-fast, the gates not run end `cancelled`.
-- In CI, by `[runner-detect]`, and with `--dry-run`, `gate run` runs inline, with no
-  job. CI has no tool timeout and wants a streamed log, and a dry run runs nothing.
+- In CI, when the `CI` variable is `true` or `1`, and with `--dry-run`, `gate run` runs inline,
+  with no job. CI has no tool timeout and wants a streamed log, and a dry run runs nothing.
+  `TANGIER_RUNNER_KIND` does not change this: a build queue gets a job, whose end it reads from
+  `gate status --watch`.
   `[job-inline-ci]`
 - The job process runs the same tangier as the `gate run` that started it, whatever the job's cwd.
   Its gate commands get the environment `gate run` had: the job does not put tangier's own path
