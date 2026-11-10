@@ -1562,6 +1562,8 @@ class TestQueue(JobCase):
             {
                 "slots_in_use": 1,
                 "max_running": 1,
+                "job_cpus": None,
+                "job_memory_bytes": None,
                 "queued": 2,
                 "load": 1.0,
                 "cpus": 10,
@@ -1931,6 +1933,19 @@ class TestLimits(JobCase):
                 ):
                     _ = self.run_gates("lint", runner=runner)
                 self.assertNotIn("memory limit", jobs.output(self.job(max(self.job_ids())), "lint"))
+
+    # SPEC: gate#status-usage
+    def test_status_shows_the_per_job_limits(self) -> None:
+        self.home_config('cpus = 4\nmemory = "8G"')
+        _, out, _ = self.tangier("gate", "status")
+        self.assertEqual(
+            out.splitlines()[0], "slots: 0 of 4 in use, 0 queued  per job: 4 CPUs, 8G  load 1.0 on 10 CPUs"
+        )
+        _, out, _ = self.tangier("gate", "status", "--json")
+        self.assertEqual(
+            {k: json.loads(out)["machine"][k] for k in ("job_cpus", "job_memory_bytes")},
+            {"job_cpus": 4, "job_memory_bytes": 8 * 1024**3},
+        )
 
 
 if __name__ == "__main__":

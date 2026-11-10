@@ -638,10 +638,12 @@ to an hour.
   life. A job line adds `cpu 230%  mem 1.2G`. In `--json` a job's `usage` is `{"cpu_percent",
   "rss_bytes", "processes"}`, or null when its group has no live process, as for a finished job.
   A queued job's usage is its own process, waiting for a slot. `machine` gives `slots_in_use`,
-  `max_running`, `queued`, `load` and `cpus` (null where the OS gives no load average),
+  `max_running`, `job_cpus` and `job_memory_bytes` (each job's limits, null when not set),
+  `queued`, `load` and `cpus` (null where the OS gives no load average),
   `memory_total_bytes` (null where it cannot be read), and `jobs_cpu_percent` and
   `jobs_rss_bytes`, the sums over every unfinished job on the machine. Those two are null when no
-  `ps` sample was taken, and the text line then leaves out its `gates:` part. `[status-usage]`
+  `ps` sample was taken, and the text line then leaves out its `gates:` part. With a limit set,
+  the text line adds `per job: 4 CPUs, 8G`. `[status-usage]`
 - `gate status --watch` prints the status, then each change as it happens, until Ctrl-C. A change
   is a new job, a job that changes state, or a gate that changes state. A change in usage is not
   a change: with `--json`, usage ticks carry it.
