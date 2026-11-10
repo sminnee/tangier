@@ -102,12 +102,18 @@ A waiter whose job was cancelled this way says who cancelled it and why, and ask
 again without a check.
 
 Jobs live in `~/.tangier/` (`TANGIER_HOME` moves it), and old ones are pruned on each new job. The
-limit is in `~/.tangier/config.toml`:
+limits are in `~/.tangier/config.toml`:
 
 ```toml
 [jobs]
 max-running = 4
+cpus = 4        # each job runs on 4 CPUs, spread across slots (Linux only)
+memory = "8G"   # each job's whole process tree is capped at 8G, with no swap (Linux, systemd)
 ```
+
+With `cpus`, test runners that start a worker per CPU, as `pytest -n auto` does, start 4. With
+`memory`, a gate over the cap fails. Plan for
+`max-running × memory` on the machine.
 
 A job whose process dies, or a reboot, leaves nothing stuck: the next command that reads the jobs
 kills any gate commands the job left and marks it `died`. See [the spec](../specs/gate.md#jobs).

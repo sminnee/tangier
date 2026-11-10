@@ -92,6 +92,7 @@ paths = [
     "tangier/home.py",
     "tangier/jobs.py",
     "tangier/junit.py",
+    "tangier/limits.py",
     "tangier/ranon.py",
     "tangier/stats.py",
     "tangier/usage.py",

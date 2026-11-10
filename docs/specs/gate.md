@@ -704,8 +704,26 @@ to an hour.
   cannot be written, as in a sandbox that allows writes only to the repo, the error names the
   path. Add it to the sandbox's write allowlist. `[job-home]`
 - `~/.tangier/config.toml` holds `[jobs] max-running`, the number of jobs that run at once on the
-  machine: a whole number of 1 or more, default 4. An unknown key or a bad value is an error.
-  `[job-config]`
+  machine: a whole number of 1 or more, default 4. `[jobs] cpus` and `memory` set each job's
+  limits, as `[job-limits]` says: `cpus` is a whole number of 1 or more, and `memory` is a size of
+  1M or more, as bytes or as a string with a `K`, `M`, `G` or `T` suffix in powers of 1024, such
+  as `"8G"`. Neither is set by default. Either one set on a platform other than Linux is an error.
+  An unknown key or a bad value is an error. `[job-config]`
+- With `[jobs] cpus = n`, a job pins itself to `n` of the CPUs it may run on, once it holds slot
+  `i`. The set starts at `(i × n) mod total` and wraps. Jobs in different slots take different
+  CPUs while `max-running × n` fits; past that, they share some. With `n` equal to the CPUs it
+  may run on or more, nothing is pinned. The job's commands inherit the affinity, so `nproc` and
+  most parallel test runners start `n` workers. A tool that reads the machine's total CPU count,
+  as Python's `os.cpu_count()` or older Jest's `os.cpus()` do, still sees every CPU. The memory
+  cap is the backstop for those. With `[jobs] memory`, `gate run` spawns the job under
+  `systemd-run --user --scope` with `MemoryMax`, `MemorySwapMax=0` and `OOMPolicy=continue`.
+  The cap covers the job's whole process tree and never swaps. An OOM kill leaves the rest of the
+  job running. The scope execs the job in place, so `gate cancel`, the reaper and `gate status`
+  see the same pid and process group. Before it creates the job, `gate run` checks that such a
+  scope starts. When it does not, as with no systemd user session, `gate run` exits 2, starts no
+  job, and says to start one or remove `memory`. The limits
+  apply to each job, not to all jobs together, so the machine needs up to
+  `max-running × memory`. CI, `--dry-run` and other inline runs have no limits. `[job-limits]`
 - A job takes a slot before it runs a gate. The slots are `~/.tangier/slots/0` up to
   `max-running - 1`. The job holds a lock on one for as long as it runs, so a job that dies frees
   its slot. A job with no free slot is `queued`. The queue is first in, first out, by job ID,
