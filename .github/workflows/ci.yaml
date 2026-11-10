@@ -74,7 +74,6 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.1
         with:
           enable-cache: false
-      - run: uv tool install ruff
       - name: Run lint.check
         env:
           EVENT: ${{ github.event_name }}

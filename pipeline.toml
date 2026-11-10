@@ -2,14 +2,15 @@
 # CI runs the same command. See `docs/specs/gate.md`.
 
 # Cheap gates first, so `gate run --all` stops before the slow test gates.
+# `uvx` fetches ruff itself, so a dev machine or runner needs only uv.
 [gate.lint]
 scope = ["gate-inputs"]
 
 [gate.lint.check]
-cmd = "ruff check ."
+cmd = "uvx ruff check ."
 
 [gate.lint.format]
-cmd = "ruff format --check ."
+cmd = "uvx ruff format --check ."
 
 # tangier runs on bare runners with no pip install, so the dependency list must
 # stay empty and no module may import a third-party package.
