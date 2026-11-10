@@ -1030,9 +1030,12 @@ def _machine(every: list[jobs.Job], samples: dict[int, usage.Usage], runner: Run
     """
     used = [u for j in every if (u := _use(j, samples)) is not None]
     load = ranon.load()
+    cfg = home.load_config()
     return {
         "slots_in_use": sum(1 for j in every if j.state == "running"),
-        "max_running": home.load_config().max_running,
+        "max_running": cfg.max_running,
+        "job_cpus": cfg.cpus,
+        "job_memory_bytes": cfg.memory,
         "queued": sum(1 for j in every if j.state == "queued"),
         "load": load.get("load"),
         "cpus": load.get("cpus"),
@@ -1043,8 +1046,15 @@ def _machine(every: list[jobs.Job], samples: dict[int, usage.Usage], runner: Run
 
 
 def _machine_line(m: dict[str, Any]) -> str:
-    """`slots: 3 of 4 in use, 2 queued  load 5.2 on 10 CPUs  gates: cpu 412%  mem 5.6G of 32G`."""
+    """`slots: 3 of 4 in use, 2 queued  per job: 4 CPUs, 8G  load 5.2 on 10 CPUs  gates: cpu 412%  mem 5.6G of 32G`."""
     parts = [f"slots: {m['slots_in_use']} of {m['max_running']} in use, {m['queued']} queued"]
+    per_job = []
+    if m["job_cpus"] is not None:
+        per_job.append(f"{m['job_cpus']} CPU{'' if m['job_cpus'] == 1 else 's'}")
+    if m["job_memory_bytes"] is not None:
+        per_job.append(limits.show(m["job_memory_bytes"]))
+    if per_job:
+        parts.append(f"per job: {', '.join(per_job)}")
     if m["load"] is not None:
         parts.append(f"load {m['load']} on {m['cpus']} CPUs")
     if m["jobs_cpu_percent"] is not None:
