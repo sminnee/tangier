@@ -9,3 +9,4 @@ dist/
 .claude/
 uv.lock
 /build/
+.claude/settings.local.json
