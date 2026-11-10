@@ -41,7 +41,9 @@ from typing import Any
 # Top-level names that configure tangier rather than declaring a tag. Reserved
 # now even where the behaviour lands later: reserving a name is cheap,
 # un-reserving one after a config author used it as a tag is a breaking change.
-RESERVED_SECTIONS = frozenset({"tags", "sha", "registry", "deploy", "image", "k8s", "runners", "tailnet", "gate"})
+RESERVED_SECTIONS = frozenset(
+    {"tags", "sha", "registry", "deploy", "image", "k8s", "runners", "tailnet", "gate", "gate-set"}
+)
 
 # Recognised tag-table fields. `_items` is matched by suffix.
 _KNOWN_FIELDS = {"paths", "exclude", "depends", "sha", "touched", "files"}
@@ -189,6 +191,13 @@ class GateSpec:
 
 
 @dataclass
+class GateSet:
+    """`[gate-set.<name>]` — a named list of gates and groups, selected as `@<name>`."""
+
+    gates: list[str]
+
+
+@dataclass
 class Config:
     paths: dict[str, list[str]] = field(default_factory=dict)
     # tag -> globs subtracted from that tag's `paths` (absent == no exclusions).
@@ -213,6 +222,8 @@ class Config:
     after: AfterHook | None = None
     tailnet: TailnetSettings = field(default_factory=TailnetSettings)
     gates: dict[str, GateSpec] = field(default_factory=dict)
+    # `[gate-set.<name>]`. See docs/specs/gate.md#gate-set-config.
+    gate_sets: dict[str, GateSet] = field(default_factory=dict)
     # `[gate] prune-after-days`. See docs/specs/gate.md#config.
     gate_prune_after_days: int = 90
 
@@ -525,6 +536,23 @@ def _parse_gates(path: str, body: dict[str, Any]) -> tuple[dict[str, GateSpec], 
     return out, prune_after_days
 
 
+def _parse_gate_sets(path: str, body: dict[str, Any]) -> dict[str, GateSet]:
+    """Parse `[gate-set]`: one table per set, each with a non-empty `gates`. `_check_gate_set` checks the names."""
+    out: dict[str, GateSet] = {}
+    for name, spec in body.items():
+        section = f"gate-set.{name}"
+        _check_gate_name(path, section, name, noun="set")
+        spec = _require_table(path, section, spec)
+        _check_keys(path, section, spec, {"gates"})
+        if "gates" not in spec:
+            raise ConfigError(f"{path}: `[{section}]` requires `gates`")
+        gates = _coerce_str_or_list(path, section, "gates", spec["gates"])
+        if not gates:
+            raise ConfigError(f"{path}: `[{section}]` `gates` is empty")
+        out[name] = GateSet(gates=gates)
+    return out
+
+
 def _parse_prune_after_days(path: str, name: str, value: object) -> int:
     """`[gate] prune-after-days`: at least 1, since less would put the cutoff in the future and prune every record."""
     if name != "prune-after-days":
@@ -536,10 +564,10 @@ def _parse_prune_after_days(path: str, name: str, value: object) -> int:
     return value
 
 
-def _check_gate_name(path: str, section: str, name: str) -> None:
+def _check_gate_name(path: str, section: str, name: str, *, noun: str = "gate") -> None:
     if not _GATE_NAME.fullmatch(name):
         raise ConfigError(
-            f"{path}: `[{section}]` is not a valid gate name (letters, digits, `-` and `_`, not starting with `-`)"
+            f"{path}: `[{section}]` is not a valid {noun} name (letters, digits, `-` and `_`, not starting with `-`)"
         )
 
 
@@ -775,7 +803,20 @@ def _derive(cfg: Config, path: str) -> None:
             )
     for name, gate in cfg.gates.items():
         _check_gate(cfg, path, name, gate)
+    for name, gate_set in cfg.gate_sets.items():
+        _check_gate_set(cfg, path, name, gate_set)
     _warn_unhashable_sha_globs(cfg, path)
+
+
+def _check_gate_set(cfg: Config, path: str, name: str, gate_set: GateSet) -> None:
+    """Reject a `gates` entry that names no gate or group, which would otherwise fail at run time."""
+    groups = gate_groups(cfg)
+    for entry in gate_set.gates:
+        if entry not in cfg.gates and entry not in groups:
+            known = ", ".join([*cfg.gates, *groups]) or "(none)"
+            raise ConfigError(
+                f"{path}: `[gate-set.{name}].gates` entry `{entry}` names no gate or group (known: {known})"
+            )
 
 
 def _check_gate(cfg: Config, path: str, name: str, gate: GateSpec) -> None:
@@ -950,6 +991,8 @@ def read_config(path: str) -> Config:
             cfg.tailnet = _parse_tailnet(path, table)
         elif key == "gate":
             cfg.gates, cfg.gate_prune_after_days = _parse_gates(path, table)
+        elif key == "gate-set":
+            cfg.gate_sets = _parse_gate_sets(path, table)
 
     # --- B. Merge and validate tags ---------------------------------------
     merged: dict[str, Any] = dict(bare_tags)

@@ -68,6 +68,8 @@ recorded, and the commit of that work reuses it.
 `gate run` runs gates in config order and stops at the first failure, so list cheap gates, such as
 lint and format, before slow ones.
 
+`tangier gate run @<set>` runs the gates a `[gate-set.<set>]` lists.
+
 ## CI-only gates
 
 A CI-only gate needs CI services, secrets or hardware, so only CI runs it. Its CI job runs

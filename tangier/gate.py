@@ -197,10 +197,16 @@ def spec_for(cfg: Config, name: str) -> GateSpec:
 
 
 def select(cfg: Config, selector: str) -> list[str]:
-    """The gates a selector names: a gate's full name, or a group's name.
+    """The gates a selector names: a gate's full name, a group's name, or `@<set>`.
 
-    A group gives its members in config order.
+    A group gives its members in config order, and a set gives its gates in config order.
     """
+    if selector.startswith("@"):
+        gate_set = cfg.gate_sets.get(selector[1:])
+        if gate_set is None:
+            known = ", ".join(f"@{name}" for name in cfg.gate_sets) or "(none)"
+            raise GateError(f"no `[gate-set.{selector[1:]}]` in config (configured: {known})")
+        return select_all(cfg, gate_set.gates)
     if selector in cfg.gates:
         return [selector]
     members = gate_groups(cfg).get(selector)

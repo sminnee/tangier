@@ -201,6 +201,20 @@ Members share the group's `env` and `scope`. `gate run lint` runs every member, 
 lint.vulture` runs one. A group has no run order: put a prerequisite, such as a build, in the member
 that needs it. Members still run in config order, and the first failure stops the rest.
 
+## Gate sets
+
+A gate set names the gates that one caller runs together, such as a build queue:
+
+```toml
+[gate-set.merge]
+gates = ["lint", "test-backend", "e2e"]
+
+[gate-set.pre-merge]
+gates = ["lint", "test-backend"]
+```
+
+`tangier gate run @merge` runs the set's gates in config order.
+
 ## CI-only gates
 
 Some gates cannot run on a dev machine: they need CI services, secrets or hardware. CI runs them,

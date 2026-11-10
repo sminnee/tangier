@@ -134,8 +134,8 @@ Exit codes: 0 rolled out, 1 migration or rollout failure, 2 unknown environment,
 
 ## `gate`
 
-A selector is a gate's full name, such as `lint.check`, or a group's name, which selects every
-member. An unknown selector exits 2.
+A selector is a gate's full name, such as `lint.check`, a group's name, which selects every
+member, or `@<set>`, which selects every gate in a `[gate-set.<set>]`. An unknown selector exits 2.
 
 | Command | Flags | Behaviour | Exit |
 | --- | --- | --- | --- |

@@ -18,6 +18,7 @@ Each top-level table is a tag, except these reserved names:
 | `deploy` | Deploy environments, rollout tuning and the after-deploy hook. |
 | `tailnet` | How CI reaches the cluster. |
 | `gate` | Gates and gate groups. |
+| `gate-set` | Named lists of gates, selected as `@<name>`. |
 
 A tag that needs a reserved name is written `[tags.<name>]`, such as `[tags.k8s]`. Its outputs keep
 the plain name, so `[tags.k8s]` with `touched = true` emits `k8s-touched`. A name declared both bare
@@ -242,3 +243,18 @@ list, is an error.
 `cmd` and `[deploy] after` split into arguments at parse time and run without a shell. A token
 `&&`, `||`, `|`, `;`, `>`, `>>`, `<` or `&` is an error. So is `$(` or a backtick anywhere. Put
 that logic in a script and call the script.
+
+## `[gate-set.<name>]`
+
+```toml
+[gate-set.merge]
+gates = ["lint", "test-backend"]
+```
+
+| Key | Meaning |
+| --- | --- |
+| `gates` | Required, not empty. A gate or group name, or a list of them. |
+
+`tangier gate run @merge` runs the set's gates once each, in config order. The set name follows
+the gate name rule, and may equal a gate's or group's name. An unknown entry or any other key is an
+error.

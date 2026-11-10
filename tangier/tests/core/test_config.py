@@ -7,7 +7,15 @@ SHA parity depends on. The reserved-section cases are new.
 
 import unittest
 
-from tangier.config import DEFAULT_SHA_EXCLUDE, ConfigError, GateSpec, gate_groups, read_config, scope_tags
+from tangier.config import (
+    DEFAULT_SHA_EXCLUDE,
+    ConfigError,
+    GateSet,
+    GateSpec,
+    gate_groups,
+    read_config,
+    scope_tags,
+)
 from tangier.tests.support import parse_toml, parse_toml_stderr
 
 
@@ -751,3 +759,33 @@ class TestGate(unittest.TestCase):
                 with self.assertRaises(ConfigError) as ctx:
                     _ = parse_toml(_gate(f'cmd = "bin/test"\nscope = "{entry}"\n', _GATE_TAGS + extra))
                 self.assertIn("`[globby].paths` glob `src/*.py`", str(ctx.exception))
+
+
+# Two gates and a group, for `[gate-set]` to name.
+_SET_GATES = (
+    _GATE_TAGS + '[gate.test]\ncmd = "bin/test"\nscope = "svc"\n'
+    '[gate.lint.check]\ncmd = "ruff check ."\nscope = "svc"\n'
+)
+
+
+class TestGateSet(unittest.TestCase):
+    # SPEC: gate#gate-set-config
+    def test_a_set_lists_gates_and_groups(self) -> None:
+        cfg = parse_toml(_SET_GATES + '[gate-set.merge]\ngates = ["lint", "test"]\n[gate-set.quick]\ngates = "test"\n')
+        self.assertEqual(cfg.gate_sets, {"merge": GateSet(gates=["lint", "test"]), "quick": GateSet(gates=["test"])})
+
+    # SPEC: gate#gate-set-config
+    def test_a_malformed_set_raises(self) -> None:
+        cases = {
+            "no gates": ("[gate-set.merge]\n", "requires `gates`"),
+            "empty gates": ("[gate-set.merge]\ngates = []\n", "`gates` is empty"),
+            "an unknown gate": ('[gate-set.merge]\ngates = ["test", "nope"]\n', "entry `nope` names no gate or group"),
+            "an unknown field": ('[gate-set.merge]\ngates = "test"\naccept = "ci"\n', "unknown field `accept`"),
+            "a bad set name": ('[gate-set."a b"]\ngates = "test"\n', "not a valid set name"),
+            "not a table": ('[gate-set]\nmerge = "test"\n', "must be a table"),
+        }
+        for label, (body, expected) in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(ConfigError) as ctx:
+                    _ = parse_toml(_SET_GATES + body)
+                self.assertIn(expected, str(ctx.exception))

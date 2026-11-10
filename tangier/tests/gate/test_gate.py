@@ -1523,6 +1523,42 @@ class TestGroups(GateCase):
         self.assertTrue(all(re.fullmatch(r"[a-z0-9-]+=\S*", line) for line in out.splitlines()), out)
 
 
+class TestGateSets(GateCase):
+    SETS = TestGroups.GROUPED + '[gate-set.merge]\ngates = ["lint", "backend"]\n[gate-set.lint]\ngates = "lint.check"\n'
+
+    def setUp(self) -> None:
+        super().setUp()
+        _ = _commit(self.repo, "pipeline.toml", self.SETS)
+
+    # SPEC: gate#gate-set-selector
+    def test_a_set_runs_its_gates_and_groups_in_config_order(self) -> None:
+        runner = RecordingRunner()
+        code, _, err = self.tangier("gate", "run", "@merge", "--base", self.base, runner=runner)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(runner.calls, [*SELECTED, TestGroups.FORMAT, TestGroups.CHECK])
+        self.assertEqual(
+            self.tangier("gate", "key", "@merge")[1].split()[::2], ["backend", "lint.format", "lint.check"]
+        )
+
+    # SPEC: gate#gate-set-selector
+    def test_a_set_and_a_group_can_share_a_name(self) -> None:
+        self.assertEqual(self.tangier("gate", "key", "lint")[1].split()[::2], ["lint.format", "lint.check"])
+        self.assertRegex(self.tangier("gate", "key", "@lint")[1], r"^lint\.check [0-9a-f]{40}\n$")
+
+    # SPEC: gate#gate-set-selector
+    def test_an_unknown_set_exits_2_and_names_the_sets(self) -> None:
+        code, _, err = self.tangier("gate", "run", "@nope", "--base", self.base)
+        self.assertEqual(code, 2)
+        self.assertIn("no `[gate-set.nope]` in config (configured: @merge, @lint)", err)
+
+    # SPEC: gate#gate-set-selector
+    def test_a_set_is_verified_when_every_gate_in_it_is(self) -> None:
+        self.assertEqual(self.tangier("gate", "run", "lint", "--base", self.base)[0], 0)
+        self.assertEqual(self.tangier("gate", "verified", "@merge")[:2], (1, "unverified\n"))
+        self.assertEqual(self.tangier("gate", "run", "backend", "--base", self.base)[0], 0)
+        self.assertEqual(self.tangier("gate", "verified", "@merge")[:2], (0, "verified\n"))
+
+
 class TestStore(GateCase):
     def setUp(self) -> None:
         super().setUp()
