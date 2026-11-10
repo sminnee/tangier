@@ -23,14 +23,42 @@ GITHUB_FIELDS = {
 }
 
 
+# The kinds `TANGIER_RUNNER_KIND` can set. `queue` is a build queue, such as maelstrom's.
+KINDS = ("local", "ci", "queue")
+KIND_VAR = "TANGIER_RUNNER_KIND"
+
+
+def in_ci(environ: Mapping[str, str] = os.environ) -> bool:
+    """Whether `CI` is `true` or `1`, which GitHub, GitLab, CircleCI and Buildkite all set."""
+    return environ.get("CI", "").lower() in ("true", "1")
+
+
+def kind_override(environ: Mapping[str, str] = os.environ) -> str | None:
+    """`TANGIER_RUNNER_KIND`, or None when unset or empty. A value outside `KINDS` raises `ValueError`."""
+    value = environ.get(KIND_VAR, "")
+    if not value:
+        return None
+    if value not in KINDS:
+        raise ValueError(f"{KIND_VAR}={value} is not a runner kind (use {', '.join(KINDS)})")
+    return value
+
+
 def detect(environ: Mapping[str, str] = os.environ) -> dict[str, str]:
     """The runner for a run in this environment.
 
-    `ci` when `CI` is `true` or `1`, which GitHub, GitLab, CircleCI and
-    Buildkite all set, and `local` otherwise. Only GitHub Actions gets more
-    than a `provider` of `unknown`.
+    `ci` when `in_ci()`, and `local` otherwise. Only GitHub Actions gets more
+    than a `provider` of `unknown`. `TANGIER_RUNNER_KIND` then replaces `kind`
+    and keeps every other field. A bad value raises `ValueError`.
     """
-    if environ.get("CI", "").lower() not in ("true", "1"):
+    runner = _detected(environ)
+    override = kind_override(environ)
+    if override:
+        runner["kind"] = override
+    return runner
+
+
+def _detected(environ: Mapping[str, str]) -> dict[str, str]:
+    if not in_ci(environ):
         return {"kind": "local", "host": socket.gethostname()}
     if environ.get("GITHUB_ACTIONS") != "true":
         return {"kind": "ci", "provider": "unknown"}

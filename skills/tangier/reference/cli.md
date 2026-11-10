@@ -137,6 +137,9 @@ Exit codes: 0 rolled out, 1 migration or rollout failure, 2 unknown environment,
 A selector is a gate's full name, such as `lint.check`, a group's name, which selects every
 member, or `@<set>`, which selects every gate in a `[gate-set.<set>]`. An unknown selector exits 2.
 
+`TANGIER_RUNNER_KIND` sets the `kind` a run records: `local`, `ci` or `queue`. Any other value
+exits 2. It does not change whether `gate run` starts a job: only `CI` does.
+
 | Command | Flags | Behaviour | Exit |
 | --- | --- | --- | --- |
 | `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--no-fail-fast`, `--dry-run`, `--debug`, `--accept`, `--wait` | Run each gate on the working tree, in config order, unless it is verified or not needed. The first gate that fails or errors stops the run. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. Outside CI and `--dry-run`, start a job and return once it starts; `--wait` waits for it, up to an hour. While another job in this worktree runs, `--wait` queues behind it, and a plain run starts nothing and exits 2. Over the machine's `max-running` limit, the job is `queued` until a slot frees. | the first non-zero code, 2 when another job runs, or 3 when the job is still queued or running |
@@ -161,7 +164,7 @@ member, or `@<set>`, which selects every gate in a `[gate-set.<set>]`. An unknow
 | `--wait` | Wait for the job, up to an hour of wall-clock time, and exit with the gates' code, or 3 if it is still running. Without it, `gate run` returns once the job starts. |
 | `--dry-run` | Print each gate's status, comparator, reason and commands. Run and write nothing. |
 | `--debug` | Print the comparator walk, each run read with how long it took and whether `--accept` took it, the changed files, and each list, to stderr. |
-| `--accept RAN_ON` | Count only runs from this runner: `ci`, `local`, or `field=value,...` over `kind`, `provider`, `event`, `ref`, `workflow` and `job`. Repeats; any match counts. |
+| `--accept RAN_ON` | Count only runs from this runner: `ci`, `local`, `queue`, or `field=value,...` over `kind`, `provider`, `event`, `ref`, `workflow` and `job`. Repeats; any match counts. |
 
 | Flags | Tests need | Reads a record | Writes a record |
 | --- | --- | --- | --- |

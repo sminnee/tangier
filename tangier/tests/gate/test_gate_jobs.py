@@ -138,7 +138,7 @@ class JobCase(unittest.TestCase):
         patcher = mock.patch.dict(os.environ)
         _ = patcher.start()
         self.addCleanup(patcher.stop)
-        for var in ("CI", "GITHUB_ACTIONS", "GITHUB_OUTPUT"):
+        for var in ("CI", "GITHUB_ACTIONS", "GITHUB_OUTPUT", "TANGIER_RUNNER_KIND"):
             _ = os.environ.pop(var, None)
         home_dir = tempfile.TemporaryDirectory()
         self.addCleanup(home_dir.cleanup)
@@ -412,6 +412,19 @@ class TestRun(JobCase):
         self.assertEqual(runner.spawned, [])
         self.assertTrue(out.startswith("gate `lint`: passed"))
         self.assertEqual(self.job_ids(), [])
+
+    # SPEC: gate#job-inline-ci
+    # SPEC: gate#runner-kind-env
+    def test_a_runner_kind_outside_ci_still_starts_a_job(self) -> None:
+        for job_id, kind in enumerate(("queue", "ci"), start=1):
+            with self.subTest(kind=kind):
+                runner = InProcessRunner()
+                with mock.patch.dict(os.environ, {"TANGIER_RUNNER_KIND": kind}):
+                    code, out, _ = self.run_gates("lint", "--wait", runner=runner)
+                self.assertEqual(code, 0)
+                self.assertEqual(len(runner.spawned), 1)
+                self.assertIn("gate `lint`: passed", out)
+                self.assertEqual(sorted(self.job_ids()), list(range(1, job_id + 1)))
 
     # SPEC: gate#gate-set-selector
     def test_a_job_lists_a_sets_gates_in_config_order(self) -> None:

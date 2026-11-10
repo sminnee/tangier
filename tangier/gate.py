@@ -16,7 +16,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from tangier import __version__, git, junit
+from tangier import __version__, git, junit, ranon
 from tangier.changemap import AnswerSet, answer_set_for_files, full_answer_set, scope_lines, scope_touched
 from tangier.config import (
     ITEMS_PLACEHOLDER_SUFFIX,
@@ -66,7 +66,7 @@ MAX_RUNS = 20
 
 # The runner fields an `--accept` value can name, and the kinds a runner can be.
 ACCEPT_FIELDS = ("kind", "provider", "event", "ref", "workflow", "job")
-RUNNER_KINDS = ("local", "ci")
+RUNNER_KINDS = ranon.KINDS
 
 # How to reach the merge base from a shallow clone, which is the CI checkout default.
 SHALLOW_FIX = "This is a shallow clone: on a pull request, use `fetch-depth` of 2 or more with `--base HEAD^1`"
@@ -125,7 +125,7 @@ class Accept:
             if not wanted:
                 raise GateError(f"`{part}` names no value")
             if name == "kind" and wanted not in RUNNER_KINDS:
-                raise GateError(f"`{wanted}` is not a runner kind (use {' or '.join(RUNNER_KINDS)})")
+                raise GateError(f"`{wanted}` is not a runner kind (use {', '.join(RUNNER_KINDS)})")
             pairs.append((name, wanted))
         return cls(tuple(pairs))
 
