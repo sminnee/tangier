@@ -112,7 +112,7 @@ memory = "8G"   # each job's whole process tree is capped at 8G, with no swap (L
 ```
 
 With `cpus`, test runners that start a worker per CPU, as `pytest -n auto` does, start 4. With
-`memory`, a gate over the cap fails. Plan for
+`memory`, a gate over the cap fails, and its output says the job memory limit killed it. Plan for
 `max-running × memory` on the machine.
 
 A job whose process dies, or a reboot, leaves nothing stuck: the next command that reads the jobs

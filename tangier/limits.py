@@ -98,3 +98,59 @@ def check(runner: Runner, memory: int) -> None:
         "start one, or remove `memory` from [jobs] in ~/.tangier/config.toml"
     )
 
+
+def cap() -> int | None:
+    """The memory cap on this process's cgroup, in bytes. None for no cap, or when it cannot be read."""
+    try:
+        text = _read_cgroup_file("memory.max").strip()
+        return None if text == "max" else int(text)
+    except (OSError, ValueError):
+        return None
+
+
+def oom_counts() -> tuple[int, int] | None:
+    """This process's cgroup's `oom` and `oom_kill` counts. None when they cannot be read."""
+    try:
+        return parse_memory_events(_read_cgroup_file("memory.events"))
+    except (OSError, ValueError):
+        return None
+
+
+def killed_by_cap(before: tuple[int, int] | None, after: tuple[int, int] | None) -> bool:
+    """Whether the cgroup's own cap killed a process between the two `oom_counts`.
+
+    `oom` counts only the times the cgroup reached its own limit, so a kill by
+    the machine-wide OOM killer, which raises `oom_kill` alone, does not count.
+    """
+    if before is None or after is None:
+        return False
+    return after[0] > before[0] and after[1] > before[1]
+
+
+def cgroup_dir(proc_cgroup: str) -> str | None:
+    """The cgroup v2 directory of a process, from its `/proc/<pid>/cgroup`. None without a v2 entry."""
+    line = next((ln for ln in proc_cgroup.splitlines() if ln.startswith("0::")), None)
+    if line is None:
+        return None
+    return os.path.join("/sys/fs/cgroup", line[3:].strip().lstrip("/"))
+
+
+def _read_cgroup_file(name: str) -> str:
+    with open("/proc/self/cgroup") as fh:
+        found = cgroup_dir(fh.read())
+    if found is None:
+        raise ValueError("no cgroup v2 entry")
+    with open(os.path.join(found, name)) as fh:
+        return fh.read()
+
+
+def parse_memory_events(text: str) -> tuple[int, int]:
+    """The `oom` and `oom_kill` counts from a cgroup's `memory.events`. Raises ValueError when one is missing."""
+    counts: dict[str, int] = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(" ")
+        if key in ("oom", "oom_kill"):
+            counts[key] = int(value)
+    if len(counts) < 2:
+        raise ValueError("memory.events has no oom or oom_kill line")
+    return counts["oom"], counts["oom_kill"]

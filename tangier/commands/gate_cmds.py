@@ -96,7 +96,12 @@ def _in_background(args: argparse.Namespace) -> bool:
 
 
 def _run_inline(
-    config: Config, args: argparse.Namespace, names: list[str], reporter: jobs.Reporter, pass_fds: tuple[int, ...] = ()
+    config: Config,
+    args: argparse.Namespace,
+    names: list[str],
+    reporter: jobs.Reporter,
+    pass_fds: tuple[int, ...] = (),
+    memory: int | None = None,
 ) -> int:
     # One read of origin for all gates, and none when every record is local.
     origin = gate.OriginRecords()
@@ -104,7 +109,7 @@ def _run_inline(
     written: set[str] = set()
     for i, name in enumerate(names):
         try:
-            code, ref = _run_one(config, args, name, origin, reporter, pass_fds)
+            code, ref = _run_one(config, args, name, origin, reporter, pass_fds, memory)
         except (gate.GateError, git.GitError) as e:
             # Printed first, so the gate's slice of the job log holds the error.
             print(f"error: {e}", file=sys.stderr)
@@ -149,7 +154,8 @@ def _run_as_job(config: Config, args: argparse.Namespace) -> int:
         if cfg.cpus is not None:
             limits.pin(jobs.slot_index(args.job_dir), cfg.cpus)
         reporter = jobs.JobReporter(args.job_dir)
-        code = _run_inline(config, args, _selected(config, args), reporter, (held[0],))
+        # The cap the job runs under, not the config's, which may have changed since the spawn.
+        code = _run_inline(config, args, _selected(config, args), reporter, (held[0],), limits.cap())
     except gate.GateError as e:
         print(f"error: {e}", file=sys.stderr)
     finally:
@@ -354,8 +360,11 @@ def _run_one(
     origin: gate.OriginRecords,
     reporter: jobs.Reporter,
     pass_fds: tuple[int, ...],
+    memory: int | None = None,
 ) -> tuple[int, str | None]:
     """Plan one gate, then run it unless it is verified or not needed. Its commands get `pass_fds`.
+
+    Under a job's `memory` cap, a gate whose commands the cap killed says so.
 
     Returns its exit code, and the ref it wrote or None.
 
@@ -408,8 +417,11 @@ def _run_one(
         except OSError as e:
             raise gate.GateError(f"gate `{name}`: cannot delete the old JUnit report at {spec.junit}: {e}") from e
     start = clock()
+    oom_before = limits.oom_counts() if memory is not None else None
     code = _run_commands(_runner(args), spec, p.commands, pass_fds)
     duration = clock() - start
+    if memory is not None and code != 0 and limits.killed_by_cap(oom_before, limits.oom_counts()):
+        print(f"gate `{name}`: killed by the job memory limit ({limits.show(memory)})", file=sys.stderr)
     # Sampled as the gate ends. See `[run-load]`.
     load = ranon.load() or None
     report = junit.read(spec.junit) if spec.junit else None

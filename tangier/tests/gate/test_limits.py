@@ -111,5 +111,29 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(runner.calls, [])
 
 
+class TestMemoryEvents(unittest.TestCase):
+    def test_reads_the_oom_and_oom_kill_counts(self) -> None:
+        text = "low 0\nhigh 0\nmax 37\noom 1\noom_kill 3\noom_group_kill 0\n"
+        self.assertEqual(limits.parse_memory_events(text), (1, 3))
+
+    # SPEC: gate#job-limits
+    def test_only_a_kill_at_the_cgroups_own_cap_counts(self) -> None:
+        self.assertTrue(limits.killed_by_cap((1, 3), (2, 4)))
+        # The machine-wide OOM killer raises `oom_kill` alone.
+        self.assertFalse(limits.killed_by_cap((1, 3), (1, 4)))
+        self.assertFalse(limits.killed_by_cap((1, 3), (1, 3)))
+        self.assertFalse(limits.killed_by_cap(None, (2, 4)))
+
+    def test_the_cgroup_dir_comes_from_the_v2_entry(self) -> None:
+        text = "1:name=systemd:/old\n0::/user.slice/user-1000.slice/app.slice/run-p1-i2.scope\n"
+        self.assertEqual(limits.cgroup_dir(text), "/sys/fs/cgroup/user.slice/user-1000.slice/app.slice/run-p1-i2.scope")
+        self.assertEqual(limits.cgroup_dir("0::/\n"), "/sys/fs/cgroup/")
+        self.assertIsNone(limits.cgroup_dir("1:name=systemd:/old\n"))
+
+    def test_no_count_is_an_error(self) -> None:
+        with self.assertRaises(ValueError):
+            _ = limits.parse_memory_events("low 0\noom_kill 3\n")
+
+
 if __name__ == "__main__":
     unittest.main()
