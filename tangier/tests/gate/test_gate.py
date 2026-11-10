@@ -97,6 +97,10 @@ def _gate_refs(root: str) -> list[str]:
     return _git(root, "for-each-ref", "--format=%(refname)", "refs/tangier/gates").split()
 
 
+def _failure_refs(root: str) -> list[str]:
+    return _git(root, "for-each-ref", "--format=%(refname)", "refs/tangier/failures").split()
+
+
 def _runs(root: str, ref: str) -> list[dict[str, Any]]:
     return json.loads(_git(root, "cat-file", "blob", ref))["runs"]
 
@@ -857,8 +861,10 @@ class TestNeed(GateCase):
             _ = _commit(self.repo, "pipeline.toml", body)
         self.start = _git(self.repo, "rev-parse", "HEAD")
 
-    def run_gate(self, *extra: str, base: str | None = None) -> tuple[int, str, str, RecordingRunner]:
-        runner = RecordingRunner()
+    def run_gate(
+        self, *extra: str, base: str | None = None, runner: RecordingRunner | None = None
+    ) -> tuple[int, str, str, RecordingRunner]:
+        runner = runner or RecordingRunner()
         code, out, err = self.tangier("gate", "run", "backend", "--base", base or self.start, *extra, runner=runner)
         return code, out, err, runner
 
@@ -889,6 +895,79 @@ class TestNeed(GateCase):
         os.mkdir(os.path.join(self.repo, "lib"))
         _ = _commit(self.repo, "lib/util.py", "util = 1\n")
         self.assertEqual(self.run_gate()[3].calls, [["bin/test"], ["bin/lint"]])
+
+    # `svc` depends on `lib`, which has its own items.
+    DEPENDS = CONFIG.replace('unittest_items = "svc"', 'unittest_items = "svc"\ndepends = ["lib"]') + (
+        '[lib]\npaths = "lib/**"\nunittest_items = "lib"\n'
+    )
+    # `DEPENDS` with `lib` in the gate's scope too, so `--direct` needs it for a `lib` change.
+    DEPENDS_IN_SCOPE = DEPENDS.replace('scope = ["svc", "inputs"]', 'scope = ["svc", "lib", "inputs"]')
+
+    def commit_lib(self) -> None:
+        os.makedirs(os.path.join(self.repo, "lib"), exist_ok=True)
+        _ = _commit(self.repo, "lib/util.py", "util = 1\n")
+
+    # SPEC: gate#need-direct
+    def test_direct_ignores_a_change_only_in_a_depends_tag(self) -> None:
+        body = self.NO_PLACEHOLDER.replace('unittest_items = "svc"', 'unittest_items = "svc"\ndepends = ["lib"]')
+        self.use_config(body + '[lib]\npaths = "lib/**"\n')
+        self.commit_lib()
+        self.assert_not_needed("--direct")
+        self.assertEqual(self.run_gate()[3].calls, [["bin/test"], ["bin/lint"]])
+
+    # SPEC: gate#direct-placeholders
+    # SPEC: gate#direct-records
+    def test_a_narrowed_direct_pass_writes_no_record(self) -> None:
+        self.use_config(self.DEPENDS_IN_SCOPE)
+        self.commit_lib()
+        code, out, _, runner = self.run_gate("--direct")
+        self.assertEqual(code, 0)
+        # Only `lib`: without `--direct`, its dependent `svc` joins the list.
+        self.assertEqual(runner.calls, [["bin/test", "--dirs", "lib", "--files", ""], ["bin/lint"]])
+        self.assertIn("no record written (--direct narrowed the run)", out)
+        self.assertEqual(_gate_refs(self.repo), [])
+        self.assertEqual(self.run_gate()[3].calls[0], ["bin/test", "--dirs", "lib,svc", "--files", ""])
+
+    # SPEC: gate#direct-placeholders
+    def test_dry_run_says_direct_narrowed_the_lists(self) -> None:
+        self.use_config(self.DEPENDS_IN_SCOPE)
+        self.commit_lib()
+        out = self.run_gate("--direct", "--dry-run")[1]
+        self.assertIn("(--direct narrowed the lists)", out)
+
+    # SPEC: gate#direct-records
+    def test_a_direct_pass_that_narrowed_nothing_is_recorded(self) -> None:
+        # `lib` needs a file to key, but its change comes before the diff.
+        self.commit_lib()
+        self.use_config(self.DEPENDS_IN_SCOPE)
+        _ = _commit(self.repo, "svc/a.py", "a = 3\n")
+        self.assertNotIn("narrowed", self.run_gate("--direct", "--dry-run")[1])
+        code, out, err, runner = self.run_gate("--direct")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(runner.calls, [["bin/test", "--dirs", "svc", "--files", "svc/a.py"], ["bin/lint"]])
+        self.assertIn("recorded as", out)
+        self.assertEqual(len(_gate_refs(self.repo)), 1)
+
+    # SPEC: gate#direct-records
+    def test_a_direct_pass_of_a_gate_with_no_placeholder_is_recorded(self) -> None:
+        body = self.NO_PLACEHOLDER.replace('scope = ["svc", "inputs"]', 'scope = ["svc", "lib", "inputs"]')
+        body = body.replace('unittest_items = "svc"', 'unittest_items = "svc"\ndepends = ["lib"]')
+        self.use_config(body + '[lib]\npaths = "lib/**"\n')
+        self.commit_lib()
+        code, out, _, _ = self.run_gate("--direct")
+        self.assertEqual(code, 0)
+        self.assertIn("recorded as", out)
+        self.assertEqual(len(_gate_refs(self.repo)), 1)
+
+    # SPEC: gate#direct-records
+    # SPEC: gate#failure-record
+    def test_a_narrowed_direct_failure_is_recorded_as_a_failure(self) -> None:
+        self.use_config(self.DEPENDS_IN_SCOPE)
+        self.commit_lib()
+        code = self.run_gate("--direct", runner=RecordingRunner({("bin/lint",): Result(3)}))[0]
+        self.assertEqual(code, 3)
+        self.assertEqual(_gate_refs(self.repo), [])
+        self.assertEqual([ref.rsplit("/", 1)[0] for ref in _failure_refs(self.repo)], ["refs/tangier/failures/backend"])
 
     # SPEC: gate#need-key-inputs-only
     def test_a_change_only_sha_exclude_matches_is_not_needed(self) -> None:

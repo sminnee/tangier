@@ -142,7 +142,7 @@ exits 2. It does not change whether `gate run` starts a job: only `CI` does.
 
 | Command | Flags | Behaviour | Exit |
 | --- | --- | --- | --- |
-| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--no-fail-fast`, `--dry-run`, `--debug`, `--accept`, `--wait` | Run each gate on the working tree, in config order, unless it is verified or not needed. The first gate that fails or errors stops the run. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. Outside CI and `--dry-run`, start a job and return once it starts; `--wait` waits for it, up to an hour. While another job in this worktree runs, `--wait` queues behind it, and a plain run starts nothing and exits 2. Over the machine's `max-running` limit, the job is `queued` until a slot frees. | the first non-zero code, 2 when another job runs, or 3 when the job is still queued or running |
+| `gate run <selector>...` | `--all`, `--base`, `--read-only`, `--full`, `--direct`, `--no-fail-fast`, `--dry-run`, `--debug`, `--accept`, `--wait` | Run each gate on the working tree, in config order, unless it is verified or not needed. The first gate that fails or errors stops the run. Then publish the records it wrote: pull `origin`'s records and push only those, with 3 attempts against a racing `origin`. A failed publish warns and does not change the exit code. Outside CI and `--dry-run`, start a job and return once it starts; `--wait` waits for it, up to an hour. While another job in this worktree runs, `--wait` queues behind it, and a plain run starts nothing and exits 2. Over the machine's `max-running` limit, the job is `queued` until a slot frees. | the first non-zero code, 2 when another job runs, or 3 when the job is still queued or running |
 | `gate wait [<selector>...]` | `--job N[,N...]` | Wait up to an hour for this worktree's latest job, or the listed jobs from any worktree, or only the selected gates. Print a queued job's place when it changes. On a terminal, stream the log. Elsewhere, print each gate's start and result and the log tail of a failure. After a failed gate that ran with more load than CPUs, print a load note. For a job stopped by `gate cancel`, print who cancelled it and why. | 0 passed, 1 failed or cancelled, 2 no such job, 3 still queued or running |
 | `gate status` | `--job N[,N...]`, `--since` (default `8h`), `--running`, `--all`, `--json`, `--watch`, `--usage-every SECONDS` (default `5`) | Print this worktree's recent jobs, each gate's key and state, and which results are stale. The latest job always shows. `--running` shows only queued and running jobs. `--all` shows every worktree's jobs, each with its worktree. The first line gives the machine's slots, load, and the CPU and memory its gate jobs use; each unfinished job line adds its own `cpu 230%  mem 1.2G`. `--json` prints `{"machine", "running", "queued", "recent", "not_found"}`; see below. `--watch` keeps running and prints each job and gate change as it happens; see below. | 0 |
 | `gate cancel` | `--job N` or `--all`, `--reason TEXT` | Stop this worktree's latest job, job N, or with `--all` every queued and running job on the machine, in one 10-second grace period. Unfinished gates become `cancelled`. Each job's waiter prints who cancelled it, with the reason. | 0 |
@@ -160,6 +160,7 @@ exits 2. It does not change whether `gate run` starts a job: only `CI` does.
 | `--all` | Every gate, in config order. Not with a selector. |
 | `--read-only` | Reuse a record, but write none. |
 | `--full` | Skip the need test and every record. Fill each placeholder with its complete list. Needs no merge base. |
+| `--direct` | A light check: ignore `depends`. A gate is needed only when its scope tags' own paths change, and each list holds only the tags the diff matched. A pass that this narrowed writes no record. |
 | `--no-fail-fast` | Run every gate, so one run reports every failure. Without it, the gates after a failure are named on stderr as not run, and in a job end `cancelled`. |
 | `--wait` | Wait for the job, up to an hour of wall-clock time, and exit with the gates' code, or 3 if it is still running. Without it, `gate run` returns once the job starts. |
 | `--dry-run` | Print each gate's status, comparator, reason and commands. Run and write nothing. |
@@ -172,6 +173,7 @@ exits 2. It does not change whether `gate run` starts a job: only `CI` does.
 | `--read-only` | yes | yes | no |
 | `--full` | no | no | yes |
 | `--read-only --full` | no | no | no |
+| `--direct` | own scope only | yes | only when the lists did not narrow |
 
 Each gate prints one of:
 

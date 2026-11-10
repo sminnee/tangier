@@ -372,7 +372,7 @@ def _run_one(
             else "no uncommitted change touches the scope"
         )
         print(f"gate `{name}`: keying the working tree; {what}", file=sys.stderr)
-    p = gate.plan(config, name, args.base, snap, origin, full=args.full, accept=args.accept)
+    p = gate.plan(config, name, args.base, snap, origin, full=args.full, direct=args.direct, accept=args.accept)
     reporter.started(name, p.key, offset)
     if args.debug:
         _print_debug(p)
@@ -406,9 +406,11 @@ def _run_one(
         # Keyed as planned, before the run, whatever the commands left behind. See `[failure-record]`.
         ref = gate.write_failure(p, ranon.detect(), duration, load, code, report)
         return finished("failed", code, line, ref=ref, load=load)
-    if args.read_only:
+    if args.read_only or p.narrowed:
+        # A narrowed pass tested less than the key covers. See `[direct-records]`.
+        why = "--read-only" if args.read_only else "--direct narrowed the run"
         return finished(
-            "passed", 0, f"gate `{name}`: passed in {jobs.took(duration)}, no record written (--read-only)", load=load
+            "passed", 0, f"gate `{name}`: passed in {jobs.took(duration)}, no record written ({why})", load=load
         )
     # The key is content only, so a moved HEAD over the same tree is fine. A
     # changed tree is not: the commands did not test what the key describes.
@@ -1497,6 +1499,11 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         help="reuse a record, but write none",
     )
     add_full(rp, "run with complete lists, as if every tag changed; reads no record and no diff")
+    _ = rp.add_argument(
+        "--direct",
+        action="store_true",
+        help="a light check: ignore `depends`, so a gate runs only for changes to its own scope tags' paths",
+    )
     _ = rp.add_argument(
         "--fail-fast",
         action=argparse.BooleanOptionalAction,

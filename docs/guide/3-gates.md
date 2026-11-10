@@ -217,6 +217,10 @@ gates = ["lint", "test-backend"]
 `TANGIER_RUNNER_KIND=queue`: its runs then record the kind `queue`, and `--accept queue` counts
 only those.
 
+`tangier gate run @pre-merge --direct` is a light check. It ignores `depends`, so a gate runs only
+when its own scope tags change, and each list holds only the tags the diff matched. A pass that this
+narrowed writes no record, because the key covers more than the run tested.
+
 ## CI-only gates
 
 Some gates cannot run on a dev machine: they need CI services, secrets or hardware. CI runs them,
