@@ -106,12 +106,35 @@ scope = ["docs"]
 - Output names map `.` to `-`: `lint.check` gives `lint-check-run`. Two gates, or a gate and a
   group, whose outputs would share a name are a config error. `[output-name-collision]`
 
+## Gate sets
+
+A gate set names the gates one caller runs together, such as a build queue's full check.
+
+```toml
+[gate-set.merge]
+gates = ["lint", "test", "web", "e2e"]
+
+[gate-set.pre-merge]
+gates = ["lint", "test"]
+```
+
+- A `[gate-set.<name>]` table takes `gates` only. `gates` is a string or a list of gate and
+  group names, and it must not be empty. An entry that names no gate or group is a config error.
+  The set name follows the gate name rule. `gate-set` is a reserved section, so a tag of that name
+  must be written `[tags.gate-set]`. `[gate-set-config]`
+- The selector `@<name>` selects a set's gates, with each group expanded to its members, once each
+  and in config order, not the order of `gates`. Sets live outside the gate namespace, so a set
+  and a gate or group can share a name: `lint` is the group and `@lint` is the set. An unknown set
+  is an error, exit 2, that lists the configured sets. A set is not stored: a job and
+  `gate status` show its gates by their full names. `[gate-set-selector]`
+
 ## Selector
 
-`gate run`, `gate key` and `gate verified` take selectors, not only gate names.
+`gate run`, `gate key`, `gate verified` and `gate wait` take selectors, not only gate names.
 
-- A selector is a gate's full name, such as `lint.check`, or a group's name, such as `lint`. A
-  group selects its members in config order. Any other selector is an error, exit 2. `gate run` runs the selected
+- A selector is a gate's full name, such as `lint.check`, a group's name, such as `lint`, or a
+  [gate set](#gate-sets), such as `@merge`. A group selects its members in config order. Any other
+  selector is an error, exit 2. `gate run` runs the selected
   gates once each, in config order. `gate key` with a group prints `<name> <key>` for each member.
   `gate verified` with a group is verified only when every member has a record at `HEAD`.
   `[selector]`

@@ -413,6 +413,14 @@ class TestRun(JobCase):
         self.assertTrue(out.startswith("gate `lint`: passed"))
         self.assertEqual(self.job_ids(), [])
 
+    # SPEC: gate#gate-set-selector
+    def test_a_job_lists_a_sets_gates_in_config_order(self) -> None:
+        with open(os.path.join(self.repo, "pipeline.toml"), "a") as fh:
+            _ = fh.write('[gate-set.merge]\ngates = ["test", "lint"]\n')
+        code, _, _ = self.tangier("gate", "run", "@merge", "--base", "HEAD", "--wait")
+        self.assertEqual(code, 0)
+        self.assertEqual([g.name for g in self.job().gates], ["lint", "test"])
+
     # SPEC: gate#job-inline-ci
     def test_a_dry_run_runs_inline(self) -> None:
         runner = InProcessRunner()

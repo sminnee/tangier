@@ -103,6 +103,10 @@ cmd = "uv run pyright"
 [gate.lint.ruff]
 cmd = ["uv run ruff check .", "uv run ruff format --check ."]
 
+# A gate set: `tangier gate run @merge` runs these gates and groups, in config order.
+[gate-set.merge]
+gates = ["lint", "test-backend"]
+
 # Files the gate's commands read that no service covers. No `sha`, so it is
 # not an image.
 [backend-inputs]
