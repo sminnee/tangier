@@ -721,7 +721,11 @@ to an hour.
   job running. The scope execs the job in place, so `gate cancel`, the reaper and `gate status`
   see the same pid and process group. Before it creates the job, `gate run` checks that such a
   scope starts. When it does not, as with no systemd user session, `gate run` exits 2, starts no
-  job, and says to start one or remove `memory`. The limits
+  job, and says to start one or remove `memory`. The job reads its cap from its cgroup's
+  `memory.max`, and `oom` and `oom_kill` from its `memory.events` before and after each gate.
+  When a gate fails and both counts rose, the gate prints
+  ``gate `<name>`: killed by the job memory limit (8G)`` before its result. A kill by the
+  machine-wide OOM killer raises `oom_kill` alone, so it is not named as the cap's. The limits
   apply to each job, not to all jobs together, so the machine needs up to
   `max-running × memory`. CI, `--dry-run` and other inline runs have no limits. `[job-limits]`
 - A job takes a slot before it runs a gate. The slots are `~/.tangier/slots/0` up to

@@ -1902,6 +1902,36 @@ class TestLimits(JobCase):
         # Slot 0 is held, so this job takes slot 1: CPUs 2 and 3.
         setaffinity.assert_called_once_with(0, {2, 3})
 
+    # SPEC: gate#job-limits
+    def test_a_gate_the_cap_killed_says_so(self) -> None:
+        self.home_config('memory = "8G"')
+        runner = ScopedRunner({("bin/lint",): Result(-9)})
+        with (
+            mock.patch.object(limits, "cap", return_value=8 * 1024**3),
+            mock.patch.object(limits, "oom_counts", side_effect=[(1, 3), (2, 4)]),
+        ):
+            code, out, _ = self.run_gates("lint", runner=runner)
+        self.assertEqual(code, -9)
+        self.assertIn("gate `lint`: killed by the job memory limit (8G)", jobs.output(self.job(), "lint"))
+        self.assertIn("killed by the job memory limit (8G)", out)
+
+    # SPEC: gate#job-limits
+    def test_a_gate_the_cap_did_not_kill_says_nothing_of_it(self) -> None:
+        for name, code, after in (
+            ("a plain failure", 1, (1, 3)),
+            ("a machine-wide OOM kill", -9, (1, 4)),
+            ("a pass after a worker was killed", 0, (2, 4)),
+        ):
+            with self.subTest(name):
+                self.home_config('memory = "8G"')
+                runner = ScopedRunner({("bin/lint",): Result(code)})
+                with (
+                    mock.patch.object(limits, "cap", return_value=8 * 1024**3),
+                    mock.patch.object(limits, "oom_counts", side_effect=[(1, 3), after]),
+                ):
+                    _ = self.run_gates("lint", runner=runner)
+                self.assertNotIn("memory limit", jobs.output(self.job(max(self.job_ids())), "lint"))
+
 
 if __name__ == "__main__":
     unittest.main()
