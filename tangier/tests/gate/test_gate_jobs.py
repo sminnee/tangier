@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest import mock
 
-from tangier import cli, gate, git, home, jobs, ranon, usage, watch
+from tangier import cli, gate, git, home, jobs, limits, ranon, usage, watch
 from tangier.commands import gate_cmds
 from tangier.runner import Result, Subprocess
 from tangier.tests.support import RecordingRunner, make_git_repo
@@ -204,8 +204,12 @@ class JobCase(unittest.TestCase):
         jobs.finish(self.job(job_id).dir, 0)
 
     def max_running(self, n: int) -> None:
+        self.home_config(f"max-running = {n}")
+
+    def home_config(self, jobs_table: str) -> None:
+        """Write `~/.tangier/config.toml` with `jobs_table` as its `[jobs]` table."""
         with open(os.path.join(self.home, "config.toml"), "w") as fh:
-            _ = fh.write(f"[jobs]\nmax-running = {n}\n")
+            _ = fh.write(f"[jobs]\n{jobs_table}\n")
 
     def other_repo(self) -> str:
         return make_git_repo(self, FILES)
@@ -1816,6 +1820,87 @@ class TestPruneAcrossWorktrees(JobCase):
         shutil.rmtree(other)
         _ = self.run_gates("lint")
         self.assertEqual([j.id for j in jobs.all_jobs(worktree_only=False)], [2])
+
+
+class ScopedRunner(InProcessRunner):
+    """Runs a job spawned under `systemd-run` in this process too, as the command after `--`."""
+
+    def spawn(
+        self, argv: list[str], *, log: str, env: dict[str, str] | None = None, pass_fds: tuple[int, ...] = ()
+    ) -> int:
+        self.scoped = argv
+        inner = argv[argv.index("--") + 1 :] if argv[0] == "systemd-run" else argv
+        return super().spawn(inner, log=log, env=env, pass_fds=pass_fds)
+
+
+class TestLimits(JobCase):
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.object(sys, "platform", "linux")
+        _ = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # SPEC: gate#job-limits
+    def test_the_slot_file_records_the_slots_index(self) -> None:
+        self.max_running(2)
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        _ = self.run_gates("lint", runner=SleeperRunner(self), cwd=self.other_repo())
+        self.assertEqual([jobs.slot_index(self.job(n).dir) for n in (1, 2)], [0, 1])
+
+    # SPEC: gate#job-limits
+    def test_no_limits_spawn_the_job_as_it_is(self) -> None:
+        runner = InProcessRunner()
+        code, _, _ = self.run_gates("lint", runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.spawned[0][0], sys.executable)
+        self.assertEqual(runner.commands(binary="systemd-run"), [])
+
+    # SPEC: gate#job-limits
+    def test_a_memory_cap_spawns_the_job_in_a_capped_scope(self) -> None:
+        self.home_config('memory = "8G"')
+        runner = ScopedRunner()
+        code, _, _ = self.run_gates("lint", runner=runner)
+        self.assertEqual(code, 0)
+        # The probe, then the job.
+        probe = runner.calls[0]
+        self.assertEqual((probe[:3], probe[-2:]), (["systemd-run", "--user", "--scope"], ["--", "true"]))
+        self.assertEqual(runner.scoped[:3], ["systemd-run", "--user", "--scope"])
+        self.assertIn(f"MemoryMax={8 * 1024**3}", runner.scoped)
+        self.assertEqual(runner.spawned[0][0], sys.executable)
+
+    # SPEC: gate#job-limits
+    def test_inline_runs_have_no_limits(self) -> None:
+        self.home_config('memory = "8G"')
+        runner = InProcessRunner()
+        code, _, _ = self.run_gates("lint", "--dry-run", runner=runner)
+        self.assertEqual(code, 0)
+        with mock.patch.dict(os.environ, {"CI": "true"}):
+            code, _, _ = self.run_gates("lint", runner=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual((runner.spawned, runner.commands(binary="systemd-run")), ([], []))
+
+    # SPEC: gate#job-limits
+    def test_a_cap_that_cannot_be_set_starts_no_job(self) -> None:
+        self.home_config('memory = "8G"')
+        runner = InProcessRunner({("systemd-run",): Result(1, stderr="Failed to connect to bus")})
+        code, _, err = self.run_gates("lint", runner=runner)
+        self.assertEqual(code, 2)
+        self.assertIn("Failed to connect to bus", err)
+        self.assertIn("remove `memory`", err)
+        self.assertEqual((runner.spawned, self.job_ids()), ([], []))
+
+    # SPEC: gate#job-limits
+    def test_the_job_pins_itself_to_its_slots_cpus(self) -> None:
+        self.home_config("max-running = 2\ncpus = 2")
+        _ = self.run_gates("lint", runner=SleeperRunner(self))
+        with (
+            mock.patch.object(os, "sched_getaffinity", return_value=set(range(8))),
+            mock.patch.object(os, "sched_setaffinity") as setaffinity,
+        ):
+            code, _, _ = self.run_gates("lint", cwd=self.other_repo())
+        self.assertEqual(code, 0)
+        # Slot 0 is held, so this job takes slot 1: CPUs 2 and 3.
+        setaffinity.assert_called_once_with(0, {2, 3})
 
 
 if __name__ == "__main__":

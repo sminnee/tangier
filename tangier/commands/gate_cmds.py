@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any, NamedTuple
 
 import tangier
-from tangier import gate, git, home, jobs, junit, ranon, stats, usage, watch
+from tangier import gate, git, home, jobs, junit, limits, ranon, stats, usage, watch
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, GateSpec, gate_groups, gate_output_name
 from tangier.github import emit_outputs, write_summary
@@ -136,15 +136,20 @@ def _run_as_job(config: Config, args: argparse.Namespace) -> int:
 
     It holds the job's `procs` lock and passes it to every command it runs. A
     gate still unfinished when `done` is written, after an unexpected error,
-    ends `error`. See `[job-queue]` and `[job-reap]`.
+    ends `error`. Once it holds a slot, it pins itself to the slot's CPUs. See
+    `[job-queue]`, `[job-reap]` and `[job-limits]`.
     """
     code = 2
     held: list[int] = []
     try:
         held.append(jobs.hold_procs(args.job_dir))
+        cfg = home.load_config()
         if not jobs.has_slot(args.job_dir):
-            held.append(jobs.claim_slot(args.job_dir, _runner(args), home.load_config().max_running))
-        code = _run_inline(config, args, _selected(config, args), jobs.JobReporter(args.job_dir), (held[0],))
+            held.append(jobs.claim_slot(args.job_dir, _runner(args), cfg.max_running))
+        if cfg.cpus is not None:
+            limits.pin(jobs.slot_index(args.job_dir), cfg.cpus)
+        reporter = jobs.JobReporter(args.job_dir)
+        code = _run_inline(config, args, _selected(config, args), reporter, (held[0],))
     except gate.GateError as e:
         print(f"error: {e}", file=sys.stderr)
     finally:
@@ -160,15 +165,24 @@ def _start_job(config: Config, args: argparse.Namespace, names: list[str]) -> in
     """Start a job for `names`, then wait for it up to the run's limit, as `gate wait` does. Ctrl-C cancels it.
 
     A job already running is waited out first, inside the same limit. See `[job-one-per-worktree]`.
+    With `[jobs] memory` set, the job runs under the memory cap, and a cap that cannot be set
+    starts no job. See `[job-limits]`.
     """
     waiter = _Waiter(_runner(args), _limit(args, WAIT_LIMIT if args.wait else 0), cancels=True)
+    memory = home.load_config().memory
+    if memory is not None:
+        # Quiet: the probe is not one of the run's commands.
+        limits.check(_runner(args, echo=False), memory)
 
     def start_and_wait() -> int:
         job, held = _create_when_free(config, args, names, waiter)
         waiter.started = job
         try:
             jobs.set_pid(
-                job, waiter.runner.spawn(_job_argv(args.argv, job.dir), log=job.log, env=_job_env(), pass_fds=held)
+                job,
+                waiter.runner.spawn(
+                    limits.wrap(_job_argv(args.argv, job.dir), memory), log=job.log, env=_job_env(), pass_fds=held
+                ),
             )
         finally:
             for fd in held:

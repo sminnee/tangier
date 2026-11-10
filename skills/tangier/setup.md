@@ -92,6 +92,16 @@ it.
   max-running = 2
   ```
 
+- When parallel test runners in several jobs use up the machine's memory, add per-job limits
+  (Linux only; `memory` needs a systemd user session). `cpus` pins each job to `n` CPUs, spread across slots, so
+  runners that start a worker per CPU start fewer. `memory` caps each job's process tree:
+
+  ```toml
+  [jobs]
+  cpus = 4
+  memory = "8G"
+  ```
+
 ## Checks
 
 Run each one. Done when all of them pass.

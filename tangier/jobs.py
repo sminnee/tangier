@@ -8,7 +8,7 @@ Every job on the machine is a directory under `~/.tangier/jobs/<id>/` (see `home
   output.log      the job's combined stdout and stderr
   alive           locked for as long as the job process lives
   procs           locked by the job process and every command it runs
-  slot            written when the job leaves the queue and holds a slot
+  slot            written when the job leaves the queue and holds a slot: its index and the time
   cancelled.json  who cancelled the job, and why; written by `gate cancel`
   ended.json      written when a reaper finalized a job whose process died
   done            written last, holding the job's exit code
@@ -628,6 +628,16 @@ def has_slot(job_dir: str) -> bool:
     return os.path.exists(os.path.join(job_dir, "slot"))
 
 
+def slot_index(job_dir: str) -> int:
+    """The index of the slot the job holds, as `claim_free` wrote it."""
+    path = os.path.join(job_dir, "slot")
+    try:
+        with open(path) as fh:
+            return int(json.load(fh)["slot"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise JobError(f"cannot read the slot index from {path}: {e}") from e
+
+
 def claim_free(job_dir: str, max_running: int) -> int | None:
     """A free slot's locked descriptor, when this job is first in the queue, or None. Call under `lock()`."""
     first = next(iter(_queue()), None)
@@ -639,7 +649,7 @@ def claim_free(job_dir: str, max_running: int) -> int | None:
         if fd is None:
             continue
         try:
-            _write_atomic(os.path.join(job_dir, "slot"), gate.now().isoformat())
+            _write_atomic(os.path.join(job_dir, "slot"), json.dumps({"slot": i, "time": gate.now().isoformat()}))
         except BaseException:
             os.close(fd)
             raise

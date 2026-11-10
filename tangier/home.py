@@ -6,9 +6,11 @@ See `docs/specs/gate.md#jobs`.
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from dataclasses import dataclass
 
+from tangier import limits
 from tangier.gate import GateError
 
 DEFAULT_MAX_RUNNING = 4
@@ -18,6 +20,9 @@ DEFAULT_MAX_RUNNING = 4
 class HomeConfig:
     # How many jobs run at once on this machine. The rest queue.
     max_running: int = DEFAULT_MAX_RUNNING
+    # How many CPUs each job runs on, and its memory cap in bytes. None for no limit. See `limits`.
+    cpus: int | None = None
+    memory: int | None = None
 
 
 def root() -> str:
@@ -44,13 +49,24 @@ def load_config() -> HomeConfig:
     jobs = data.get("jobs", {})
     if not isinstance(jobs, dict):
         raise GateError(f"{tilde(path)}: `jobs` must be a table")
-    unknown = sorted(set(jobs) - {"max-running"})
+    unknown = sorted(set(jobs) - {"max-running", "cpus", "memory"})
     if unknown:
         raise GateError(f"{tilde(path)}: unknown key in [jobs]: {', '.join(unknown)}")
     max_running = jobs.get("max-running", DEFAULT_MAX_RUNNING)
     if not isinstance(max_running, int) or isinstance(max_running, bool) or max_running < 1:
         raise GateError(f"{tilde(path)}: [jobs] max-running must be a whole number of 1 or more, not {max_running!r}")
-    return HomeConfig(max_running=max_running)
+    cpus = jobs.get("cpus")
+    if cpus is not None and (not isinstance(cpus, int) or isinstance(cpus, bool) or cpus < 1):
+        raise GateError(f"{tilde(path)}: [jobs] cpus must be a whole number of 1 or more, not {cpus!r}")
+    memory = None
+    if "memory" in jobs:
+        try:
+            memory = limits.parse_memory(jobs["memory"])
+        except ValueError as e:
+            raise GateError(f'{tilde(path)}: [jobs] memory must be a size of 1M or more, as "8G": {e}') from e
+    if (cpus is not None or memory is not None) and not sys.platform.startswith("linux"):
+        raise GateError(f"{tilde(path)}: [jobs] cpus and memory need Linux; remove them on {sys.platform}")
+    return HomeConfig(max_running=max_running, cpus=cpus, memory=memory)
 
 
 def tilde(path: str) -> str:

@@ -1,6 +1,7 @@
 """`~/.tangier/config.toml`, read by `home.load_config`."""
 
 import os
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -37,6 +38,43 @@ class TestLoadConfig(unittest.TestCase):
                 self.write(f"[jobs]\nmax-running = {value}\n")
                 with self.assertRaisesRegex(GateError, "max-running must be a whole number of 1 or more"):
                     _ = home.load_config()
+
+    # SPEC: gate#job-config
+    def test_no_limits_by_default(self) -> None:
+        self.write("[jobs]\nmax-running = 2\n")
+        cfg = home.load_config()
+        self.assertEqual((cfg.cpus, cfg.memory), (None, None))
+
+    # SPEC: gate#job-config
+    def test_cpus_and_memory_set_the_per_job_limits(self) -> None:
+        self.write('[jobs]\ncpus = 4\nmemory = "8G"\n')
+        with mock.patch.object(sys, "platform", "linux"):
+            cfg = home.load_config()
+        self.assertEqual((cfg.cpus, cfg.memory), (4, 8 * 1024**3))
+
+    # SPEC: gate#job-config
+    def test_a_bad_limit_is_an_error(self) -> None:
+        for text, message in (
+            ("cpus = 0", "cpus must be a whole number of 1 or more"),
+            ('cpus = "4"', "cpus must be a whole number of 1 or more"),
+            ("cpus = true", "cpus must be a whole number of 1 or more"),
+            ('memory = "8GB"', "memory must be a size of 1M or more"),
+        ):
+            with self.subTest(text=text), mock.patch.object(sys, "platform", "linux"):
+                self.write(f"[jobs]\n{text}\n")
+                with self.assertRaisesRegex(GateError, message):
+                    _ = home.load_config()
+
+    # SPEC: gate#job-config
+    def test_limits_need_linux(self) -> None:
+        for text in ("cpus = 4", 'memory = "8G"'):
+            with self.subTest(text=text), mock.patch.object(sys, "platform", "darwin"):
+                self.write(f"[jobs]\n{text}\n")
+                with self.assertRaisesRegex(GateError, "cpus and memory need Linux"):
+                    _ = home.load_config()
+        self.write("[jobs]\nmax-running = 2\n")
+        with mock.patch.object(sys, "platform", "darwin"):
+            self.assertEqual(home.load_config().max_running, 2)
 
     # SPEC: gate#job-config
     def test_an_unknown_key_is_an_error(self) -> None:
