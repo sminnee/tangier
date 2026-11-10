@@ -181,6 +181,8 @@ class GatePlan:
     changed: list[str]
     # Each placeholder token's list.
     lists: dict[str, list[str]]
+    # Under `--direct`: the commands differ from the cascaded ones. See `[direct-records]`.
+    narrowed: bool = False
 
 
 def now() -> datetime:
@@ -384,6 +386,7 @@ def plan(
     origin: OriginRecords | None = None,
     *,
     full: bool = False,
+    direct: bool = False,
     accept: Sequence[Accept] = (),
 ) -> GatePlan:
     """What a run of the gate on the snapshot does. See `docs/specs/gate.md#status-values`.
@@ -393,6 +396,8 @@ def plan(
     changed or every placeholder list is empty, and `required` otherwise.
     `full` reads no record and no diff, and is always `required`: each list is
     complete, as if every tag changed. See `[run-full]` in `docs/specs/gate.md`.
+    `direct` drops the `depends` cascade from the need test and the lists, and
+    sets `narrowed` when that changed the commands. See `[need-direct]`.
     """
     spec = spec_for(cfg, name)
     snap_key = key(cfg, name, snap.tree)
@@ -415,12 +420,15 @@ def plan(
     comp = comparator(cfg, name, base, snap, snap_key, origin, accept=accept)
     changed: list[str] = []
     lists: dict[str, list[str]] = {}
+    narrowed = False
 
     ignored = sum(1 for step in comp.trail if step.runs and not step.where)
 
     def made(status: str, reason: str, commands: list[list[str]]) -> GatePlan:
         if ignored:
             reason += f" ({ignored} record(s) ignored by --accept)"
+        if narrowed:
+            reason += " (--direct narrowed the lists)"
         return GatePlan(
             name=name,
             status=status,
@@ -434,6 +442,7 @@ def plan(
             trail=comp.trail,
             changed=changed,
             lists=lists,
+            narrowed=narrowed,
         )
 
     if comp.verified:
@@ -446,15 +455,19 @@ def plan(
     # The comparator is an ancestor of `snap.commit`, so this two-dot diff is
     # the three-dot diff of a clean tree, plus any uncommitted work.
     files = git.diff_names(comp.commit, snap.tree)
-    changed = [f for f in files if scope_touched(cfg, scope_tags(cfg, spec), [f])]
-    lists = (
-        placeholder_lists(spec, answer_set_for_files(cfg, files, snap.tree, compute_shas=False))
-        if has_placeholder(spec)
-        else {}
-    )
+    tags = scope_tags(cfg, spec)
+    changed = [f for f in files if scope_touched(cfg, tags, [f], transitive=not direct)]
+    if has_placeholder(spec):
+        answers = answer_set_for_files(cfg, files, snap.tree, expand=not direct, compute_shas=False)
+        lists = placeholder_lists(spec, answers)
+        if direct:
+            cascaded = placeholder_lists(spec, answer_set_for_files(cfg, files, snap.tree, compute_shas=False))
+            narrowed = resolve_commands(spec, cascaded) != resolve_commands(spec, lists)
     commands = resolve_commands(spec, lists)
     if not changed:
-        return made("not-needed", f"no key input changed since {comp.how}", commands)
+        return made(
+            "not-needed", f"no {'file in the own scope' if direct else 'key input'} changed since {comp.how}", commands
+        )
     if lists and not any(lists.values()):
         return made("not-needed", "every placeholder list is empty", commands)
     return made("required", f"{len(changed)} key input(s) changed since {comp.how}", commands)

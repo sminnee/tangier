@@ -69,6 +69,10 @@ recorded, and the commit of that work reuses it.
 lint and format, before slow ones.
 
 `tangier gate run @<set>` runs the gates a `[gate-set.<set>]` lists.
+When the project's instructions name a light check, such as `tangier gate run @pre-merge --direct`,
+run it before you submit. `--direct` ignores `depends`: a gate runs only for changes to its own scope
+tags. A `--direct` pass that narrowed the run prints `no record written (--direct narrowed the run)`
+and verifies nothing.
 
 ## CI-only gates
 

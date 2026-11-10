@@ -242,6 +242,19 @@ whole rule: there is no separate config.
   with no placeholder and no record for the keyed tree is then needed, with a warning on stderr. Running
   the gate is the safe direction. In a shallow clone, the warning names the fix: on a pull request,
   use `fetch-depth` of 2 or more with `--base HEAD^1`. `[need-unreadable-base-runs]`
+- `gate run --direct` is a light check, such as an agent runs before it submits work. A gate is
+  needed only when a changed file matches one of its scope tags' own paths. The tags those scope
+  tags `depends` on are ignored. The key does not change, so it still covers the whole scope. A
+  `not-needed` reason says `no file in the own scope changed`, not `no key input changed`.
+  `[need-direct]`
+- Under `--direct`, each placeholder list holds only the tags the diff matched, without the tags
+  that depend on them. `--dry-run` and `--debug` end the reason with `(--direct narrowed the
+  lists)` when that changed the commands. `[direct-placeholders]`
+- A `--direct` pass that narrowed the lists tested less than its key covers, so it writes no
+  record. It prints ``gate `<name>`: passed in 3.2s, no record written (--direct narrowed the
+  run)`` and the gate ends `passed`. A `--direct` pass whose commands equal the ones without
+  `--direct`, or of a gate with no placeholder, is recorded as usual. A failure is always recorded
+  by `[failure-record]`: a failure record never verifies a gate. `[direct-records]`
 
 On a push to `main`, `origin/main` is `HEAD`, so the diff is empty and no gate is needed. A full
 build uses `--full`.
@@ -394,7 +407,7 @@ working tree. For `gate github-outputs`, which CI runs on commits, `--head` defa
 | --- | --- |
 | `gate list` | Print every gate and group. |
 | `gate key [<selector>]` | Print the key. With no selector, print `<name> <key>` for every gate. |
-| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--no-fail-fast`, `--dry-run`, `--debug`, `--accept` and `--wait`. Outside CI the gates run as a [job](#jobs). |
+| `gate run <selector> ...` | Run each gate on the working tree, or reuse a record. Takes `--all`, `--base`, `--read-only`, `--full`, `--direct`, `--no-fail-fast`, `--dry-run`, `--debug`, `--accept` and `--wait`. Outside CI the gates run as a [job](#jobs). |
 | `gate wait [<selector> ...]` | Wait for a job, or for some of its gates, up to an hour. Takes `--job`. |
 | `gate status` | List recent jobs and their gates, and say which results are stale. Takes `--job`, `--since`, `--running`, `--all`, `--json`, `--watch` and `--usage-every`. |
 | `gate cancel` | Stop a running job. Takes `--job`. |
