@@ -2,6 +2,9 @@ name: Build packages
 
 # One matrixed job in place of a hand-written job per package. Feed `packages`
 # from `tangier changemap build-matrix`, which emits exactly this shape.
+#
+# With `aws-role-arn`, the calling job must grant `permissions: id-token: write`:
+# a called workflow can only narrow its caller's permissions.
 
 on:
   workflow_call:
@@ -18,6 +21,21 @@ on:
         required: false
         type: string
         default: registry
+      aws-role-arn:
+        description: >-
+          IAM role to assume through GitHub OIDC for the ECR registries in
+          `[registry] url` and `mirrors`, which must share one region. Skipped
+          when no registry is ECR.
+        required: false
+        type: string
+        default: ""
+      mirrors:
+        description: >-
+          false pushes to `[registry] url` only, not to `[registry] mirrors`.
+          For a PR build that cannot log in to a mirror.
+        required: false
+        type: boolean
+        default: true
       extra-secrets:
         description: Space-separated extra buildx secret IDs (not values).
         required: false
@@ -58,7 +76,8 @@ on:
         default: ubuntu-latest
     secrets:
       registry-password:
-        required: true
+        description: For the one non-ECR registry in `[registry] url` and `mirrors`. Skipped when there is none.
+        required: false
       sentry-auth-token:
         description: >-
           Passed to EVERY matrix leg — Actions offers no per-leg secret routing.
@@ -92,6 +111,8 @@ jobs:
           package: ${{ matrix.package }}
           registry-username: ${{ inputs.registry-username }}
           registry-password: ${{ secrets.registry-password }}
+          aws-role-arn: ${{ inputs.aws-role-arn }}
+          mirrors: ${{ inputs.mirrors }}
           extra-secrets: ${{ inputs.extra-secrets }}
           regctl-version: ${{ inputs.regctl-version }}
           uv-version: ${{ inputs.uv-version }}

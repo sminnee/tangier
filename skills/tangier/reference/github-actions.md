@@ -326,7 +326,9 @@ A reusable workflow: one matrix leg per bucket, each calling the `build` action.
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `packages` | required | JSON array of buckets, as a string. |
-| `registry-username` | `registry` | Registry user. |
+| `registry-username` | `registry` | Registry user. Ignored for ECR. |
+| `aws-role-arn` | `""` | IAM role to assume through GitHub OIDC, for the ECR registries in `[registry] url` and `mirrors`. Skipped when none is ECR. |
+| `mirrors` | `true` | `false` pushes to `[registry] url` only, and logs in to it only. |
 | `extra-secrets` | `""` | Space-separated buildx secret ids. |
 | `regctl-version` | `v0.6.1` | `regctl` release. |
 | `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
@@ -337,8 +339,43 @@ A reusable workflow: one matrix leg per bucket, each calling the `build` action.
 
 | Secret | Meaning |
 | --- | --- |
-| `registry-password` | Required. Registry password. |
+| `registry-password` | Password for the one non-ECR registry in `[registry] url` and `mirrors`. Skipped when there is none. |
 | `sentry-auth-token` | Passed to every leg as `SENTRY_AUTH_TOKEN`. Used only by buckets whose `[image.*] secrets` name it. |
+
+Each image goes to `[registry] url` and every `[registry] mirrors` entry. A host matching
+`*.dkr.ecr.*.amazonaws.com` logs in with the role, and any other host with the password. At most
+one host may need the password. The ECR region comes from the host, and every ECR host must be
+in one region. A credential that no host needs is skipped with a notice, so pass
+every credential the repo's registries could need, and let `pipeline.toml` choose. With the role,
+grant `id-token: write` on the calling job. A called workflow cannot grant that permission itself.
+The example below shows both. Each ECR repository, `<namespace>/<bucket>`, must exist before its
+first push (or a repository creation template must make it), with tag immutability off.
+
+To move between registries, list the new one in `mirrors`. Each build then pushes to both, and a
+tag one registry already has is copied to the other with no build. At the cutover, set `url` to the
+new registry and drop `mirrors`. The caller stays the same at every stage:
+
+```yaml
+build:
+  needs: plan
+  if: needs.plan.outputs.build-packages-empty == 'false'
+  permissions:
+    contents: read
+    id-token: write
+  uses: sminnee/tangier/.github/workflows/build.yaml@v0
+  with:
+    packages: ${{ needs.plan.outputs.build-packages }}
+    tangier-version: ${{ needs.plan.outputs.tangier-version }}
+    aws-role-arn: arn:aws:iam::123456789012:role/ci/push-image
+    # A PR build cannot assume a role that trusts main only, so it skips the mirrors.
+    mirrors: ${{ github.event_name != 'pull_request' }}
+  secrets:
+    registry-password: ${{ secrets.REGISTRY_PASSWORD }}
+```
+
+A `main` build pushes to `url` and the mirrors. A PR build pushes to `url` only. A `main` run of
+`build-matrix --full` offers every image, so one green `main` build copies every current tag to a
+new mirror.
 
 ### `sminnee/tangier/.github/actions/build@v0`
 
@@ -347,8 +384,10 @@ Builds and pushes one bucket's image, unless its tag is already published.
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `package` | required | The bucket. Needs an `[image.<bucket>]` table. |
-| `registry-password` | required | Registry password. |
-| `registry-username` | `registry` | Registry user. |
+| `registry-password` | `""` | Password for the one non-ECR registry in `[registry] url` and `mirrors`. Skipped when there is none. |
+| `registry-username` | `registry` | Registry user. Ignored for ECR. |
+| `aws-role-arn` | `""` | IAM role to assume through GitHub OIDC, then log in to each ECR registry in `[registry] url` and `mirrors`. The job needs `id-token: write`. Skipped when none is ECR. |
+| `mirrors` | `"true"` | `"false"` pushes to `[registry] url` only (`image build --no-mirrors`), and logs in to it only. |
 | `extra-secrets` | `""` | Space-separated buildx secret ids. Pass values through the step's `env:`. |
 | `regctl-version` | `v0.6.1` | `regctl` release. |
 | `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
