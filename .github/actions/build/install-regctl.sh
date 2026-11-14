@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install regctl at REGCTL_VERSION, for the build action.
+# Install regctl at REGCTL_VERSION, for the build and deploy actions.
 #
 # Pinned by version, never `releases/latest`: a moving binary in the hot path
 # of every build is a silent behaviour change with no PR anywhere. `pipefail`

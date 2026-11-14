@@ -167,6 +167,12 @@ calling job cannot set `environment:` on a reusable workflow, so `build.yaml` se
 Environment's protection rules apply to every matrix leg, and an IAM role can trust that
 Environment alone. Empty, the default, means no Environment.
 
+A deploy with [`[deploy] digests = true`](6-other-features.md#pin-images-by-digest) reads each
+image's digest from `[registry] url`, so the deploy action needs a registry login too. Pass it
+`registry-password`, or `aws-role-arn` for ECR. With the role, the deploy job needs
+`id-token: write`, and the role must trust the deploy job's Environment, uat or prod. A push role
+that trusts only `images` is not enough. Without a credential, the deploy action does not log in.
+
 ## The nightly
 
 The workflow also runs `on: schedule`. On that event the plan job sets `full=--full` and passes it

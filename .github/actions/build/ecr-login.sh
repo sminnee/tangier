@@ -1,7 +1,7 @@
 #!/bin/bash
-# Log in to each ECR host with the role's keys, for the build action. Reads
-# ECR_HOSTS and AWS_REGION from registry-login.sh's outputs, and the AWS keys
-# from configure-aws-credentials.
+# Log in to each ECR host with the role's keys, for the build and deploy
+# actions. Reads ECR_HOSTS and AWS_REGION from registry-login.sh's outputs, and
+# the AWS keys from configure-aws-credentials.
 #
 # The login lands in ~/.docker/config.json like the password login, so buildx
 # and regctl pick it up. One token serves every ECR host in the region.
