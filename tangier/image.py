@@ -171,6 +171,15 @@ def exists_argv(ref: str, tag: str, platform: str = "linux/amd64") -> list[str]:
     return ["regctl", "manifest", "get", "--platform", platform, f"{ref}:{tag}"]
 
 
+def digest_argv(ref: str, tag: str) -> list[str]:
+    """The `regctl` lookup of a tag's top-level manifest digest.
+
+    No `--platform`, unlike `exists_argv`: for a multi-platform image this is
+    the index digest, so the kubelet still picks its own platform.
+    """
+    return ["regctl", "image", "digest", f"{ref}:{tag}"]
+
+
 def copy_argv(src: str, dst: str) -> list[str]:
     """The `regctl` copy of a published image (every platform) to another registry."""
     return ["regctl", "image", "copy", src, dst]

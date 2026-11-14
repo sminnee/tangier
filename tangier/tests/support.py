@@ -145,6 +145,8 @@ class RecordingRunner:
         self.pipes: list[list[list[str]]] = []
         self.stdins: list[str | None] = []
         self.envs: list[dict[str, str] | None] = []
+        # One per `pipe` call: the env its stages ran with.
+        self.pipe_envs: list[dict[str, str] | None] = []
         self.slept: list[float] = []
         self.spawned: list[list[str]] = []
         self.responses = dict(responses or {})
@@ -182,6 +184,7 @@ class RecordingRunner:
 
     def pipe(self, stages: list[list[str]], *, input: str | None = None, env: dict[str, str] | None = None) -> Result:
         self.pipes.append([list(s) for s in stages])
+        self.pipe_envs.append(env)
         for stage in stages:
             self.calls.append(list(stage))
         self.stdins.append(input)
