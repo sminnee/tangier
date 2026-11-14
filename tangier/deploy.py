@@ -17,8 +17,8 @@ import string
 from dataclasses import dataclass
 
 from tangier.changemap import buckets, sha_for_bucket
-from tangier.config import Config, DeployEnv
-from tangier.image import parse_image_tag
+from tangier.config import Config, DeployEnv, digest_var_for, version_var_for
+from tangier.image import digest_argv, image_ref, parse_image_tag
 from tangier.runner import Runner
 
 
@@ -42,8 +42,6 @@ def resolve_env(cfg: Config, name: str) -> DeployEnv:
 
 def versions(cfg: Config, head: str = "HEAD") -> dict[str, str]:
     """Every bucket's version variable -> content hash."""
-    from tangier.config import version_var_for
-
     return {version_var_for(b): sha_for_bucket(cfg, b, head) for b in sorted(buckets(cfg))}
 
 
@@ -54,10 +52,53 @@ def envsubst_allowlist(cfg: Config) -> str:
     order is cosmetic — sorted just makes it diffable. Deriving it removes the
     hand-maintained duplicate that had to be edited in two places whenever a
     service was added.
-    """
-    from tangier.config import version_var_for
 
-    return " ".join(f"${version_var_for(b)}" for b in sorted(buckets(cfg)))
+    With `[deploy] digests` on, each image bucket's digest variable is listed
+    too. With it off they stay out, so a stray `${X_DIGEST}` reaches kubectl
+    literally and fails visibly rather than becoming an empty string.
+    """
+    names = [version_var_for(b) for b in buckets(cfg)]
+    if cfg.deploy.digests:
+        names += [digest_var_for(b) for b in cfg.images]
+    return " ".join(f"${name}" for name in sorted(names))
+
+
+def image_digests(
+    runner: Runner, cfg: Config, version_vars: dict[str, str], only: list[str] | None = None
+) -> dict[str, str]:
+    """Each image bucket's digest variable -> `sha256:...`, or `{}` when `[deploy] digests` is off.
+
+    Only buckets with an `[image.<bucket>]` table have an image to look up; a
+    bucket without one hashes but is never pushed. `only` narrows the lookup to
+    some of those buckets, which is how a rollback resolves just the prior tag.
+
+    Every failure is collected before raising, so one error names every
+    failing `<bucket>:<tag>`.
+    """
+    selected = sorted(only if only is not None else cfg.images)
+    if not cfg.deploy.digests or not selected:
+        return {}
+    if runner.which("regctl") is None:
+        raise DeployError("`[deploy] digests` is on but regctl is not on PATH")
+    out: dict[str, str] = {}
+    failures: list[str] = []
+    for bucket in selected:
+        tag = version_vars[version_var_for(bucket)]
+        result = runner.run(digest_argv(image_ref(cfg, bucket), tag))
+        digest = result.stdout.strip()
+        if not result.ok:
+            failures.append(f"  {bucket}:{tag}: {result.stderr.strip() or f'exit {result.returncode}'}")
+        elif not digest.startswith("sha256:"):
+            failures.append(f"  {bucket}:{tag}: not a digest: {digest!r}")
+        else:
+            out[digest_var_for(bucket)] = digest
+    if failures:
+        raise DeployError(
+            "could not resolve image digests. Check that each image was pushed, and that the "
+            "deploy logged in to the registry (the deploy action's `registry-password` or "
+            "`aws-role-arn` input):\n" + "\n".join(failures)
+        )
+    return out
 
 
 def render_argv(env: DeployEnv, allowlist: str) -> list[list[str]]:

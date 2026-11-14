@@ -49,6 +49,39 @@ after = "bin/sentry-release ${ENV}"
 The command runs without a shell. A failed hook does not fail the deploy unless the table form sets
 `fatal = true`.
 
+### Pin images by digest
+
+A tag can be overwritten, and the cluster then pulls the new bytes on its next pull. To pin each
+image to the exact bytes the deploy chose, turn on digests:
+
+```toml
+[deploy]
+digests = true
+```
+
+Before it touches the cluster, `tangier deploy` then asks the registry for the digest of each
+`[image.<bucket>]` tag, and sets `<BUCKET>_DIGEST` (`sha256:…`) beside `<BUCKET>_VERSION`. Write
+both into the image reference:
+
+```yaml
+image: "registry.example/myapp/smartypants:${SMARTYPANTS_VERSION}@${SMARTYPANTS_DIGEST}"
+```
+
+The kubelet pulls by digest, and the tag stays in the reference for people to read. For a
+multi-platform image, the digest is the index's, so each node still picks its own platform.
+
+The lookup needs `regctl` and a registry login. The deploy action installs `regctl`, and logs in
+when given `registry-password` or `aws-role-arn`.
+
+- If a tag has no image, `regctl` is missing, or the registry refuses the login, the deploy exits
+  2 before the summary, the render or any `kubectl` call. The error names each failing
+  `<bucket>:<tag>`.
+- `--render` and `--versions` look the digests up too.
+- On a rollback, the prior-tag migration uses the prior tag's digest. If that lookup fails, the
+  deploy skips the migration and still rolls each deployment back.
+
+With `digests` off, `${X_DIGEST}` is not substituted, so a manifest that uses it fails at apply.
+
 ## `tangier tailnet`
 
 CI reaches the cluster over a Tailscale tailnet. Each environment names the tailnet ACL tag that

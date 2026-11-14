@@ -12,6 +12,7 @@ from tangier.config import (
     ConfigError,
     GateSet,
     GateSpec,
+    digest_var_for,
     gate_groups,
     read_config,
     scope_tags,
@@ -474,6 +475,34 @@ class TestAfterHook(unittest.TestCase):
     def test_after_does_not_become_a_deploy_environment(self) -> None:
         cfg = parse_toml('[deploy]\nafter = "bin/x"\n[deploy.uat]\nnamespace = "ns"\noverlay = "k8s/uat"\n')
         self.assertEqual(sorted(cfg.deploy.envs), ["uat"])
+
+
+REGISTRY = '[registry]\nurl = "registry.example/ns"\n'
+
+
+class TestDeployDigests(unittest.TestCase):
+    def test_off_by_default(self) -> None:
+        self.assertFalse(parse_toml('[deploy.uat]\nnamespace = "n"\noverlay = "o"\n').deploy.digests)
+
+    def test_true_turns_it_on(self) -> None:
+        self.assertTrue(parse_toml(f"{REGISTRY}[deploy]\ndigests = true\n").deploy.digests)
+
+    def test_needs_a_registry(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            _ = parse_toml("[deploy]\ndigests = true\n")
+        self.assertIn("[registry] url", str(ctx.exception))
+
+    def test_a_non_boolean_is_rejected(self) -> None:
+        with self.assertRaises(ConfigError) as ctx:
+            _ = parse_toml('[deploy]\ndigests = "yes"\n')
+        self.assertIn("digests", str(ctx.exception))
+
+    def test_digests_is_not_read_as_an_environment(self) -> None:
+        cfg = parse_toml(f'{REGISTRY}[deploy]\ndigests = true\n[deploy.uat]\nnamespace = "n"\noverlay = "o"\n')
+        self.assertEqual(list(cfg.deploy.envs), ["uat"])
+
+    def test_digest_var_follows_the_version_var_name_rule(self) -> None:
+        self.assertEqual(digest_var_for("astronort-lector"), "ASTRONORT_LECTOR_DIGEST")
 
 
 class TestTailnet(unittest.TestCase):

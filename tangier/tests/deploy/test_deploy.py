@@ -692,3 +692,190 @@ class TestCrashDetectionDegradation(unittest.TestCase):
             rc, _out = _run(_cfg(), runner)
         self.assertEqual(rc, 1)
         self.assertIn("crash detection degraded", err.getvalue())
+
+
+# An image for each SHA bucket, and `[deploy] digests` on or off.
+IMAGE_TABLES = {
+    "image.core": {"dockerfile": "service/core/Dockerfile"},
+    "image.scanner": {"dockerfile": "service/scanner/Dockerfile"},
+}
+
+CORE_DIGEST = ("regctl", "image", "digest", "registry.example/ns/core:v2")
+SCANNER_DIGEST = ("regctl", "image", "digest", "registry.example/ns/scanner:v2")
+DIGEST_RESPONSES = {
+    CORE_DIGEST: Result(0, "sha256:core2\n"),
+    SCANNER_DIGEST: Result(0, "sha256:scanner2\n"),
+}
+
+
+def _digest_cfg(digests: bool = True, images=None, **overrides):
+    tables = {"deploy": {"digests": digests}, **(IMAGE_TABLES if images is None else images)}
+    return _cfg(**{**tables, **overrides})
+
+
+def _kubectl_calls(runner) -> list[list[str]]:
+    return [c for c in runner.calls if c[0] == "kubectl"]
+
+
+def _subst(env) -> dict[str, str]:
+    """The version and digest variables a render or hook ran with."""
+    return {k: v for k, v in env.items() if k.endswith(("_VERSION", "_DIGEST"))}
+
+
+class TestImageDigests(unittest.TestCase):
+    def test_allowlist_lists_the_digest_vars_only_when_on(self) -> None:
+        self.assertEqual(
+            envsubst_allowlist(_digest_cfg()),
+            "$CORE_DIGEST $CORE_VERSION $SCANNER_DIGEST $SCANNER_VERSION",
+        )
+        # Off, a stray `${X_DIGEST}` reaches kubectl literally and fails visibly.
+        self.assertEqual(envsubst_allowlist(_digest_cfg(digests=False)), "$CORE_VERSION $SCANNER_VERSION")
+
+    def test_only_buckets_with_an_image_get_a_digest(self) -> None:
+        # A bucket with no `[image]` table hashes but is never pushed, so it has
+        # no digest to look up.
+        cfg = _digest_cfg(images={"image.core": IMAGE_TABLES["image.core"]})
+        self.assertEqual(envsubst_allowlist(cfg), "$CORE_DIGEST $CORE_VERSION $SCANNER_VERSION")
+        runner = RecordingRunner({**OK_RESPONSES, **DIGEST_RESPONSES})
+        rc, _out = _run(cfg, runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual([c for c in runner.calls if c[0] == "regctl"], [list(CORE_DIGEST)])
+        self.assertEqual(
+            _subst(runner.pipe_envs[0]),
+            {"CORE_VERSION": "v2", "SCANNER_VERSION": "v2", "CORE_DIGEST": "sha256:core2"},
+        )
+
+    def test_lookup_is_the_top_level_digest_with_no_platform(self) -> None:
+        # The index digest of a multi-platform image, so the kubelet still
+        # picks its own platform.
+        runner = RecordingRunner({**OK_RESPONSES, **DIGEST_RESPONSES})
+        rc, _out = _run(_digest_cfg(), runner)
+        self.assertEqual(rc, 0)
+        lookups = [c for c in runner.calls if c[0] == "regctl"]
+        self.assertEqual(lookups, [list(CORE_DIGEST), list(SCANNER_DIGEST)])
+
+    def test_render_env_carries_the_digests(self) -> None:
+        runner = RecordingRunner({**OK_RESPONSES, **DIGEST_RESPONSES})
+        _rc, _out = _run(_digest_cfg(), runner)
+        self.assertEqual(
+            _subst(runner.pipe_envs[0]),
+            {
+                "CORE_VERSION": "v2",
+                "SCANNER_VERSION": "v2",
+                "CORE_DIGEST": "sha256:core2",
+                "SCANNER_DIGEST": "sha256:scanner2",
+            },
+        )
+
+    def test_after_hook_gets_the_digests(self) -> None:
+        cfg = _digest_cfg(deploy={"digests": True, "after": "bin/notify ${CORE_DIGEST}"})
+        runner = RecordingRunner({**OK_RESPONSES, **DIGEST_RESPONSES})
+        _rc, _out = _run(cfg, runner)
+        self.assertIn(["bin/notify", "sha256:core2"], runner.calls)
+        # The hook is the only call run with `ENV` set.
+        hook_env = next(e for e in runner.envs if e and "ENV" in e)
+        self.assertEqual(hook_env["CORE_DIGEST"], "sha256:core2")
+
+    def test_versions_prints_the_digest_lines(self) -> None:
+        buf = io.StringIO()
+        runner = RecordingRunner(DIGEST_RESPONSES)
+        with (
+            contextlib.redirect_stdout(buf),
+            unittest.mock.patch.object(deploy_mod, "sha_for_bucket", return_value="v2"),
+        ):
+            rc = deploy_cmds._dispatch(_digest_cfg(), _args(runner, env=None, versions="uat"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            buf.getvalue().splitlines(),
+            ["CORE_VERSION=v2", "SCANNER_VERSION=v2", "CORE_DIGEST=sha256:core2", "SCANNER_DIGEST=sha256:scanner2"],
+        )
+
+    def test_a_missing_tag_stops_before_any_kubectl_call(self) -> None:
+        runner = RecordingRunner(
+            {**OK_RESPONSES, **DIGEST_RESPONSES, SCANNER_DIGEST: Result(1, "", "manifest unknown")}
+        )
+        with self.assertRaises(DeployError) as ctx:
+            _ = _run(_digest_cfg(), runner, summary=True)
+        self.assertIn("scanner:v2", str(ctx.exception))
+        self.assertIn("manifest unknown", str(ctx.exception))
+        self.assertNotIn("core:v2", str(ctx.exception))
+        # `--summary` reads the cluster too; it must not run either.
+        self.assertEqual(_kubectl_calls(runner), [])
+
+    def test_every_failure_is_named_in_one_error(self) -> None:
+        runner = RecordingRunner({CORE_DIGEST: Result(1, "", "401 Unauthorized"), SCANNER_DIGEST: Result(1)})
+        with self.assertRaises(DeployError) as ctx:
+            _ = _run(_digest_cfg(), runner)
+        message = str(ctx.exception)
+        self.assertIn("registry-password", message)
+        # One line per failing image; regctl's stderr, or the exit code without one.
+        self.assertEqual(message.splitlines()[1:], ["  core:v2: 401 Unauthorized", "  scanner:v2: exit 1"])
+
+    def test_missing_regctl_stops_before_any_kubectl_call(self) -> None:
+        runner = RecordingRunner({**OK_RESPONSES, **DIGEST_RESPONSES})
+        runner.missing.add("regctl")
+        with self.assertRaises(DeployError) as ctx:
+            _ = _run(_digest_cfg(), runner)
+        self.assertIn("regctl", str(ctx.exception))
+        self.assertEqual(runner.calls, [])
+
+    def test_output_that_is_not_a_digest_is_rejected(self) -> None:
+        runner = RecordingRunner({**OK_RESPONSES, **DIGEST_RESPONSES, CORE_DIGEST: Result(0, "oops\n")})
+        with self.assertRaises(DeployError) as ctx:
+            _ = _run(_digest_cfg(), runner)
+        self.assertIn("core:v2", str(ctx.exception))
+        self.assertEqual(_kubectl_calls(runner), [])
+
+    def test_off_makes_no_regctl_calls(self) -> None:
+        runner = RecordingRunner(OK_RESPONSES)
+        runner.missing.add("regctl")
+        rc, _out = _run(_digest_cfg(digests=False), runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual([c for c in runner.calls if c[0] == "regctl"], [])
+        self.assertNotIn("CORE_DIGEST", runner.pipe_envs[0])
+
+
+class TestImageDigestRollback(unittest.TestCase):
+    PRIOR_DIGEST = ("regctl", "image", "digest", "registry.example/ns/core:v1")
+    FAILING_ROLLOUT = {
+        **OK_RESPONSES,
+        **DIGEST_RESPONSES,
+        ("kubectl", "rollout", "status"): Result(1),
+        ("kubectl", "get", "deployment"): Result(0, "registry.example/ns/core:v1@sha256:core1"),
+    }
+
+    def test_prior_render_has_the_prior_tag_and_the_prior_digest(self) -> None:
+        # Keeping the new digest would pull the new code under the old Job name.
+        runner = RecordingRunner({**self.FAILING_ROLLOUT, self.PRIOR_DIGEST: Result(0, "sha256:core1\n")})
+        _rc, out = _run(_digest_cfg(), runner)
+        self.assertIn("core-migrate-v1", out)
+        self.assertEqual(len(runner.pipe_envs), 2)
+        # Other buckets keep the new deploy's values.
+        self.assertEqual(
+            _subst(runner.pipe_envs[1]),
+            {
+                "CORE_VERSION": "v1",
+                "SCANNER_VERSION": "v2",
+                "CORE_DIGEST": "sha256:core1",
+                "SCANNER_DIGEST": "sha256:scanner2",
+            },
+        )
+
+    def test_a_failed_prior_lookup_skips_the_migration_but_still_undoes(self) -> None:
+        runner = RecordingRunner({**self.FAILING_ROLLOUT, self.PRIOR_DIGEST: Result(1, "", "manifest unknown")})
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc, _out = _run(_digest_cfg(), runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("Prior-tag digest lookup failed; skipping prior-tag migration", err.getvalue())
+        self.assertEqual([c for c in runner.calls if c[:3] == ["kubectl", "delete", "job"]], [])
+        self.assertEqual(len(runner.pipe_envs), 1)
+        undos = [c[3] for c in runner.calls if c[:3] == ["kubectl", "rollout", "undo"]]
+        self.assertEqual(undos, ["deployment/core", "deployment/core-worker", "deployment/scanner"])
+
+    def test_a_migration_bucket_without_an_image_needs_no_prior_lookup(self) -> None:
+        cfg = _digest_cfg(images={"image.scanner": IMAGE_TABLES["image.scanner"]})
+        runner = RecordingRunner(self.FAILING_ROLLOUT)
+        _rc, out = _run(cfg, runner)
+        self.assertIn("core-migrate-v1", out)
+        self.assertEqual([c for c in runner.calls if c[0] == "regctl"], [list(SCANNER_DIGEST)])
+        self.assertEqual(_subst(runner.pipe_envs[1])["CORE_VERSION"], "v1")

@@ -129,14 +129,15 @@ tangier deploy --compare-env <env>
 | Flag | Meaning |
 | --- | --- |
 | `<env>` | Render, migrate, apply, wait, and roll back on failure. |
-| `--render ENV` | Print the manifests a deploy would apply. Read-only. |
-| `--versions ENV` | Print the version variables. Read-only. |
+| `--render ENV` | Print the manifests a deploy would apply, with digests substituted when `[deploy] digests = true`. Read-only. |
+| `--versions ENV` | Print the version variables, and the `_DIGEST` variables with `[deploy] digests = true`. Read-only. |
 | `--compare-env ENV` | Print a markdown table of computed tags against the live environment. Read-only. |
 | `--summary` | Write that table to `$GITHUB_STEP_SUMMARY`, or stdout, before deploying. Not with the read-only flags. |
 | `--head REF` | Compute versions at this commit. |
 
-Exit codes: 0 rolled out, 1 migration or rollout failure, 2 unknown environment, bad config or no
-`kubectl`. A fatal `[deploy] after` hook that fails also exits non-zero.
+Exit codes: 0 rolled out, 1 migration or rollout failure, 2 unknown environment, bad config, no
+`kubectl`, or a failed `[deploy] digests` lookup. A fatal `[deploy] after` hook that fails also
+exits non-zero.
 
 ## `tailnet`
 

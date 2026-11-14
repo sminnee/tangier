@@ -156,6 +156,8 @@ class DeploySettings:
     envs: dict[str, DeployEnv] = field(default_factory=dict)
     rollout: RolloutSettings = field(default_factory=RolloutSettings)
     after: AfterHook | None = None
+    # `[deploy] digests`: resolve each image's tag to a digest before a deploy.
+    digests: bool = False
 
 
 @dataclass
@@ -440,6 +442,11 @@ def _parse_after(path: str, val: object) -> AfterHook:
 def _parse_deploy(path: str, body: dict[str, Any]) -> DeploySettings:
     out = DeploySettings()
     for name, spec in body.items():
+        if name == "digests":
+            if not isinstance(spec, bool):
+                raise ConfigError(f"{path}: `[deploy] digests` must be a boolean")
+            out.digests = spec
+            continue
         # `after` first, BEFORE `_require_table`: its string shorthand is the
         # documented form, and `_require_table` would reject it with a message
         # that is both wrong and unactionable.
@@ -959,7 +966,20 @@ def version_var_for(bucket: str) -> str:
     `deploy`'s `export $(tangier changemap sha --all)` relies on, and what k8s
     manifests reference — it is a contract, not an implementation detail.
     """
-    return f"{bucket.upper().replace('-', '_')}_VERSION"
+    return f"{_var_stem(bucket)}_VERSION"
+
+
+def digest_var_for(bucket: str) -> str:
+    """The environment variable name carrying a bucket's image digest.
+
+    `astronort-lector` -> `ASTRONORT_LECTOR_DIGEST`, beside its `_VERSION`.
+    Only set when `[deploy] digests = true`.
+    """
+    return f"{_var_stem(bucket)}_DIGEST"
+
+
+def _var_stem(bucket: str) -> str:
+    return bucket.upper().replace("-", "_")
 
 
 def read_config(path: str) -> Config:
@@ -1034,6 +1054,8 @@ def read_config(path: str) -> Config:
                 raise ConfigError(f"{path}: `[{tag}].depends` references unknown tag `{dep}`")
     cfg.depends = raw_depends
     _check_no_cycles(cfg.depends, path)
+    if cfg.deploy.digests and not cfg.registry:
+        raise ConfigError(f"{path}: `[deploy] digests` needs `[registry] url` to look the digests up in")
     _derive(cfg, path)
     _warn_tags_without_input(cfg, path)
     _warn_tags_without_output(cfg, path)

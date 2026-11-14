@@ -143,6 +143,7 @@ The version variable is the bucket name upper-cased, with `-` as `_`, plus `_VER
 ```toml
 [deploy]
 after = "bin/sentry-release ${ENV}"
+digests = true
 
 [deploy.uat]
 namespace     = "myorg-uat"
@@ -154,7 +155,7 @@ migration_version_bucket = "core"
 max_wait = 600
 ```
 
-`after` and `rollout` are reserved names. Every other `[deploy.<env>]` table is an environment:
+`after`, `digests` and `rollout` are reserved names. Every other `[deploy.<env>]` table is an environment:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -176,6 +177,13 @@ max_wait = 600
 `after` runs once a deploy has fully rolled out, never after a rollback. The string form means
 `fatal = false`. The table form is `[deploy.after]` with `cmd` and `fatal`. With `fatal = true`, a
 failed hook fails the deploy. `${ENV}` and each version variable are substituted per argument.
+
+`digests = true` (default `false`) makes a deploy resolve each `[image.<bucket>]` tag to its
+manifest digest with `regctl image digest`, before the summary, the render or any `kubectl` call.
+It sets `<BUCKET>_DIGEST` (`sha256:…`) beside `<BUCKET>_VERSION`, for the render, the migration Job
+name and `after`. Write `image: "<url>/<bucket>:${X_VERSION}@${X_DIGEST}"` to pin it. A tag with
+no image, a missing `regctl` or a refused login exits 2 and names each failing `<bucket>:<tag>`.
+With it off, `${X_DIGEST}` is left unsubstituted.
 
 ## `[tailnet]`
 
