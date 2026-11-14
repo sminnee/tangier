@@ -326,6 +326,7 @@ A reusable workflow: one matrix leg per bucket, each calling the `build` action.
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `packages` | required | JSON array of buckets, as a string. |
+| `environment` | `""` | GitHub Environment for the build job, such as `images`. Empty means none. Its protection rules and role trust apply to every leg. |
 | `registry-username` | `registry` | Registry user. Ignored for ECR. |
 | `aws-role-arn` | `""` | IAM role to assume through GitHub OIDC, for the ECR registries in `[registry] url` and `mirrors`. Skipped when none is ECR. |
 | `mirrors` | `true` | `false` pushes to `[registry] url` only, and logs in to it only. |
