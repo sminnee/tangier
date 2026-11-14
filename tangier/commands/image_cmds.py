@@ -119,6 +119,21 @@ def _fill_from(runner: Runner, src: str, missing: list[str], tag: str) -> int:
     return rc
 
 
+def cmd_registries(config: Config, args: argparse.Namespace) -> int:
+    """Print each registry `image build --push` pushes to, one per line: `url` first.
+
+    The build action reads this to decide which logins it needs, so it follows
+    the same config the build does.
+    """
+    if not config.registry:
+        raise ImageError("no `[registry] url` in config")
+    print(config.registry)
+    if not args.no_mirrors:
+        for mirror in config.registry_mirrors:
+            print(mirror)
+    return 0
+
+
 def cmd_compose(config: Config, args: argparse.Namespace) -> int:
     with open(args.template) as fh:
         template = fh.read()
@@ -170,6 +185,10 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     )
     _ = bp.add_argument("--print", action="store_true", help="print the command line instead of running it")
     bp.set_defaults(func=cmd_build)
+
+    rp = isub.add_parser("registries", help="print the registries `image build --push` pushes to")
+    _ = rp.add_argument("--no-mirrors", action="store_true", help="print `[registry] url` only")
+    rp.set_defaults(func=cmd_registries)
 
     cp = isub.add_parser("compose", help="render [[bucket]] placeholders in a compose template")
     _ = cp.add_argument("template")
