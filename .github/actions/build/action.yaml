@@ -8,8 +8,28 @@ inputs:
     description: The SHA bucket to build. Must have an `[image.<bucket>]` table in pipeline.toml.
     required: true
   registry-password:
-    description: Password for the image registry.
-    required: true
+    description: >-
+      Password for the one registry in `[registry] url` and `mirrors` that is
+      not Amazon ECR. Required when there is one; skipped when there is not.
+    required: false
+    default: ""
+  aws-role-arn:
+    description: >-
+      IAM role to assume through GitHub OIDC, for the Amazon ECR registries
+      (`*.dkr.ecr.<region>.amazonaws.com`) in `[registry] url` and `mirrors`.
+      The region comes from the host, and every ECR host must be in the same
+      one. The calling job needs `permissions: id-token: write`.
+      `registry-username` does not apply: ECR's username is always `AWS`.
+      Skipped when no registry is ECR.
+    required: false
+    default: ""
+  mirrors:
+    description: >-
+      `false` pushes to `[registry] url` only, not to `[registry] mirrors`,
+      and logs in to that registry only. For a build that cannot reach a
+      mirror, such as a PR build whose role trusts only `main`.
+    required: false
+    default: "true"
   registry-username:
     description: >-
       Username for the image registry. Defaults to `registry`, which is what
@@ -98,35 +118,117 @@ runs:
 
     - uses: docker/setup-buildx-action@v3
 
-    - name: Registry login
+    - name: Registry host
+      id: registry
       shell: bash
-      # `[registry] url` is host + namespace, but `docker login` takes only the
-      # host: `${URL%%/*}` gives `registry.sminn.ee` from
-      # `registry.sminn.ee/tangerine`, and keeps a `:port` if one is configured.
-      # Read with tomllib rather than the CLI so this step does not depend on
-      # the install above having succeeded.
+      # `docker login` takes only the host: `${URL%%/*}` gives `registry.sminn.ee`
+      # from `registry.sminn.ee/tangerine`, and keeps a `:port`. The credentials
+      # are checked here so a bad combination fails with a clear message, not
+      # later as a vague 401 from the registry.
       env:
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+        AWS_ROLE_ARN: ${{ inputs.aws-role-arn }}
+        MIRRORS: ${{ inputs.mirrors }}
+      run: |
+        set -euo pipefail
+        fail() { echo "::error::$1"; exit 1; }
+        ARGS=()
+        case "$MIRRORS" in
+          true) ;;
+          false) ARGS+=(--no-mirrors) ;;
+          *) fail "mirrors must be true or false, not '$MIRRORS'" ;;
+        esac
+        URLS="$(tangier image registries "${ARGS[@]+"${ARGS[@]}"}")"
+        PASSWORD_HOST=""
+        ECR_HOSTS=""
+        ECR_REGION=""
+        while IFS= read -r URL; do
+          HOST="${URL%%/*}"
+          if [[ "$HOST" == *.dkr.ecr.*.amazonaws.com ]]; then
+            # An ECR token is good only for its own region's hosts.
+            REGION="${HOST#*.dkr.ecr.}"
+            REGION="${REGION%.amazonaws.com}"
+            if [ -n "$ECR_REGION" ] && [ "$ECR_REGION" != "$REGION" ]; then
+              fail "ECR registries in $ECR_REGION and $REGION: every ECR registry must be in one region"
+            fi
+            ECR_REGION="$REGION"
+            [[ " $ECR_HOSTS " == *" $HOST "* ]] || ECR_HOSTS="${ECR_HOSTS:+$ECR_HOSTS }$HOST"
+          elif [ -z "$PASSWORD_HOST" ] || [ "$PASSWORD_HOST" = "$HOST" ]; then
+            PASSWORD_HOST="$HOST"
+          else
+            fail "registries $PASSWORD_HOST and $HOST both need a password, but there is only one registry-password"
+          fi
+        done <<< "$URLS"
+        if [ -n "$PASSWORD_HOST" ] && [ -z "$REGISTRY_PASSWORD" ]; then
+          fail "registry $PASSWORD_HOST needs registry-password"
+        fi
+        if [ -n "$ECR_HOSTS" ] && [ -z "$AWS_ROLE_ARN" ]; then
+          fail "ECR registry $ECR_HOSTS needs aws-role-arn"
+        fi
+        if [ -z "$PASSWORD_HOST" ] && [ -n "$REGISTRY_PASSWORD" ]; then
+          echo "::notice::No registry here needs registry-password; skipping that login"
+        fi
+        if [ -z "$ECR_HOSTS" ] && [ -n "$AWS_ROLE_ARN" ]; then
+          echo "::notice::No registry here is ECR; skipping the aws-role-arn login"
+        fi
+        {
+          echo "password-host=$PASSWORD_HOST"
+          echo "ecr-hosts=$ECR_HOSTS"
+          echo "ecr-region=$ECR_REGION"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Registry login
+      if: steps.registry.outputs.password-host != ''
+      shell: bash
+      env:
+        HOST: ${{ steps.registry.outputs.password-host }}
         REGISTRY_USERNAME: ${{ inputs.registry-username }}
         REGISTRY_PASSWORD: ${{ inputs.registry-password }}
       run: |
         set -euo pipefail
-        URL="$(python3 -c '
-        import tomllib
-        with open("pipeline.toml", "rb") as fh:
-            print(tomllib.load(fh)["registry"]["url"])
-        ')"
-        HOST="${URL%%/*}"
         echo "Logging in to $HOST"
         printf '%s' "$REGISTRY_PASSWORD" | docker login "$HOST" \
           --username "$REGISTRY_USERNAME" --password-stdin
 
+    # The credentials go to the ECR login step alone, not to $GITHUB_ENV, so the
+    # push role does not leak into the caller's later steps.
+    - uses: aws-actions/configure-aws-credentials@v6
+      id: aws
+      if: steps.registry.outputs.ecr-hosts != ''
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ steps.registry.outputs.ecr-region }}
+        output-credentials: true
+        output-env-credentials: false
+
+    - name: ECR login
+      if: steps.registry.outputs.ecr-hosts != ''
+      shell: bash
+      # The login lands in ~/.docker/config.json like the password login, so
+      # buildx and tangier's regctl probe and copy all pick it up. One token
+      # serves every ECR host in the region.
+      env:
+        ECR_HOSTS: ${{ steps.registry.outputs.ecr-hosts }}
+        AWS_REGION: ${{ steps.registry.outputs.ecr-region }}
+        AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+        AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+      run: |
+        set -euo pipefail
+        TOKEN="$(aws ecr get-login-password --region "$AWS_REGION")"
+        echo "::add-mask::$TOKEN"
+        for HOST in $ECR_HOSTS; do
+          echo "Logging in to $HOST"
+          printf '%s' "$TOKEN" | docker login "$HOST" --username AWS --password-stdin
+        done
+
     - name: Build and push
       id: build
       shell: bash
-      # tangier probes the registry first and skips the build when the
-      # content-hash tag is already published — the idempotence that
-      # content-addressed tagging exists for. It emits `tag` and `built` to
-      # $GITHUB_OUTPUT itself, which is where this action's outputs come from.
+      # tangier probes every destination first: it skips the build when all
+      # have the content-hash tag, and copies it to any that lack it. It emits
+      # `tag` and `built` to $GITHUB_OUTPUT itself, which is where this action's
+      # outputs come from.
       #
       # `resolve_secrets` reads os.environ and drops any secret whose variable
       # is unset, so a caller supplies values through this step's `env:` and
@@ -134,9 +236,13 @@ runs:
       env:
         PACKAGE: ${{ inputs.package }}
         EXTRA_SECRETS: ${{ inputs.extra-secrets }}
+        MIRRORS: ${{ inputs.mirrors }}
       run: |
         set -euo pipefail
         ARGS=()
+        if [ "$MIRRORS" = "false" ]; then
+          ARGS+=(--no-mirrors)
+        fi
         for id in $EXTRA_SECRETS; do
           ARGS+=(--secret "id=$id")
         done

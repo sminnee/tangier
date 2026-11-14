@@ -120,6 +120,48 @@ On a pull request, the matrix holds the images the diff touched. On a push to `m
 `build-matrix --full`, which offers every image. Each leg skips a tag that is already published,
 so only the changed images build. The uat deploy then follows the build.
 
+For an Amazon ECR registry, log in with an IAM role instead of a password. Set `[registry] url` to
+the ECR host and namespace, such as `123456789012.dkr.ecr.ap-southeast-6.amazonaws.com/myapp`. Pass
+`aws-role-arn` in place of the secret. The build assumes the role through GitHub OIDC, so the
+calling job must grant `id-token: write`, as in the example below. The region comes from the host. Each image needs an ECR
+repository, `<namespace>/<bucket>`, before its first push, unless a repository creation template
+makes it on push. Leave tag immutability off, because `:latest` and `:buildcache` move.
+
+To move a repo to another registry without a cutover day, do it in `pipeline.toml`, in three
+steps. An older CLI rejects `mirrors`, so bump a pinned `tangier-version` first:
+
+| Stage | `[registry]` |
+| --- | --- |
+| 1. Old registry | `url = "registry.sminn.ee/tangerine"` |
+| 2. Both | `url = "registry.sminn.ee/tangerine"`, `mirrors = ["123456789012.dkr.ecr.ap-southeast-6.amazonaws.com/myapp"]` |
+| 3. New registry | `url = "123456789012.dkr.ecr.ap-southeast-6.amazonaws.com/myapp"` |
+
+The workflow does not change. Pass the password and the role from the start. The build
+logs in only to the registries `pipeline.toml` names, and skips a credential none of them needs.
+
+```yaml
+build:
+  needs: plan
+  if: needs.plan.outputs.build-packages-empty == 'false'
+  permissions:
+    contents: read
+    id-token: write
+  uses: sminnee/tangier/.github/workflows/build.yaml@v0
+  with:
+    packages: ${{ needs.plan.outputs.build-packages }}
+    aws-role-arn: arn:aws:iam::123456789012:role/ci/push-image
+    mirrors: ${{ github.event_name != 'pull_request' }}
+  secrets:
+    registry-password: ${{ secrets.REGISTRY_PASSWORD }}
+```
+
+At stage 2, each `main` build pushes to both registries. A tag that one registry already has is
+copied to the other, with no build, so one green `main` build fills the new registry with every
+current image. A role that trusts only `main` cannot log in from a PR, so PR builds pass
+`mirrors: false` and push to `url` alone. Nothing reads a mirror: compose files and deploys follow
+`url`. So before stage 3, let PR builds assume the role, and let the deploy targets pull from the
+new registry.
+
 ## The nightly
 
 The workflow also runs `on: schedule`. On that event the plan job sets `full=--full` and passes it
