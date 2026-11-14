@@ -717,9 +717,14 @@ def _kubectl_calls(runner) -> list[list[str]]:
     return [c for c in runner.calls if c[0] == "kubectl"]
 
 
+# Every variable a deploy of this config can set. Named, not matched by suffix:
+# the render env includes os.environ, and a runner may set any `*_VERSION`.
+SUBST_VARS = {f"{b}_{kind}" for b in ("CORE", "SCANNER") for kind in ("VERSION", "DIGEST")}
+
+
 def _subst(env) -> dict[str, str]:
-    """The version and digest variables a render or hook ran with."""
-    return {k: v for k, v in env.items() if k.endswith(("_VERSION", "_DIGEST"))}
+    """The version and digest variables a render ran with."""
+    return {k: v for k, v in env.items() if k in SUBST_VARS}
 
 
 class TestImageDigests(unittest.TestCase):
