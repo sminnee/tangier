@@ -162,6 +162,11 @@ current image. A role that trusts only `main` cannot log in from a PR, so PR bui
 `url`. So before stage 3, let PR builds assume the role, and let the deploy targets pull from the
 new registry.
 
+To run the build job in a GitHub Environment, pass `environment`, such as `environment: images`. A
+calling job cannot set `environment:` on a reusable workflow, so `build.yaml` sets it. The
+Environment's protection rules apply to every matrix leg, and an IAM role can trust that
+Environment alone. Empty, the default, means no Environment.
+
 ## The nightly
 
 The workflow also runs `on: schedule`. On that event the plan job sets `full=--full` and passes it
