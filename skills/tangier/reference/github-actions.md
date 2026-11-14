@@ -435,4 +435,11 @@ as `deploy`, so pinning `deploy` pins the tailnet connect too.
 | `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
 | `tangier-version` | PyPI latest | The CLI release to install. Pass the plan's resolved version. |
 | `tangier-ref` | `""` | Git ref to install the CLI from instead of PyPI, for testing an unreleased change. |
+| `registry-password` | `""` | Password for a non-ECR `[registry] url`, for the `[deploy] digests` lookup. Without it, no login. |
+| `registry-username` | `registry` | Registry user. Ignored for ECR. |
+| `aws-role-arn` | `""` | IAM role for an ECR `[registry] url`, for the `[deploy] digests` lookup. The job needs `id-token: write`, and the role must trust the deploy job's Environment. Without it, no login. |
+| `regctl-version` | `v0.6.1` | `regctl` release, installed on every run. |
+
+The deploy logs in to `[registry] url` only, never the mirrors. With no credential it skips the
+login, and with `digests` on the lookup then fails with a 401.
 

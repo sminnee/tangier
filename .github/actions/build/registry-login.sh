@@ -1,14 +1,17 @@
 #!/bin/bash
 # Log in to the password registry, and work out which ECR hosts ecr-login.sh
-# logs in to, for the build action. It runs this file, and the other scripts
-# here, from its own checkout, as with install-tangier.sh, so a caller who pins
-# the action gets the scripts at that same ref.
+# logs in to, for the build and deploy actions. Both actions run this file, and
+# the other scripts here, from their own checkout, as with install-tangier.sh,
+# so a caller who pins either action gets the scripts at that same ref.
 #
 # Reads:
 #   MIRRORS            `true` logs in to `[registry] mirrors` too, `false` to
 #                      `[registry] url` only.
 #   REGISTRY_USERNAME  and REGISTRY_PASSWORD, for the one non-ECR registry.
 #   AWS_ROLE_ARN       for the ECR registries, which must share one region.
+#   REQUIRE            `true` fails when a registry's credential is missing (the
+#                      build, which must push). `false` skips that host's login
+#                      instead (the deploy, which only reads).
 #
 # Writes `ecr-hosts` and `ecr-region` to $GITHUB_OUTPUT. ECR's login waits for
 # the role, which only a `uses:` step can assume.
@@ -22,6 +25,11 @@ fail() {
   echo "::error::$1"
   exit 1
 }
+REQUIRE="${REQUIRE:-true}"
+case "$REQUIRE" in
+  true | false) ;;
+  *) fail "REQUIRE must be true or false, not '$REQUIRE'" ;;
+esac
 ARGS=()
 case "${MIRRORS:-}" in
   true) ;;
@@ -51,12 +59,17 @@ while IFS= read -r URL; do
 done <<<"$URLS"
 
 if [ -n "$PASSWORD_HOST" ] && [ -z "${REGISTRY_PASSWORD:-}" ]; then
-  fail "registry $PASSWORD_HOST needs registry-password"
+  [ "$REQUIRE" = "true" ] && fail "registry $PASSWORD_HOST needs registry-password"
+  echo "::notice::No registry-password; not logging in to $PASSWORD_HOST"
+  PASSWORD_HOST=""
 elif [ -z "$PASSWORD_HOST" ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
   echo "::notice::No registry here needs registry-password; skipping that login"
 fi
 if [ -n "$ECR_HOSTS" ] && [ -z "${AWS_ROLE_ARN:-}" ]; then
-  fail "ECR registry $ECR_HOSTS needs aws-role-arn"
+  [ "$REQUIRE" = "true" ] && fail "ECR registry $ECR_HOSTS needs aws-role-arn"
+  echo "::notice::No aws-role-arn; not logging in to $ECR_HOSTS"
+  ECR_HOSTS=""
+  ECR_REGION=""
 elif [ -z "$ECR_HOSTS" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
   echo "::notice::No registry here is ECR; skipping the aws-role-arn login"
 fi

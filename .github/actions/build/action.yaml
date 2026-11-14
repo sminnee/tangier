@@ -112,6 +112,8 @@ runs:
         REGISTRY_PASSWORD: ${{ inputs.registry-password }}
         AWS_ROLE_ARN: ${{ inputs.aws-role-arn }}
         MIRRORS: ${{ inputs.mirrors }}
+        # The build must push, so a missing credential fails here.
+        REQUIRE: "true"
       run: bash "$GITHUB_ACTION_PATH/registry-login.sh"
 
     # The AWS keys go to the ECR login step alone, not to $GITHUB_ENV. The
