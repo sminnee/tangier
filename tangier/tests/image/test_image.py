@@ -31,6 +31,33 @@ def _spec(**kw) -> ImageSpec:
     return ImageSpec(dockerfile=kw.pop("dockerfile", "svc/Dockerfile"), **kw)
 
 
+def _cfg():
+    return make_config(
+        **{
+            "registry": {"url": "registry.example/ns"},
+            "image.svc": {"dockerfile": "svc/Dockerfile"},
+            "svc": {"paths": ["svc/**"], "sha": True},
+        }
+    )
+
+
+def _args(runner, **kw) -> argparse.Namespace:
+    """`image build`/`image exists` arguments, as the parser would hand them over."""
+    base = dict(
+        bucket="svc",
+        tag="abc1234567",
+        head="HEAD",
+        runner=runner,
+        push=False,
+        load=False,
+        force=False,
+        secret=[],
+        print=False,
+    )
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
 class TestBuildArgv(unittest.TestCase):
     def test_push_reproduces_the_build_github_command_line(self) -> None:
         # Argument order, the full cache-to string, the :latest tag and the
@@ -151,35 +178,11 @@ class TestParseImageTag(unittest.TestCase):
 
 
 class TestExistsAndSkip(unittest.TestCase):
-    def _cfg(self):
-        return make_config(
-            **{
-                "registry": {"url": "registry.example/ns"},
-                "image.svc": {"dockerfile": "svc/Dockerfile"},
-                "svc": {"paths": ["svc/**"], "sha": True},
-            }
-        )
-
-    def _args(self, runner, **kw) -> argparse.Namespace:
-        base = dict(
-            bucket="svc",
-            tag="abc1234567",
-            head="HEAD",
-            runner=runner,
-            push=False,
-            load=False,
-            force=False,
-            secret=[],
-            print=False,
-        )
-        base.update(kw)
-        return argparse.Namespace(**base)
-
     def test_exists_prints_exists_and_exits_0(self) -> None:
         runner = RecordingRunner({("regctl",): Result(0)})
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = image_cmds.cmd_exists(self._cfg(), self._args(runner))
+            rc = image_cmds.cmd_exists(_cfg(), _args(runner))
         self.assertEqual(rc, 0)
         self.assertEqual(buf.getvalue().strip(), "exists")
 
@@ -187,7 +190,7 @@ class TestExistsAndSkip(unittest.TestCase):
         runner = RecordingRunner({("regctl",): Result(1)})
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = image_cmds.cmd_exists(self._cfg(), self._args(runner))
+            rc = image_cmds.cmd_exists(_cfg(), _args(runner))
         self.assertEqual(rc, 1)
         self.assertEqual(buf.getvalue().strip(), "missing")
 
@@ -197,12 +200,12 @@ class TestExistsAndSkip(unittest.TestCase):
         runner = RecordingRunner()
         runner.missing.add("regctl")
         with self.assertRaises(ImageError):
-            _ = image_cmds.cmd_exists(self._cfg(), self._args(runner))
+            _ = image_cmds.cmd_exists(_cfg(), _args(runner))
 
     def test_probe_targets_the_computed_tag(self) -> None:
         runner = RecordingRunner({("regctl",): Result(0)})
         with contextlib.redirect_stdout(io.StringIO()):
-            _ = image_cmds.cmd_exists(self._cfg(), self._args(runner))
+            _ = image_cmds.cmd_exists(_cfg(), _args(runner))
         self.assertEqual(
             runner.calls[0],
             ["regctl", "manifest", "get", "--platform", "linux/amd64", "registry.example/ns/svc:abc1234567"],
@@ -212,7 +215,7 @@ class TestExistsAndSkip(unittest.TestCase):
         runner = RecordingRunner({("regctl",): Result(0)})
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = image_cmds.cmd_build(self._cfg(), self._args(runner, push=True))
+            rc = image_cmds.cmd_build(_cfg(), _args(runner, push=True))
         self.assertEqual(rc, 0)
         self.assertIn("already published", buf.getvalue())
         self.assertEqual(runner.commands(binary="docker"), [])
@@ -220,66 +223,42 @@ class TestExistsAndSkip(unittest.TestCase):
     def test_build_runs_when_missing(self) -> None:
         runner = RecordingRunner({("regctl",): Result(1)})
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = image_cmds.cmd_build(self._cfg(), self._args(runner, push=True))
+            rc = image_cmds.cmd_build(_cfg(), _args(runner, push=True))
         self.assertEqual(rc, 0)
         self.assertEqual(len(runner.commands(binary="docker")), 1)
 
     def test_force_builds_even_when_published(self) -> None:
         runner = RecordingRunner({("regctl",): Result(0)})
         with contextlib.redirect_stdout(io.StringIO()):
-            _ = image_cmds.cmd_build(self._cfg(), self._args(runner, push=True, force=True))
+            _ = image_cmds.cmd_build(_cfg(), _args(runner, push=True, force=True))
         self.assertEqual(len(runner.commands(binary="docker")), 1)
 
     def test_build_without_push_does_not_probe_the_registry(self) -> None:
         runner = RecordingRunner()
         with contextlib.redirect_stdout(io.StringIO()):
-            _ = image_cmds.cmd_build(self._cfg(), self._args(runner))
+            _ = image_cmds.cmd_build(_cfg(), _args(runner))
         self.assertEqual(runner.commands(binary="regctl"), [])
 
     def test_unbuildable_bucket_raises(self) -> None:
         cfg = make_config(**{"registry": {"url": "registry.example/ns"}, "svc": {"paths": ["svc/**"], "sha": True}})
         with self.assertRaises(ImageError) as ctx:
-            _ = image_cmds.cmd_build(cfg, self._args(RecordingRunner()))
+            _ = image_cmds.cmd_build(cfg, _args(RecordingRunner()))
         self.assertIn("not buildable", str(ctx.exception))
 
     def test_unknown_bucket_tag_raises(self) -> None:
         from tangier.image import tag_for
 
         with self.assertRaises(ImageError):
-            _ = tag_for(self._cfg(), "nope")
+            _ = tag_for(_cfg(), "nope")
 
 
 class TestBuildOutputs(unittest.TestCase):
     """`tag` and `built`, which the build action reads from $GITHUB_OUTPUT."""
 
-    def _cfg(self):
-        return make_config(
-            **{
-                "registry": {"url": "registry.example/ns"},
-                "image.svc": {"dockerfile": "svc/Dockerfile"},
-                "svc": {"paths": ["svc/**"], "sha": True},
-            }
-        )
-
-    def _args(self, runner, **kw) -> argparse.Namespace:
-        base = dict(
-            bucket="svc",
-            tag="abc1234567",
-            head="HEAD",
-            runner=runner,
-            push=True,
-            load=False,
-            force=False,
-            secret=[],
-            print=False,
-        )
-        base.update(kw)
-        return argparse.Namespace(**base)
-
     def _run(self, runner, **kw) -> str:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            self._rc = image_cmds.cmd_build(self._cfg(), self._args(runner, **kw))
+            self._rc = image_cmds.cmd_build(_cfg(), _args(runner, **{"push": True, **kw}))
         return buf.getvalue()
 
     def test_successful_build_emits_the_tag_and_built_true(self) -> None:
@@ -387,34 +366,15 @@ class TestStdoutContract(unittest.TestCase):
 
 
 class TestPrintIsADryRun(unittest.TestCase):
-    def _cfg(self):
-        return make_config(
-            **{
-                "registry": {"url": "registry.example/ns"},
-                "image.svc": {"dockerfile": "svc/Dockerfile"},
-                "svc": {"paths": ["svc/**"], "sha": True},
-            }
-        )
-
     def test_print_does_not_need_regctl(self) -> None:
         # --print is the dry run, so it must work on the machine least likely to
         # have a registry client.
         runner = RecordingRunner()
         runner.missing.add("regctl")
-        args = argparse.Namespace(
-            bucket="svc",
-            tag="abc1234567",
-            head="HEAD",
-            runner=runner,
-            push=True,
-            load=False,
-            force=False,
-            secret=[],
-            print=True,
-        )
+        args = _args(runner, push=True, print=True)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = image_cmds.cmd_build(self._cfg(), args)
+            rc = image_cmds.cmd_build(_cfg(), args)
         self.assertEqual(rc, 0)
         self.assertIn("docker buildx build", buf.getvalue())
         self.assertEqual(runner.calls, [])
