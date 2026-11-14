@@ -9,6 +9,8 @@ from tangier.github import emit_outputs
 from tangier.image import (
     ImageError,
     build_argv,
+    copy_argv,
+    destination_refs,
     exists_argv,
     image_ref,
     render_compose,
@@ -27,8 +29,8 @@ def cmd_tag(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def published(config: Config, runner: Runner, bucket: str, tag: str) -> bool:
-    """Whether `<bucket>:<tag>` is already in the registry.
+def published(runner: Runner, ref: str, tag: str) -> bool:
+    """Whether `<ref>:<tag>` is already in its registry.
 
     A missing `regctl` raises rather than reporting "missing". The old script
     printed `missing` when regctl was absent, which caused a rebuild-and-push of
@@ -37,7 +39,6 @@ def published(config: Config, runner: Runner, bucket: str, tag: str) -> bool:
     """
     if runner.which("regctl") is None:
         raise ImageError("regctl not found on PATH — cannot check whether the tag is published")
-    ref = image_ref(config, bucket)
     return runner.run(exists_argv(ref, tag)).ok
 
 
@@ -48,7 +49,7 @@ def cmd_exists(config: Config, args: argparse.Namespace) -> int:
     so migration is a path swap; new callers can branch on the exit code.
     """
     tag = args.tag or tag_for(config, args.bucket, args.head)
-    if published(config, _runner(args), args.bucket, tag):
+    if published(_runner(args), image_ref(config, args.bucket), tag):
         print("exists")
         return 0
     print("missing")
@@ -63,11 +64,13 @@ def cmd_build(config: Config, args: argparse.Namespace) -> int:
 
     runner = _runner(args)
     tag = args.tag or tag_for(config, args.bucket, args.head)
-    ref = image_ref(config, args.bucket)
+    # Mirrors are push destinations only: `--load` and a plain build have one ref.
+    refs = destination_refs(config, args.bucket, mirrors=args.push and not args.no_mirrors)
+    ref = refs[0]
 
     extra_secrets = [_normalise_secret(s) for s in (args.secret or [])]
     secrets = resolve_secrets(spec.secrets, extra_secrets)
-    argv = build_argv(spec, ref, tag, push=args.push, load=args.load, secrets=secrets)
+    argv = build_argv(spec, ref, tag, push=args.push, load=args.load, secrets=secrets, mirrors=refs[1:])
 
     # `--print` is a dry run, so it must not need a registry: probing first
     # would make it fail on exactly the machine most likely to want it. It
@@ -85,16 +88,35 @@ def cmd_build(config: Config, args: argparse.Namespace) -> int:
     #
     # Skip when the tag is already published: this idempotence is the whole
     # point of content-addressed tags, and losing it rebuilds every image.
-    if args.push and not args.force and published(config, runner, args.bucket, tag):
-        print(f"{ref}:{tag} already published; skipping build")
-        emit_outputs({"tag": tag, "built": "false"})
-        return 0
+    if args.push and not args.force:
+        have = [r for r in refs if published(runner, r, tag)]
+        if have:
+            return _fill_from(runner, have[0], [r for r in refs if r not in have], tag)
 
     result = runner.run(argv, capture=False)
     # A failed build still emits, with `built=false`; the step fails on the
     # returncode, and a downstream `if:` reading `built` sees the truth.
     emit_outputs({"tag": tag, "built": "true" if result.ok else "false"})
     return result.returncode
+
+
+def _fill_from(runner: Runner, src: str, missing: list[str], tag: str) -> int:
+    """Copy an already-published tag to each destination that lacks it, without a build.
+
+    This fills a mirror added after the tag was published, and catches up a
+    destination whose push failed. `:latest` stays where it is, as on a skip.
+    """
+    if not missing:
+        print(f"{src}:{tag} already published; skipping build")
+    rc = 0
+    for dst in missing:
+        print(f"{src}:{tag} already published; copying to {dst}")
+        result = runner.run(copy_argv(f"{src}:{tag}", f"{dst}:{tag}"), capture=False)
+        if not result.ok:
+            rc = result.returncode
+            break
+    emit_outputs({"tag": tag, "built": "false"})
+    return rc
 
 
 def cmd_compose(config: Config, args: argparse.Namespace) -> int:
@@ -134,6 +156,11 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     )
     _ = output.add_argument("--load", action="store_true", help="build for the local docker daemon (dev loop)")
     _ = bp.add_argument("--force", action="store_true", help="build even when the tag is already published")
+    _ = bp.add_argument(
+        "--no-mirrors",
+        action="store_true",
+        help="with --push: push to `[registry] url` only, not to `[registry] mirrors`",
+    )
     _ = bp.add_argument(
         "--secret",
         action="append",

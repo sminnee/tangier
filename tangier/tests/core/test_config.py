@@ -251,6 +251,33 @@ class TestRegistryAndImage(unittest.TestCase):
         cfg = parse_toml('[registry]\nurl = "reg.example/ns/"\n[a]\npaths = "a/**"\nsha = true\n')
         self.assertEqual(cfg.registry, "reg.example/ns")
 
+    def _mirrors(self, mirrors: str):
+        return parse_toml(f'[registry]\nurl = "reg.example/ns"\nmirrors = {mirrors}\n[a]\npaths = "a/**"\nsha = true\n')
+
+    def test_parses_mirrors_and_strips_trailing_slashes(self) -> None:
+        cfg = self._mirrors('["a.example/ns/", "b.example/ns"]')
+        self.assertEqual(cfg.registry_mirrors, ["a.example/ns", "b.example/ns"])
+
+    def test_mirrors_default_to_none(self) -> None:
+        cfg = parse_toml('[registry]\nurl = "reg.example/ns"\n[a]\npaths = "a/**"\nsha = true\n')
+        self.assertEqual(cfg.registry_mirrors, [])
+
+    def test_rejects_a_mirror_equal_to_url(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "repeats `url`"):
+            _ = self._mirrors('["reg.example/ns/"]')
+
+    def test_rejects_a_duplicate_mirror(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "twice"):
+            _ = self._mirrors('["m.example/ns", "m.example/ns"]')
+
+    def test_rejects_an_empty_mirror(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "empty"):
+            _ = self._mirrors('["/"]')
+
+    def test_rejects_mirrors_that_are_not_a_list(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "list of strings"):
+            _ = self._mirrors('"m.example/ns"')
+
     def test_parses_image_defaults(self) -> None:
         cfg = parse_toml('[image.a]\ndockerfile = "a/Dockerfile"\n[a]\npaths = "a/**"\nsha = true\n')
         spec = cfg.images["a"]

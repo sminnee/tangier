@@ -92,7 +92,8 @@ Content-addressed image tags and builds. A tag is the bucket's hash.
 
 | Flag | Meaning |
 | --- | --- |
-| `--push` | Push to the registry, use the registry cache, and also tag `:latest`. Skip the build when the tag is already published. |
+| `--push` | Push to `[registry] url` and every `[registry] mirrors` entry, use the registry cache, and also tag `:latest`. Skip the build when the tag is already published. |
+| `--no-mirrors` | With `--push`, push to `[registry] url` only. |
 | `--load` | Build into the local Docker daemon instead. Excludes `--push`. |
 | `--force` | Build even when the tag is already published. |
 | `--tag TAG` | Use this tag instead of the bucket's hash. |
@@ -100,8 +101,18 @@ Content-addressed image tags and builds. A tag is the bucket's hash.
 | `--secret id=<id>` | An extra buildx secret id. Passed only when its upper-cased variable is set. Repeats. |
 | `--print` | Print the command line and exit. Needs no registry. |
 
+With `--push`, `image build` probes every destination for the tag first:
+
+- Every one has it: skip.
+- Some have it: `regctl image copy` it from the first that has it to each that lacks it, with no
+  build. `:latest` does not move.
+- None has it: build once and push every tag to every destination. The cache is on `url` only.
+
+`--force` builds and pushes to every destination. `--print` shows the full command and probes
+nothing. `--load` ignores mirrors.
+
 `image build` emits `tag=<sha>` and `built=true|false` to stdout and `$GITHUB_OUTPUT`, except with
-`--print`. `built` is `false` when the build was skipped or failed.
+`--print`. `built` is `false` when the build was skipped, copied or failed.
 
 A bucket with no `[image.<bucket>]` exits 2.
 
