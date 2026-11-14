@@ -86,6 +86,7 @@ Content-addressed image tags and builds. A tag is the bucket's hash.
 | `image tag <bucket>` | `--head` | Print the bucket's tag. | 0, or 2 for an unknown bucket |
 | `image exists <bucket>` | `--tag`, `--head` | Print `exists` or `missing`. Needs `regctl`. | 0 exists, 1 missing, 2 no `regctl` |
 | `image build <bucket>` | see below | Run `docker buildx build`. | the build's exit code |
+| `image registries` | `--no-mirrors` | Print `[registry] url`, then each `[registry] mirrors` entry, one per line. `--no-mirrors` prints `url` only. The build action reads it to choose its logins. | 0 |
 | `image compose <template>` | `--head` | Print the template with each `[[bucket]]` replaced by `<registry>/<bucket>:<sha>`. | 0 |
 
 `image build` flags:

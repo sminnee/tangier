@@ -522,6 +522,26 @@ class TestMirrors(unittest.TestCase):
         self.assertIn(f"{MIRROR}:t", printed())
         self.assertNotIn(MIRROR, printed("--no-mirrors"))
 
+    # --- image registries -----------------------------------------------------
+
+    def _registries(self, cfg, **kw) -> list[str]:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(image_cmds.cmd_registries(cfg, argparse.Namespace(**{"no_mirrors": False, **kw})), 0)
+        return buf.getvalue().splitlines()
+
+    def test_registries_lists_url_then_each_mirror(self) -> None:
+        cfg = _cfg(("mirror.example/ns", "mirror2.example/ns"))
+        self.assertEqual(self._registries(cfg), ["registry.example/ns", "mirror.example/ns", "mirror2.example/ns"])
+
+    def test_registries_without_mirrors_lists_url_only(self) -> None:
+        self.assertEqual(self._registries(_cfg(("mirror.example/ns",)), no_mirrors=True), ["registry.example/ns"])
+
+    def test_registries_without_a_registry_raises(self) -> None:
+        cfg = make_config(**{"svc": {"paths": ["svc/**"], "sha": True}})
+        with self.assertRaises(ImageError):
+            _ = self._registries(cfg)
+
     # --- only `url` is read ---------------------------------------------------
 
     def test_exists_reads_the_primary_only(self) -> None:
