@@ -183,7 +183,7 @@ def _run_after_hook(runner: Runner, cfg: Config, env, version_vars: dict[str, st
     `${...}` alone rather than raising — a hook is a side errand, and a typo in
     one should not fail a deploy that has already rolled out.
     """
-    hook = cfg.after
+    hook = cfg.deploy.after
     if hook is None:
         return 0
     mapping = {"ENV": env.name, **version_vars}
@@ -205,7 +205,7 @@ def _wait_for_rollout(runner: Runner, cfg: Config, ns: str, targets: list[str]) 
     Elapsed time advances off the value handed to `runner.sleep`, never a real
     clock — so a 600s timeout costs microseconds under a fake runner.
     """
-    rollout = cfg.rollout
+    rollout = cfg.deploy.rollout
     elapsed = 0
     while elapsed < rollout.max_wait:
         if runner.run(["kubectl", "rollout", "status", *targets, "-n", ns, "--timeout=1s"]).ok:
@@ -263,7 +263,7 @@ def _rollback(
                     "kubectl",
                     "wait",
                     "--for=condition=complete",
-                    f"--timeout={cfg.rollout.rollback_migration_timeout}s",
+                    f"--timeout={cfg.deploy.rollout.rollback_migration_timeout}s",
                     f"job/{prior_job}",
                     "-n",
                     env.namespace,

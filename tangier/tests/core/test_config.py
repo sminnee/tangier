@@ -337,15 +337,15 @@ class TestK8sAndDeploy(unittest.TestCase):
                 ]
             )
         )
-        env = cfg.deploy_envs["uat"]
+        env = cfg.deploy.envs["uat"]
         self.assertEqual(env.namespace, "ns-uat")
         self.assertEqual(env.migration_version_bucket, "a")
-        self.assertEqual(cfg.rollout.max_wait, 900)
-        self.assertEqual(cfg.rollout.crash_threshold, 5)
+        self.assertEqual(cfg.deploy.rollout.max_wait, 900)
+        self.assertEqual(cfg.deploy.rollout.crash_threshold, 5)
         # Unset rollout keys keep their defaults.
-        self.assertEqual(cfg.rollout.poll_interval, 10)
+        self.assertEqual(cfg.deploy.rollout.poll_interval, 10)
         # `rollout` is not an environment.
-        self.assertNotIn("rollout", cfg.deploy_envs)
+        self.assertNotIn("rollout", cfg.deploy.envs)
 
     def test_deploy_env_requires_namespace_and_overlay(self) -> None:
         with self.assertRaises(ConfigError) as ctx:
@@ -415,27 +415,27 @@ class TestShaGlobWarning(unittest.TestCase):
 class TestAfterHook(unittest.TestCase):
     def test_string_shorthand_splits_and_defaults_to_non_fatal(self) -> None:
         cfg = parse_toml('[deploy]\nafter = "bin/sentry-release ${ENV}"\n')
-        self.assertEqual(cfg.after.argv, ["bin/sentry-release", "${ENV}"])
-        self.assertFalse(cfg.after.fatal)
+        self.assertEqual(cfg.deploy.after.argv, ["bin/sentry-release", "${ENV}"])
+        self.assertFalse(cfg.deploy.after.fatal)
 
     def test_explicit_table_form(self) -> None:
         cfg = parse_toml('[deploy.after]\ncmd = "bin/x"\nfatal = true\n')
-        self.assertEqual(cfg.after.argv, ["bin/x"])
-        self.assertTrue(cfg.after.fatal)
+        self.assertEqual(cfg.deploy.after.argv, ["bin/x"])
+        self.assertTrue(cfg.deploy.after.fatal)
 
     def test_absent_means_no_hook(self) -> None:
-        self.assertIsNone(parse_toml('[a]\npaths = "a/**"\n').after)
+        self.assertIsNone(parse_toml('[a]\npaths = "a/**"\n').deploy.after)
 
     def test_quoted_argument_survives_splitting(self) -> None:
         cfg = parse_toml("[deploy]\nafter = \"bin/notify 'a b'\"\n")
-        self.assertEqual(cfg.after.argv, ["bin/notify", "a b"])
+        self.assertEqual(cfg.deploy.after.argv, ["bin/notify", "a b"])
 
     def test_the_string_form_is_not_reported_as_a_malformed_table(self) -> None:
         # `_require_table` would say "`[deploy.after]` ... must be a table, got
         # str", which is both wrong and unactionable. Parsing `after` first is
         # what prevents that.
         cfg = parse_toml('[deploy]\nafter = "bin/x"\n')
-        self.assertEqual(cfg.after.argv, ["bin/x"])
+        self.assertEqual(cfg.deploy.after.argv, ["bin/x"])
 
     def test_shell_operator_is_rejected_at_parse_time(self) -> None:
         for op in ("&&", "||", "|", ";", ">", "&"):
@@ -456,11 +456,11 @@ class TestAfterHook(unittest.TestCase):
         # `&` here is a character in a value, not a backgrounding operator. No
         # shell ever sees it, so rejecting it would refuse a legitimate hook.
         cfg = parse_toml('[deploy]\nafter = "bin/notify --to=a&b"\n')
-        self.assertEqual(cfg.after.argv, ["bin/notify", "--to=a&b"])
+        self.assertEqual(cfg.deploy.after.argv, ["bin/notify", "--to=a&b"])
 
     def test_the_substitution_syntax_is_not_an_operator(self) -> None:
         cfg = parse_toml('[deploy]\nafter = "bin/x ${ENV}"\n')
-        self.assertEqual(cfg.after.argv, ["bin/x", "${ENV}"])
+        self.assertEqual(cfg.deploy.after.argv, ["bin/x", "${ENV}"])
 
     def test_empty_command_is_rejected(self) -> None:
         with self.assertRaises(ConfigError):
@@ -473,7 +473,7 @@ class TestAfterHook(unittest.TestCase):
 
     def test_after_does_not_become_a_deploy_environment(self) -> None:
         cfg = parse_toml('[deploy]\nafter = "bin/x"\n[deploy.uat]\nnamespace = "ns"\noverlay = "k8s/uat"\n')
-        self.assertEqual(sorted(cfg.deploy_envs), ["uat"])
+        self.assertEqual(sorted(cfg.deploy.envs), ["uat"])
 
 
 class TestTailnet(unittest.TestCase):
