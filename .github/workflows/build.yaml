@@ -16,6 +16,16 @@ on:
           Actions has no typed list input. `changemap build-matrix` emits it.
         required: true
         type: string
+      environment:
+        description: >-
+          GitHub Environment the build job runs in, such as `images`. Empty (the
+          default) means no Environment. A caller's job cannot set
+          `environment:` on a reusable workflow, so it is set here. The
+          Environment's protection rules, and any role trust keyed to it, then
+          apply to every matrix leg.
+        required: false
+        type: string
+        default: ""
       registry-username:
         description: Registry username. Defaults to `registry`.
         required: false
@@ -94,6 +104,7 @@ jobs:
     # array, so the comparison is against the JSON *string*.
     if: ${{ inputs.packages != '[]' && inputs.packages != '' }}
     runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.environment }}
     strategy:
       fail-fast: ${{ inputs.fail-fast }}
       matrix:

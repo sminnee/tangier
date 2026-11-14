@@ -47,6 +47,32 @@ inputs:
       change. Cannot be combined with `tangier-version`.
     required: false
     default: ""
+  registry-username:
+    description: >-
+      Username for the image registry, for the `[deploy] digests` lookup.
+      Defaults to `registry`.
+    required: false
+    default: registry
+  registry-password:
+    description: >-
+      Password for `[registry] url` when it is not Amazon ECR. Needed only with
+      `[deploy] digests = true`, which reads each image's digest from the
+      registry. Without it the deploy does not log in, and a registry that
+      needs a login fails the lookup with a 401.
+    required: false
+    default: ""
+  aws-role-arn:
+    description: >-
+      IAM role to assume through GitHub OIDC when `[registry] url` is Amazon
+      ECR, for the `[deploy] digests` lookup. The job needs
+      `permissions: id-token: write`, and the role must trust the deploy job's
+      Environment. Without it the deploy does not log in.
+    required: false
+    default: ""
+  regctl-version:
+    description: regctl release to install, for the `[deploy] digests` lookup. Pinned, never `latest`.
+    required: false
+    default: v0.6.1
 
 runs:
   using: composite
@@ -95,6 +121,50 @@ runs:
         INPUT_VERSION: ${{ inputs.tangier-version }}
         INPUT_REF: ${{ inputs.tangier-ref }}
       run: bash "$GITHUB_ACTION_PATH/../build/install-tangier.sh"
+
+    # regctl and the registry login serve `[deploy] digests`. Whether that is on
+    # is not cheap to tell here, so regctl installs every run. These steps run
+    # the build action's scripts.
+    - name: Install regctl
+      shell: bash
+      env:
+        REGCTL_VERSION: ${{ inputs.regctl-version }}
+      run: bash "$GITHUB_ACTION_PATH/../build/install-regctl.sh"
+
+    # A deploy reads `[registry] url` only, so mirrors are left out.
+    - name: Registry login
+      id: registry
+      if: inputs.registry-password != '' || inputs.aws-role-arn != ''
+      shell: bash
+      env:
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+        AWS_ROLE_ARN: ${{ inputs.aws-role-arn }}
+        MIRRORS: "false"
+        REQUIRE: "false"
+      run: bash "$GITHUB_ACTION_PATH/../build/registry-login.sh"
+
+    # The AWS keys go to the ECR login step alone, not to $GITHUB_ENV. The
+    # docker login it writes does stay for the rest of the job.
+    - uses: aws-actions/configure-aws-credentials@v6
+      id: aws
+      if: steps.registry.outputs.ecr-hosts != ''
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ steps.registry.outputs.ecr-region }}
+        output-credentials: true
+        output-env-credentials: false
+
+    - name: ECR login
+      if: steps.registry.outputs.ecr-hosts != ''
+      shell: bash
+      env:
+        ECR_HOSTS: ${{ steps.registry.outputs.ecr-hosts }}
+        AWS_REGION: ${{ steps.registry.outputs.ecr-region }}
+        AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+        AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+      run: bash "$GITHUB_ACTION_PATH/../build/ecr-login.sh"
 
     - name: Deploy
       shell: bash

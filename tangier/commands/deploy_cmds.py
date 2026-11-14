@@ -1,7 +1,7 @@
 """`tangier deploy ...` — render, apply in two passes, wait, and roll back on failure.
 
 Exit codes: 0 rolled out; 1 migration or rollout failure (rollback ran);
-2 unknown env, bad config, or missing kubectl.
+2 unknown env, bad config, missing kubectl, or a failed `[deploy] digests` lookup.
 """
 
 from __future__ import annotations
@@ -11,13 +11,14 @@ import os
 import string
 import sys
 
-from tangier.config import Config
+from tangier.config import Config, digest_var_for, version_var_for
 from tangier.deploy import (
     DeployError,
     deployed_versions,
     deployment_targets,
     envsubst_allowlist,
     find_crashing_pods,
+    image_digests,
     migration_job_name,
     prior_version,
     render_argv,
@@ -32,7 +33,13 @@ def _runner(args: argparse.Namespace) -> Runner:
     return getattr(args, "runner", None) or Subprocess()
 
 
-def _render(runner: Runner, cfg: Config, env, version_vars: dict[str, str]) -> str:
+def deploy_vars(runner: Runner, cfg: Config, head: str) -> dict[str, str]:
+    """Every variable a deploy substitutes: the version tags, plus the image digests when on."""
+    version_vars = versions(cfg, head)
+    return {**version_vars, **image_digests(runner, cfg, version_vars)}
+
+
+def _render(runner: Runner, cfg: Config, env, subst_vars: dict[str, str]) -> str:
     """Render the overlay once, with image tags substituted.
 
     Rendered ONCE and held in memory: that is what makes pass 2 byte-identical
@@ -49,7 +56,7 @@ def _render(runner: Runner, cfg: Config, env, version_vars: dict[str, str]) -> s
         # envsubst with an empty SHELL-FORMAT substitutes nothing, so every
         # ${VAR} would reach kubectl literally.
         raise DeployError("no SHA buckets in config: nothing to substitute into the manifests")
-    child_env = {**os.environ, **version_vars}
+    child_env = {**os.environ, **subst_vars}
     result = runner.pipe(render_argv(env, allowlist), env=child_env)
     if not result.ok:
         raise DeployError(f"failed to render {env.overlay}: {result.stderr.strip()}")
@@ -62,12 +69,12 @@ def cmd_render(config: Config, args: argparse.Namespace) -> int:
     """Print the manifests a deploy would apply — how a human debugs an allowlist miss."""
     env = resolve_env(config, args.env)
     runner = _runner(args)
-    print(_render(runner, config, env, versions(config, args.head)), end="")
+    print(_render(runner, config, env, deploy_vars(runner, config, args.head)), end="")
     return 0
 
 
 def cmd_versions(config: Config, args: argparse.Namespace) -> int:
-    for key, value in versions(config, args.head).items():
+    for key, value in deploy_vars(_runner(args), config, args.head).items():
         print(f"{key}={value}")
     return 0
 
@@ -112,7 +119,9 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
     if runner.which("kubectl") is None:
         raise DeployError("kubectl not found on PATH")
 
-    version_vars = versions(config, args.head)
+    # Before the summary or any kubectl call, so a tag with no image stops the
+    # deploy while nothing has been touched.
+    subst_vars = deploy_vars(runner, config, args.head)
     ns = env.namespace
     targets = deployment_targets(config)
 
@@ -126,13 +135,13 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
             print(table, end="")
 
     print(f"Deploying to {env.name} ({ns})...")
-    manifests = _render(runner, config, env, version_vars)
+    manifests = _render(runner, config, env, subst_vars)
 
     # Read the prior tag BEFORE applying anything — once pass 1 lands, this
     # reads the new tag. Empty on a first-ever deploy.
     prior = prior_version(runner, env, config)
 
-    job = migration_job_name(env, version_vars)
+    job = migration_job_name(env, subst_vars)
     if job:
         # Pass 1: the migration Job only.
         result = runner.run(["kubectl", "apply", "-f", "-", "-n", ns, "-l", "migrate-step=pre"], input=manifests)
@@ -168,14 +177,14 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
         print("All deployments rolled out successfully")
         # ONLY on success: cutting a release for a version that was just rolled
         # back is worse than not cutting one.
-        return _run_after_hook(runner, config, env, version_vars)
+        return _run_after_hook(runner, config, env, subst_vars)
 
     print("Rolling back")
-    _rollback(runner, config, env, version_vars, prior, targets)
+    _rollback(runner, config, env, subst_vars, prior, targets)
     return 1
 
 
-def _run_after_hook(runner: Runner, cfg: Config, env, version_vars: dict[str, str]) -> int:
+def _run_after_hook(runner: Runner, cfg: Config, env, subst_vars: dict[str, str]) -> int:
     """Run `[deploy] after`, if configured. Returns the deploy's exit code.
 
     The argv was split at parse time; each token is substituted here against
@@ -183,13 +192,13 @@ def _run_after_hook(runner: Runner, cfg: Config, env, version_vars: dict[str, st
     `${...}` alone rather than raising — a hook is a side errand, and a typo in
     one should not fail a deploy that has already rolled out.
     """
-    hook = cfg.after
+    hook = cfg.deploy.after
     if hook is None:
         return 0
-    mapping = {"ENV": env.name, **version_vars}
+    mapping = {"ENV": env.name, **subst_vars}
     argv = [string.Template(token).safe_substitute(mapping) for token in hook.argv]
     print(f"Running post-deploy hook: {' '.join(argv)}")
-    result = runner.run(argv, capture=False, env={**os.environ, **version_vars, "ENV": env.name})
+    result = runner.run(argv, capture=False, env={**os.environ, **subst_vars, "ENV": env.name})
     if result.ok:
         return 0
     if hook.fatal:
@@ -205,7 +214,7 @@ def _wait_for_rollout(runner: Runner, cfg: Config, ns: str, targets: list[str]) 
     Elapsed time advances off the value handed to `runner.sleep`, never a real
     clock — so a 600s timeout costs microseconds under a fake runner.
     """
-    rollout = cfg.rollout
+    rollout = cfg.deploy.rollout
     elapsed = 0
     while elapsed < rollout.max_wait:
         if runner.run(["kubectl", "rollout", "status", *targets, "-n", ns, "--timeout=1s"]).ok:
@@ -235,7 +244,7 @@ def _rollback(
     runner: Runner,
     cfg: Config,
     env,
-    version_vars: dict[str, str],
+    subst_vars: dict[str, str],
     prior: str,
     targets: list[str],
 ) -> None:
@@ -245,15 +254,12 @@ def _rollback(
     load-bearing for future data migrations tied to a schema version.
     """
     bucket = env.migration_version_bucket
-    if bucket and prior and prior != version_vars.get(_var_for(bucket), ""):
-        prior_job = migration_job_name(env, {**version_vars, _var_for(bucket): prior})
+    prior_vars = _prior_vars(runner, cfg, subst_vars, bucket, prior) if bucket and prior else None
+    if prior_vars is not None:
+        prior_job = migration_job_name(env, prior_vars)
         if prior_job:
             print(f"Running prior-tag migration {prior_job} before rollout undo")
             _ = runner.run(["kubectl", "delete", "job", prior_job, "-n", env.namespace, "--ignore-not-found"])
-            # A *copy* with the migration bucket's var replaced, so the prior
-            # version cannot leak into the outer dict — structurally, where the
-            # bash used a subshell.
-            prior_vars = {**version_vars, _var_for(bucket): prior}
             rendered = _render(runner, cfg, env, prior_vars)
             _ = runner.run(
                 ["kubectl", "apply", "-f", "-", "-n", env.namespace, "-l", "migrate-step=pre"], input=rendered
@@ -263,7 +269,7 @@ def _rollback(
                     "kubectl",
                     "wait",
                     "--for=condition=complete",
-                    f"--timeout={cfg.rollout.rollback_migration_timeout}s",
+                    f"--timeout={cfg.deploy.rollout.rollback_migration_timeout}s",
                     f"job/{prior_job}",
                     "-n",
                     env.namespace,
@@ -277,10 +283,27 @@ def _rollback(
         _ = runner.run(["kubectl", "rollout", "undo", target, "-n", env.namespace], capture=False)
 
 
-def _var_for(bucket: str) -> str:
-    from tangier.config import version_var_for
+def _prior_vars(
+    runner: Runner, cfg: Config, subst_vars: dict[str, str], bucket: str, prior: str
+) -> dict[str, str] | None:
+    """The deploy variables with the migration bucket set back to its prior tag.
 
-    return version_var_for(bucket)
+    None when there is nothing to re-run: the prior tag is the one being
+    deployed, or its digest cannot be resolved. The digest is replaced along
+    with the tag — keeping the new digest would make the kubelet pull the new
+    code under the old Job name.
+    """
+    var = version_var_for(bucket)
+    if prior == subst_vars.get(var, ""):
+        return None
+    prior_vars = {**subst_vars, var: prior}
+    if digest_var_for(bucket) in subst_vars:
+        try:
+            prior_vars |= image_digests(runner, cfg, prior_vars, only=[bucket])
+        except DeployError as e:
+            print(f"Prior-tag digest lookup failed; skipping prior-tag migration\n{e}", file=sys.stderr)
+            return None
+    return prior_vars
 
 
 def add_parsers(sub: argparse._SubParsersAction) -> None:

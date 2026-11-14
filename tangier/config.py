@@ -150,6 +150,17 @@ class AfterHook:
 
 
 @dataclass
+class DeploySettings:
+    """`[deploy]` — its environments, plus the keys every environment shares."""
+
+    envs: dict[str, DeployEnv] = field(default_factory=dict)
+    rollout: RolloutSettings = field(default_factory=RolloutSettings)
+    after: AfterHook | None = None
+    # `[deploy] digests`: resolve each image's tag to a digest before a deploy.
+    digests: bool = False
+
+
+@dataclass
 class TailnetEnv:
     """`[tailnet.<env>]` — the tailnet ACL tag a deploy to this env authenticates as."""
 
@@ -219,9 +230,7 @@ class Config:
     runners: dict[str, RunnerSpec] = field(default_factory=dict)
     images: dict[str, ImageSpec] = field(default_factory=dict)
     k8s: dict[str, K8sSpec] = field(default_factory=dict)
-    deploy_envs: dict[str, DeployEnv] = field(default_factory=dict)
-    rollout: RolloutSettings = field(default_factory=RolloutSettings)
-    after: AfterHook | None = None
+    deploy: DeploySettings = field(default_factory=DeploySettings)
     tailnet: TailnetSettings = field(default_factory=TailnetSettings)
     gates: dict[str, GateSpec] = field(default_factory=dict)
     # `[gate-set.<name>]`. See docs/specs/gate.md#gate-set-config.
@@ -430,16 +439,19 @@ def _parse_after(path: str, val: object) -> AfterHook:
     return AfterHook(argv=_split_command(path, "`[deploy] after`", cmd), fatal=fatal)
 
 
-def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv], RolloutSettings, AfterHook | None]:
-    envs: dict[str, DeployEnv] = {}
-    rollout = RolloutSettings()
-    after: AfterHook | None = None
+def _parse_deploy(path: str, body: dict[str, Any]) -> DeploySettings:
+    out = DeploySettings()
     for name, spec in body.items():
+        if name == "digests":
+            if not isinstance(spec, bool):
+                raise ConfigError(f"{path}: `[deploy] digests` must be a boolean")
+            out.digests = spec
+            continue
         # `after` first, BEFORE `_require_table`: its string shorthand is the
         # documented form, and `_require_table` would reject it with a message
         # that is both wrong and unactionable.
         if name == "after":
-            after = _parse_after(path, spec)
+            out.after = _parse_after(path, spec)
             continue
         spec = _require_table(path, f"deploy.{name}", spec)
         if name == "rollout":
@@ -449,7 +461,7 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv]
                 spec,
                 {"max_wait", "poll_interval", "crash_threshold", "rollback_migration_timeout"},
             )
-            rollout = RolloutSettings(
+            out.rollout = RolloutSettings(
                 max_wait=_as_int(path, "deploy.rollout", "max_wait", spec.get("max_wait", 600)),
                 poll_interval=_as_int(path, "deploy.rollout", "poll_interval", spec.get("poll_interval", 10)),
                 crash_threshold=_as_int(path, "deploy.rollout", "crash_threshold", spec.get("crash_threshold", 3)),
@@ -473,7 +485,7 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv]
         bucket = spec.get("migration_version_bucket")
         if bucket is not None and not isinstance(bucket, str):
             raise ConfigError(f"{path}: `[deploy.{name}].migration_version_bucket` must be a string")
-        envs[name] = DeployEnv(
+        out.envs[name] = DeployEnv(
             name=name,
             namespace=_as_str(path, f"deploy.{name}", "namespace", spec["namespace"]),
             overlay=_as_str(path, f"deploy.{name}", "overlay", spec["overlay"]),
@@ -481,7 +493,7 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> tuple[dict[str, DeployEnv]
             migration_job=migration_job,
             migration_version_bucket=bucket,
         )
-    return envs, rollout, after
+    return out
 
 
 # Each part of a gate name becomes part of a ref component
@@ -777,11 +789,11 @@ def _warn_tailnet_envs_without_deploy(cfg: Config, path: str) -> None:
     tailnet action, so an empty `[deploy]` means "not a deploying repo" rather
     than "every tailnet env is a typo".
     """
-    if not cfg.deploy_envs:
+    if not cfg.deploy.envs:
         return
     for name in sorted(cfg.tailnet.envs):
-        if name not in cfg.deploy_envs:
-            known = ", ".join(sorted(cfg.deploy_envs))
+        if name not in cfg.deploy.envs:
+            known = ", ".join(sorted(cfg.deploy.envs))
             print(
                 f"{path}: warning: `[tailnet.{name}]` names no deploy environment (known: {known})",
                 file=sys.stderr,
@@ -954,7 +966,20 @@ def version_var_for(bucket: str) -> str:
     `deploy`'s `export $(tangier changemap sha --all)` relies on, and what k8s
     manifests reference — it is a contract, not an implementation detail.
     """
-    return f"{bucket.upper().replace('-', '_')}_VERSION"
+    return f"{_var_stem(bucket)}_VERSION"
+
+
+def digest_var_for(bucket: str) -> str:
+    """The environment variable name carrying a bucket's image digest.
+
+    `astronort-lector` -> `ASTRONORT_LECTOR_DIGEST`, beside its `_VERSION`.
+    Only set when `[deploy] digests = true`.
+    """
+    return f"{_var_stem(bucket)}_DIGEST"
+
+
+def _var_stem(bucket: str) -> str:
+    return bucket.upper().replace("-", "_")
 
 
 def read_config(path: str) -> Config:
@@ -1001,7 +1026,7 @@ def read_config(path: str) -> Config:
         elif key == "k8s":
             cfg.k8s = _parse_k8s(path, table)
         elif key == "deploy":
-            cfg.deploy_envs, cfg.rollout, cfg.after = _parse_deploy(path, table)
+            cfg.deploy = _parse_deploy(path, table)
         elif key == "tailnet":
             cfg.tailnet = _parse_tailnet(path, table)
         elif key == "gate":
@@ -1029,6 +1054,8 @@ def read_config(path: str) -> Config:
                 raise ConfigError(f"{path}: `[{tag}].depends` references unknown tag `{dep}`")
     cfg.depends = raw_depends
     _check_no_cycles(cfg.depends, path)
+    if cfg.deploy.digests and not cfg.registry:
+        raise ConfigError(f"{path}: `[deploy] digests` needs `[registry] url` to look the digests up in")
     _derive(cfg, path)
     _warn_tags_without_input(cfg, path)
     _warn_tags_without_output(cfg, path)
