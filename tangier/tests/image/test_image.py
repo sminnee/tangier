@@ -31,10 +31,13 @@ def _spec(**kw) -> ImageSpec:
     return ImageSpec(dockerfile=kw.pop("dockerfile", "svc/Dockerfile"), **kw)
 
 
-def _cfg():
+def _cfg(mirrors: tuple[str, ...] = ()):
+    registry: dict[str, object] = {"url": "registry.example/ns"}
+    if mirrors:
+        registry["mirrors"] = list(mirrors)
     return make_config(
         **{
-            "registry": {"url": "registry.example/ns"},
+            "registry": registry,
             "image.svc": {"dockerfile": "svc/Dockerfile"},
             "svc": {"paths": ["svc/**"], "sha": True},
         }
@@ -51,6 +54,7 @@ def _args(runner, **kw) -> argparse.Namespace:
         push=False,
         load=False,
         force=False,
+        no_mirrors=False,
         secret=[],
         print=False,
     )
@@ -378,3 +382,156 @@ class TestPrintIsADryRun(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("docker buildx build", buf.getvalue())
         self.assertEqual(runner.calls, [])
+
+
+PRIMARY = "registry.example/ns/svc"
+MIRROR = "mirror.example/ns/svc"
+MIRROR_2 = "mirror2.example/ns/svc"
+
+
+def _probe(ref: str) -> tuple[str, ...]:
+    return ("regctl", "manifest", "get", "--platform", "linux/amd64", f"{ref}:abc1234567")
+
+
+def _copy(src: str, dst: str) -> list[str]:
+    return ["regctl", "image", "copy", f"{src}:abc1234567", f"{dst}:abc1234567"]
+
+
+class TestMirrors(unittest.TestCase):
+    """`[registry] mirrors`: every push destination gets the tag; only `url` is read."""
+
+    def _build(self, runner, mirrors=("mirror.example/ns",), **kw) -> int:
+        self.out = io.StringIO()
+        with contextlib.redirect_stdout(self.out):
+            return image_cmds.cmd_build(_cfg(mirrors), _args(runner, **{"push": True, **kw}))
+
+    def _copies(self, runner) -> list[list[str]]:
+        return [c for c in runner.calls if c[:3] == ["regctl", "image", "copy"]]
+
+    # --- build_argv ---------------------------------------------------------
+
+    def test_push_tags_every_destination_and_caches_on_the_primary_only(self) -> None:
+        argv = build_argv(_spec(), PRIMARY, "t", push=True, mirrors=[MIRROR])
+        self.assertEqual(
+            argv,
+            [
+                "docker",
+                "buildx",
+                "build",
+                "--cache-from",
+                f"type=registry,ref={PRIMARY}:buildcache",
+                "--cache-to",
+                f"type=registry,ref={PRIMARY}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true",
+                "--file",
+                "svc/Dockerfile",
+                "--tag",
+                f"{PRIMARY}:t",
+                "--tag",
+                f"{PRIMARY}:latest",
+                "--tag",
+                f"{MIRROR}:t",
+                "--tag",
+                f"{MIRROR}:latest",
+                "--output",
+                "type=registry",
+                "--build-arg",
+                "PACKAGE_VERSION=t",
+                ".",
+            ],
+        )
+
+    # --- cmd_build ----------------------------------------------------------
+
+    def test_all_published_skips_without_a_copy(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(0)})
+        self.assertEqual(self._build(runner), 0)
+        self.assertEqual(runner.commands(binary="docker"), [])
+        self.assertEqual(self._copies(runner), [])
+        self.assertIn("built=false", self.out.getvalue())
+
+    def test_a_mirror_missing_the_tag_is_copied_from_the_primary(self) -> None:
+        runner = RecordingRunner({_probe(PRIMARY): Result(0), _probe(MIRROR): Result(1)})
+        self.assertEqual(self._build(runner), 0)
+        self.assertEqual(runner.commands(binary="docker"), [])
+        self.assertEqual(self._copies(runner), [_copy(PRIMARY, MIRROR)])
+        self.assertIn("built=false", self.out.getvalue())
+
+    def test_a_primary_missing_the_tag_is_copied_from_the_mirror(self) -> None:
+        runner = RecordingRunner({_probe(PRIMARY): Result(1), _probe(MIRROR): Result(0)})
+        self.assertEqual(self._build(runner), 0)
+        self.assertEqual(self._copies(runner), [_copy(MIRROR, PRIMARY)])
+
+    def test_every_destination_missing_the_tag_gets_a_copy_from_the_first_that_has_it(self) -> None:
+        runner = RecordingRunner({_probe(PRIMARY): Result(1), _probe(MIRROR): Result(0), _probe(MIRROR_2): Result(1)})
+        self.assertEqual(self._build(runner, mirrors=("mirror.example/ns", "mirror2.example/ns")), 0)
+        self.assertEqual(self._copies(runner), [_copy(MIRROR, PRIMARY), _copy(MIRROR, MIRROR_2)])
+
+    def test_a_failed_copy_stops_and_exits_non_zero(self) -> None:
+        runner = RecordingRunner(
+            {
+                _probe(PRIMARY): Result(0),
+                _probe(MIRROR): Result(1),
+                _probe(MIRROR_2): Result(1),
+                ("regctl", "image", "copy"): Result(5),
+            }
+        )
+        self.assertEqual(self._build(runner, mirrors=("mirror.example/ns", "mirror2.example/ns")), 5)
+        self.assertEqual(self._copies(runner), [_copy(PRIMARY, MIRROR)])
+        self.assertIn("built=false", self.out.getvalue())
+
+    def test_none_published_builds_once_with_every_tag(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(1)})
+        self.assertEqual(self._build(runner), 0)
+        [docker] = runner.commands(binary="docker")
+        self.assertIn(f"{PRIMARY}:abc1234567", docker)
+        self.assertIn(f"{MIRROR}:latest", docker)
+        self.assertEqual(self._copies(runner), [])
+        self.assertIn("built=true", self.out.getvalue())
+
+    def test_no_mirrors_probes_and_tags_the_primary_only(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(1)})
+        _ = self._build(runner, no_mirrors=True)
+        self.assertEqual(runner.commands(binary="regctl"), [" ".join(_probe(PRIMARY))])
+        [docker] = runner.commands(binary="docker")
+        self.assertNotIn(MIRROR, docker)
+
+    def test_load_ignores_mirrors(self) -> None:
+        runner = RecordingRunner()
+        _ = self._build(runner, push=False, load=True)
+        [docker] = runner.commands(binary="docker")
+        self.assertNotIn(MIRROR, docker)
+
+    def test_the_no_mirrors_flag_reaches_the_build(self) -> None:
+        # Through the real parser, so the flag and the attribute cmd_build reads agree.
+        from tangier import cli
+
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+            _ = fh.write(
+                '[registry]\nurl = "registry.example/ns"\nmirrors = ["mirror.example/ns"]\n'
+                '[image.svc]\ndockerfile = "svc/Dockerfile"\n[svc]\npaths = ["svc/**"]\nsha = true\n'
+            )
+        self.addCleanup(os.unlink, fh.name)
+
+        def printed(*flags: str) -> str:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.main(["--config", fh.name, "image", "build", "svc", "--tag", "t", "--push", "--print", *flags])
+            self.assertEqual(rc, 0)
+            return buf.getvalue()
+
+        self.assertIn(f"{MIRROR}:t", printed())
+        self.assertNotIn(MIRROR, printed("--no-mirrors"))
+
+    # --- only `url` is read ---------------------------------------------------
+
+    def test_exists_reads_the_primary_only(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(0)})
+        with contextlib.redirect_stdout(io.StringIO()):
+            _ = image_cmds.cmd_exists(_cfg(("mirror.example/ns",)), _args(runner))
+        self.assertEqual(runner.calls, [list(_probe(PRIMARY))])
+
+    def test_compose_reads_the_primary_only(self) -> None:
+        from tangier import image as image_mod
+
+        with unittest.mock.patch.object(image_mod, "sha_for_bucket", return_value="v1"):
+            self.assertEqual(render_compose(_cfg(("mirror.example/ns",)), "x: [[svc]]"), f"x: {PRIMARY}:v1")

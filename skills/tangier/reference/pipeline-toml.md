@@ -77,6 +77,11 @@ table name is its output name and its placeholder name: `unittest-files=` and `{
 | Key | Meaning |
 | --- | --- |
 | `url` | Required. Registry host and namespace, such as `registry.example.com/myorg`. An image is `<url>/<bucket>:<sha>`. |
+| `mirrors` | Optional list of more registries, in the same form. `image build --push` pushes each image to every one as well as to `url`. Must not repeat `url` or each other. |
+
+Only `url` is read. `image exists`, `image compose`, deploys and the build cache use it alone, and
+a mirror is a write-only copy. To move registries, see [github-actions.md](github-actions.md). A CLI
+older than `mirrors` rejects the key, so bump `tangier-version` with it.
 
 ## `[runners]`
 

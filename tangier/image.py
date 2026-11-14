@@ -25,6 +25,17 @@ def image_ref(cfg: Config, bucket: str) -> str:
     return f"{cfg.registry}/{bucket}"
 
 
+def destination_refs(cfg: Config, bucket: str, *, mirrors: bool = True) -> list[str]:
+    """Every registry path a pushed image goes to: the primary first, then each mirror.
+
+    Only the primary is ever read from. A mirror is a write-only copy.
+    """
+    primary = image_ref(cfg, bucket)
+    if not mirrors:
+        return [primary]
+    return [primary, *(f"{mirror}/{bucket}" for mirror in cfg.registry_mirrors)]
+
+
 def tag_for(cfg: Config, bucket: str, head: str = "HEAD") -> str:
     """The content hash that tags this bucket's image."""
     if bucket not in buckets(cfg):
@@ -96,6 +107,7 @@ def build_argv(
     push: bool = False,
     load: bool = False,
     secrets: list[SecretArg] | None = None,
+    mirrors: list[str] | None = None,
 ) -> list[str]:
     """Render the `docker buildx build` command line.
 
@@ -109,6 +121,9 @@ def build_argv(
       Dockerfile turns into its Sentry release identifier.
     - also tagging `:latest` when pushing a non-latest tag.
     - both `--output` forms: `type=registry` pushes, `type=image,name=...` does not.
+
+    A push also tags each of `mirrors` (`:tag` and `:latest`), so one buildx run
+    publishes to every registry. The cache lives on `ref`, the primary, only.
 
     The build context is always the repo root. `code-path` in the old workflows
     was a *dockerfile prefix*, not a context — modelling it as a context breaks
@@ -134,9 +149,11 @@ def build_argv(
     for secret in secrets or []:
         argv += ["--secret", f"id={secret.id},env={secret.env}"]
 
-    argv += ["--file", spec.dockerfile, "--tag", f"{ref}:{tag}"]
-    if push and tag != "latest":
-        argv += ["--tag", f"{ref}:latest"]
+    argv += ["--file", spec.dockerfile]
+    for dest in [ref, *(mirrors or [])] if push else [ref]:
+        argv += ["--tag", f"{dest}:{tag}"]
+        if push and tag != "latest":
+            argv += ["--tag", f"{dest}:latest"]
 
     if not load:
         argv += ["--output", "type=registry" if push else f"type=image,name={ref}"]
@@ -152,6 +169,11 @@ def build_argv(
 def exists_argv(ref: str, tag: str, platform: str = "linux/amd64") -> list[str]:
     """The `regctl` probe for whether a tag is already published."""
     return ["regctl", "manifest", "get", "--platform", platform, f"{ref}:{tag}"]
+
+
+def copy_argv(src: str, dst: str) -> list[str]:
+    """The `regctl` copy of a published image (every platform) to another registry."""
+    return ["regctl", "image", "copy", src, dst]
 
 
 def render_compose(cfg: Config, template: str, head: str = "HEAD") -> str:

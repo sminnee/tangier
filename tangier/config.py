@@ -214,6 +214,8 @@ class Config:
 
     sha: ShaSettings = field(default_factory=ShaSettings)
     registry: str = ""
+    # `[registry] mirrors`: push-only. See `image.destination_refs`.
+    registry_mirrors: list[str] = field(default_factory=list)
     runners: dict[str, RunnerSpec] = field(default_factory=dict)
     images: dict[str, ImageSpec] = field(default_factory=dict)
     k8s: dict[str, K8sSpec] = field(default_factory=dict)
@@ -289,11 +291,24 @@ def _parse_sha(path: str, body: dict[str, Any]) -> ShaSettings:
     return ShaSettings(exclude=_coerce_str_or_list(path, "sha", "exclude", body["exclude"]))
 
 
-def _parse_registry(path: str, body: dict[str, Any]) -> str:
-    _check_keys(path, "registry", body, {"url"})
+def _parse_registry(path: str, body: dict[str, Any]) -> tuple[str, list[str]]:
+    _check_keys(path, "registry", body, {"url", "mirrors"})
     if "url" not in body:
         raise ConfigError(f"{path}: `[registry]` requires `url`")
-    return _as_str(path, "registry", "url", body["url"]).rstrip("/")
+    url = _as_str(path, "registry", "url", body["url"]).rstrip("/")
+    raw = body.get("mirrors", [])
+    if not isinstance(raw, list) or not all(isinstance(m, str) for m in raw):
+        raise ConfigError(f"{path}: `[registry].mirrors` must be a list of strings")
+    mirrors: list[str] = []
+    for mirror in (m.rstrip("/") for m in raw):
+        if not mirror:
+            raise ConfigError(f"{path}: `[registry].mirrors` has an empty entry")
+        if mirror == url:
+            raise ConfigError(f"{path}: `[registry].mirrors` repeats `url` ({mirror})")
+        if mirror in mirrors:
+            raise ConfigError(f"{path}: `[registry].mirrors` lists {mirror} twice")
+        mirrors.append(mirror)
+    return url, mirrors
 
 
 def _parse_runners(path: str, body: dict[str, Any]) -> dict[str, RunnerSpec]:
@@ -978,7 +993,7 @@ def read_config(path: str) -> Config:
         elif key == "sha":
             cfg.sha = _parse_sha(path, table)
         elif key == "registry":
-            cfg.registry = _parse_registry(path, table)
+            cfg.registry, cfg.registry_mirrors = _parse_registry(path, table)
         elif key == "runners":
             cfg.runners = _parse_runners(path, table)
         elif key == "image":

@@ -73,9 +73,12 @@ tangier image build astrochat --load  # build into the local Docker daemon
 tangier image build astrochat --print # print the docker command only
 ```
 
-`image build --push` first asks the registry whether the tag exists. When it does, the build is
-skipped. This is what makes a "build everything" step cheap: only the images whose content changed
+`image build --push` first asks each registry whether the tag exists. When all have it, the build
+is skipped. This is what makes a "build everything" step cheap: only the images whose content changed
 do any work.
+
+`[registry] mirrors` lists more registries that each image is pushed to as well. Only `url` is read
+from. [Builds](5-github-actions.md#builds) shows how to move registries with it.
 
 `tangier changemap build-matrix` lists the buckets a diff touches that have an `[image.*]` table,
 as a JSON array for a CI matrix. A bucket reached only through `depends` is included, because its
