@@ -33,9 +33,9 @@ def resolve_env(cfg: Config, name: str) -> DeployEnv:
     argument but `prod` as uat, so a one-character workflow typo silently
     retargeted an environment *and succeeded*.
     """
-    env = cfg.deploy_envs.get(name)
+    env = cfg.deploy.envs.get(name)
     if env is None:
-        known = ", ".join(sorted(cfg.deploy_envs)) or "(none configured)"
+        known = ", ".join(sorted(cfg.deploy.envs)) or "(none configured)"
         raise DeployError(f"unknown environment: {name} (known: {known})")
     return env
 
