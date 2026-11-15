@@ -45,10 +45,10 @@ def versions(cfg: Config, head: str = "HEAD") -> dict[str, str]:
     return {version_var_for(b): sha_for_bucket(cfg, b, head) for b in sorted(buckets(cfg))}
 
 
-def envsubst_allowlist(cfg: Config) -> str:
-    """The `envsubst` variable allowlist, derived from config.
+def envsubst_allowlist(cfg: Config, env: DeployEnv) -> str:
+    """The `envsubst` variable allowlist for `env`, derived from config.
 
-    Every bucket's version variable, sorted. envsubst treats it as a set, so the
+    Every bucket's version variable, plus the names in `env`'s `vars`, sorted. envsubst treats it as a set, so the
     order is cosmetic — sorted just makes it diffable. Deriving it removes the
     hand-maintained duplicate that had to be edited in two places whenever a
     service was added.
@@ -60,6 +60,7 @@ def envsubst_allowlist(cfg: Config) -> str:
     names = [version_var_for(b) for b in buckets(cfg)]
     if cfg.deploy.digests:
         names += [digest_var_for(b) for b in cfg.images]
+    names += env.vars
     return " ".join(f"${name}" for name in sorted(names))
 
 

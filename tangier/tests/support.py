@@ -42,6 +42,8 @@ def _toml_value(val: Any) -> str:
         return f'"{val}"'
     if isinstance(val, list):
         return "[" + ", ".join(_toml_value(v) for v in val) + "]"
+    if isinstance(val, dict):
+        return "{ " + ", ".join(f'"{k}" = {_toml_value(v)}' for k, v in val.items()) + " }"
     raise TypeError(f"unsupported TOML value: {val!r}")
 
 

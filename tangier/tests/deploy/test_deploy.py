@@ -55,6 +55,10 @@ def _cfg(**overrides):
     return make_config(**tables)
 
 
+def _uat(cfg):
+    return resolve_env(cfg, "uat")
+
+
 def _args(runner, env="uat", **kw) -> argparse.Namespace:
     base = dict(env=env, head="HEAD", runner=runner, render=None, versions=None, compare_env=None, summary=False)
     base.update(kw)
@@ -117,7 +121,7 @@ class TestResolveEnv(unittest.TestCase):
 class TestDerivation(unittest.TestCase):
     def test_allowlist_is_derived_and_sorted(self) -> None:
         # Derived from config rather than hand-maintained in two places.
-        self.assertEqual(envsubst_allowlist(_cfg()), "$CORE_VERSION $SCANNER_VERSION")
+        self.assertEqual(envsubst_allowlist(_cfg(), _uat(_cfg())), "$CORE_VERSION $SCANNER_VERSION")
 
     def test_deployment_targets_expand_one_to_many(self) -> None:
         self.assertEqual(
@@ -730,17 +734,18 @@ def _subst(env) -> dict[str, str]:
 class TestImageDigests(unittest.TestCase):
     def test_allowlist_lists_the_digest_vars_only_when_on(self) -> None:
         self.assertEqual(
-            envsubst_allowlist(_digest_cfg()),
+            envsubst_allowlist(_digest_cfg(), _uat(_digest_cfg())),
             "$CORE_DIGEST $CORE_VERSION $SCANNER_DIGEST $SCANNER_VERSION",
         )
         # Off, a stray `${X_DIGEST}` reaches kubectl literally and fails visibly.
-        self.assertEqual(envsubst_allowlist(_digest_cfg(digests=False)), "$CORE_VERSION $SCANNER_VERSION")
+        off = _digest_cfg(digests=False)
+        self.assertEqual(envsubst_allowlist(off, _uat(off)), "$CORE_VERSION $SCANNER_VERSION")
 
     def test_only_buckets_with_an_image_get_a_digest(self) -> None:
         # A bucket with no `[image]` table hashes but is never pushed, so it has
         # no digest to look up.
         cfg = _digest_cfg(images={"image.core": IMAGE_TABLES["image.core"]})
-        self.assertEqual(envsubst_allowlist(cfg), "$CORE_DIGEST $CORE_VERSION $SCANNER_VERSION")
+        self.assertEqual(envsubst_allowlist(cfg, _uat(cfg)), "$CORE_DIGEST $CORE_VERSION $SCANNER_VERSION")
         runner = RecordingRunner({**OK_RESPONSES, **DIGEST_RESPONSES})
         rc, _out = _run(cfg, runner)
         self.assertEqual(rc, 0)
@@ -884,3 +889,81 @@ class TestImageDigestRollback(unittest.TestCase):
         self.assertIn("core-migrate-v1", out)
         self.assertEqual([c for c in runner.calls if c[0] == "regctl"], [list(SCANNER_DIGEST)])
         self.assertEqual(_subst(runner.pipe_envs[1])["CORE_VERSION"], "v1")
+
+
+# `[deploy.<env>] vars`: per-env values substituted beside the version variables.
+VARS_UAT = {
+    **CONFIG_TABLES["deploy.uat"],
+    "migration_job": "core-migrate-${APP_HOST}-${CORE_VERSION}",
+    "vars": {"APP_HOST": "uat2.example", "CDN_HOST": ""},
+}
+
+
+def _vars_cfg(**overrides):
+    return _cfg(**{"deploy.uat": VARS_UAT, **overrides})
+
+
+def _var_env(env) -> dict[str, str]:
+    return {k: v for k, v in env.items() if k in ("APP_HOST", "CDN_HOST", "CORE_VERSION")}
+
+
+class TestEnvVars(unittest.TestCase):
+    def test_allowlist_lists_the_env_vars(self) -> None:
+        cfg = _vars_cfg()
+        self.assertEqual(envsubst_allowlist(cfg, _uat(cfg)), "$APP_HOST $CDN_HOST $CORE_VERSION $SCANNER_VERSION")
+        # Another env's vars stay out of this env's render.
+        self.assertEqual(envsubst_allowlist(cfg, resolve_env(cfg, "prod")), "$CORE_VERSION $SCANNER_VERSION")
+
+    def test_render_env_carries_the_vars_including_an_empty_one(self) -> None:
+        runner = RecordingRunner(OK_RESPONSES)
+        rc, _out = _run(_vars_cfg(), runner)
+        self.assertEqual(rc, 0)
+        # `""` is set, not dropped, so envsubst writes an empty value.
+        self.assertEqual(
+            _var_env(runner.pipe_envs[0]), {"APP_HOST": "uat2.example", "CDN_HOST": "", "CORE_VERSION": "v2"}
+        )
+
+    def test_migration_job_name_substitutes_a_var(self) -> None:
+        runner = RecordingRunner(OK_RESPONSES)
+        _rc, out = _run(_vars_cfg(), runner)
+        self.assertIn("core-migrate-uat2.example-v2", out)
+
+    def test_after_hook_gets_the_vars(self) -> None:
+        cfg = _vars_cfg(deploy={"after": "bin/notify ${ENV} ${APP_HOST}"})
+        runner = RecordingRunner(OK_RESPONSES)
+        rc, _out = _run(cfg, runner)
+        self.assertEqual(rc, 0)
+        self.assertIn(["bin/notify", "uat", "uat2.example"], runner.calls)
+        # The hook is the only call run with `ENV` set.
+        hook_env = next(e for e in runner.envs if e and "ENV" in e)
+        self.assertEqual(
+            _var_env(hook_env) | {"ENV": hook_env["ENV"]},
+            {"APP_HOST": "uat2.example", "CDN_HOST": "", "CORE_VERSION": "v2", "ENV": "uat"},
+        )
+
+    def test_prior_render_keeps_the_vars(self) -> None:
+        runner = RecordingRunner(
+            {
+                **OK_RESPONSES,
+                ("kubectl", "rollout", "status"): Result(1),
+                ("kubectl", "get", "deployment"): Result(0, "registry.example/ns/core:v1"),
+            }
+        )
+        _rc, out = _run(_vars_cfg(), runner)
+        self.assertIn("core-migrate-uat2.example-v1", out)
+        self.assertEqual(len(runner.pipe_envs), 2)
+        self.assertEqual(
+            _var_env(runner.pipe_envs[1]), {"APP_HOST": "uat2.example", "CDN_HOST": "", "CORE_VERSION": "v1"}
+        )
+
+    def test_versions_prints_the_vars(self) -> None:
+        buf = io.StringIO()
+        with (
+            contextlib.redirect_stdout(buf),
+            unittest.mock.patch.object(deploy_mod, "sha_for_bucket", return_value="v2"),
+        ):
+            rc = deploy_cmds._dispatch(_vars_cfg(), _args(RecordingRunner(), env=None, versions="uat"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            buf.getvalue().splitlines(), ["APP_HOST=uat2.example", "CDN_HOST=", "CORE_VERSION=v2", "SCANNER_VERSION=v2"]
+        )
