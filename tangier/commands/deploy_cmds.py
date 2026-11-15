@@ -25,6 +25,7 @@ from tangier.deploy import (
     image_digests,
     job_outcome,
     migration_job_name,
+    pods_matching,
     prior_version,
     render_argv,
     resolve_env,
@@ -33,6 +34,7 @@ from tangier.deploy import (
 from tangier.github import write_summary
 from tangier.manifests import (
     PASS_ONE_SELECTOR,
+    deployment_selectors,
     inspect_argv,
     parse_objects,
     pass_one,
@@ -182,7 +184,7 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
     if not result.ok:
         print(f"kubectl apply (pass 2) returned {result.returncode}", file=sys.stderr)
 
-    if _wait_for_rollout(runner, config, ns, targets):
+    if _wait_for_rollout(runner, config, ns, targets, _target_selectors(objects, targets, ns)):
         print("All deployments rolled out successfully")
         # ONLY on success: cutting a release for a version that was just rolled
         # back is worse than not cutting one.
@@ -210,6 +212,23 @@ def _inspect(runner: Runner, manifests: str) -> tuple[list[dict], list[str]]:
     if len(docs) != len(objects):
         raise DeployError(f"the render has {len(docs)} YAML documents but kubectl read {len(objects)} objects")
     return objects, docs
+
+
+def _target_selectors(objects: list[dict], targets: list[str], ns: str) -> list[dict]:
+    """The pod selector of each target Deployment, from the render.
+
+    A target the render lacks has no selector, so the rollout's pod checks
+    cannot see its pods. Said once here rather than silently.
+    """
+    names = [t.removeprefix("deployment/") for t in targets]
+    found = deployment_selectors(objects, names, ns)
+    for name in names:
+        if name not in found:
+            print(
+                f"warning: deployment/{name} is not in the render; crash and stuck detection skip its pods",
+                file=sys.stderr,
+            )
+    return list(found.values())
 
 
 def _report_stuck(problems: list[PodProblem]) -> None:
@@ -285,8 +304,11 @@ def _run_after_hook(runner: Runner, cfg: Config, env, subst_vars: dict[str, str]
     return 0
 
 
-def _wait_for_rollout(runner: Runner, cfg: Config, ns: str, targets: list[str]) -> bool:
+def _wait_for_rollout(runner: Runner, cfg: Config, ns: str, targets: list[str], selectors: list[dict]) -> bool:
     """Poll until rolled out, crash-looping, stuck, or timed out.
+
+    The crash and stuck checks look only at pods the targets' `selectors`
+    match, so another app's broken pod in the namespace cannot roll this one back.
 
     Elapsed time advances off the value handed to `runner.sleep`, never a real
     clock — so a 600s timeout costs microseconds under a fake runner.
@@ -303,14 +325,15 @@ def _wait_for_rollout(runner: Runner, cfg: Config, ns: str, targets: list[str]) 
             # Detection is off for this tick; say so rather than silently
             # burning the whole timeout on a rollout that is already crashing.
             print(f"warning: could not list pods (exit {pods.returncode}); crash detection degraded", file=sys.stderr)
-        crashing = find_crashing_pods(pods.stdout, rollout.crash_threshold)
+        scoped = pods_matching(pods.stdout, selectors)
+        crashing = find_crashing_pods(scoped, rollout.crash_threshold)
         if crashing:
             print("Crash-looping pods detected:")
             for p in crashing:
                 print(f"  {p.pod} ({p.container}): {p.reason}, {p.restarts} restarts")
             _ = runner.run(["kubectl", "get", "pods", "-n", ns], capture=False)
             return False
-        problems = stuck.observe(pods.stdout, elapsed) if pods.ok else []
+        problems = stuck.observe(scoped, elapsed) if pods.ok else []
         if problems:
             _report_stuck(problems)
             return False
