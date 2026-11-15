@@ -11,7 +11,7 @@ import os
 import string
 import sys
 
-from tangier.config import Config, digest_var_for, version_var_for
+from tangier.config import Config, DeployEnv, digest_var_for, version_var_for
 from tangier.deploy import (
     DeployError,
     deployed_versions,
@@ -33,10 +33,10 @@ def _runner(args: argparse.Namespace) -> Runner:
     return getattr(args, "runner", None) or Subprocess()
 
 
-def deploy_vars(runner: Runner, cfg: Config, head: str) -> dict[str, str]:
-    """Every variable a deploy substitutes: the version tags, plus the image digests when on."""
+def deploy_vars(runner: Runner, cfg: Config, env: DeployEnv, head: str) -> dict[str, str]:
+    """Every variable a deploy to `env` substitutes: its `vars`, the version tags, and the image digests when on."""
     version_vars = versions(cfg, head)
-    return {**version_vars, **image_digests(runner, cfg, version_vars)}
+    return {**env.vars, **version_vars, **image_digests(runner, cfg, version_vars)}
 
 
 def _render(runner: Runner, cfg: Config, env, subst_vars: dict[str, str]) -> str:
@@ -51,7 +51,7 @@ def _render(runner: Runner, cfg: Config, env, subst_vars: dict[str, str]) -> str
     exits 0 through `envsubst` — and empty manifests would then be applied,
     ignored per the no-`set -e` rule, and reported as a successful deploy.
     """
-    allowlist = envsubst_allowlist(cfg)
+    allowlist = envsubst_allowlist(cfg, env)
     if not allowlist:
         # envsubst with an empty SHELL-FORMAT substitutes nothing, so every
         # ${VAR} would reach kubectl literally.
@@ -69,12 +69,13 @@ def cmd_render(config: Config, args: argparse.Namespace) -> int:
     """Print the manifests a deploy would apply — how a human debugs an allowlist miss."""
     env = resolve_env(config, args.env)
     runner = _runner(args)
-    print(_render(runner, config, env, deploy_vars(runner, config, args.head)), end="")
+    print(_render(runner, config, env, deploy_vars(runner, config, env, args.head)), end="")
     return 0
 
 
 def cmd_versions(config: Config, args: argparse.Namespace) -> int:
-    for key, value in deploy_vars(_runner(args), config, args.head).items():
+    env = resolve_env(config, args.env)
+    for key, value in deploy_vars(_runner(args), config, env, args.head).items():
         print(f"{key}={value}")
     return 0
 
@@ -121,7 +122,7 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
 
     # Before the summary or any kubectl call, so a tag with no image stops the
     # deploy while nothing has been touched.
-    subst_vars = deploy_vars(runner, config, args.head)
+    subst_vars = deploy_vars(runner, config, env, args.head)
     ns = env.namespace
     targets = deployment_targets(config)
 
@@ -188,7 +189,7 @@ def _run_after_hook(runner: Runner, cfg: Config, env, subst_vars: dict[str, str]
     """Run `[deploy] after`, if configured. Returns the deploy's exit code.
 
     The argv was split at parse time; each token is substituted here against
-    `ENV` plus the version variables. `safe_substitute` leaves an unknown
+    `ENV` plus the deploy variables. `safe_substitute` leaves an unknown
     `${...}` alone rather than raising — a hook is a side errand, and a typo in
     one should not fail a deploy that has already rolled out.
     """
@@ -311,7 +312,7 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     _ = dp.add_argument("env", nargs="?", help="environment name from [deploy.<env>]")
     _ = dp.add_argument("--head", default="HEAD")
     _ = dp.add_argument("--render", metavar="ENV", help="print the manifests a deploy would apply, then exit")
-    _ = dp.add_argument("--versions", metavar="ENV", help="print the version variables, then exit")
+    _ = dp.add_argument("--versions", metavar="ENV", help="print the deploy variables, then exit")
     _ = dp.add_argument(
         "--compare-env",
         metavar="ENV",

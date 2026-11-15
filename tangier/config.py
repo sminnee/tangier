@@ -119,6 +119,8 @@ class DeployEnv:
     migration_timeout: int = 600
     migration_job: str | None = None
     migration_version_bucket: str | None = None
+    # Extra variables, substituted beside the version and digest ones.
+    vars: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -474,7 +476,7 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> DeploySettings:
             path,
             f"deploy.{name}",
             spec,
-            {"namespace", "overlay", "migration_timeout", "migration_job", "migration_version_bucket"},
+            {"namespace", "overlay", "migration_timeout", "migration_job", "migration_version_bucket", "vars"},
         )
         for required in ("namespace", "overlay"):
             if required not in spec:
@@ -492,8 +494,55 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> DeploySettings:
             migration_timeout=_as_int(path, f"deploy.{name}", "migration_timeout", spec.get("migration_timeout", 600)),
             migration_job=migration_job,
             migration_version_bucket=bucket,
+            vars=_parse_vars(path, f"deploy.{name}", spec.get("vars", {})),
         )
     return out
+
+
+# What `envsubst` and `string.Template` treat as a variable name. Any other
+# name would be ignored by both, silently.
+_VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _parse_vars(path: str, section: str, spec: Any) -> dict[str, str]:
+    """`[deploy.<env>] vars` — a table of strings keyed by shell identifiers. `""` is a value."""
+    if not isinstance(spec, dict) or not all(isinstance(v, str) for v in spec.values()):
+        raise ConfigError(f"{path}: `[{section}].vars` must be a table of strings")
+    for name in spec:
+        if not _VAR_NAME.fullmatch(name):
+            raise ConfigError(
+                f"{path}: `[{section}].vars` name `{name}` is not a valid variable name "
+                "(letters, digits and `_`, not starting with a digit)"
+            )
+    return dict(spec)
+
+
+# `vars` are merged over the process env of the render and the `after` hook,
+# where these names would change how those subprocesses run.
+_PROCESS_VARS = ("PATH", "HOME", "KUBECONFIG")
+_PROCESS_VAR_PREFIXES = ("LD_", "GITHUB_")
+
+
+def _check_deploy_vars(cfg: Config, path: str) -> None:
+    """Reject a `vars` name that a deploy already sets, or that steers its subprocesses.
+
+    The digest names are reserved even with `[deploy] digests` off, so turning
+    digests on later cannot break a config that loads today.
+    """
+    reserved = {"ENV": "the `after` hook's environment name"}
+    reserved |= {name: "a process environment variable" for name in _PROCESS_VARS}
+    for bucket in sorted(set(cfg.sha_bucket.values())):
+        reserved[version_var_for(bucket)] = f"bucket `{bucket}`'s version variable"
+    for bucket in cfg.images:
+        reserved[digest_var_for(bucket)] = f"bucket `{bucket}`'s digest variable"
+    for env in cfg.deploy.envs.values():
+        for name in env.vars:
+            if name in reserved:
+                raise ConfigError(f"{path}: `[deploy.{env.name}].vars` `{name}` clashes with {reserved[name]}")
+            if name.startswith(_PROCESS_VAR_PREFIXES):
+                raise ConfigError(
+                    f"{path}: `[deploy.{env.name}].vars` `{name}` clashes with a process environment variable"
+                )
 
 
 # Each part of a gate name becomes part of a ref component
@@ -1057,6 +1106,7 @@ def read_config(path: str) -> Config:
     if cfg.deploy.digests and not cfg.registry:
         raise ConfigError(f"{path}: `[deploy] digests` needs `[registry] url` to look the digests up in")
     _derive(cfg, path)
+    _check_deploy_vars(cfg, path)
     _warn_tags_without_input(cfg, path)
     _warn_tags_without_output(cfg, path)
     _warn_tailnet_envs_without_deploy(cfg, path)

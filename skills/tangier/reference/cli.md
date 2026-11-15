@@ -130,7 +130,7 @@ tangier deploy --compare-env <env>
 | --- | --- |
 | `<env>` | Render, migrate, apply, wait, and roll back on failure. |
 | `--render ENV` | Print the manifests a deploy would apply, with digests substituted when `[deploy] digests = true`. Read-only. |
-| `--versions ENV` | Print the version variables, and the `_DIGEST` variables with `[deploy] digests = true`. Read-only. |
+| `--versions ENV` | Print the variables a deploy substitutes: the env's `vars`, the version variables, and the `_DIGEST` variables with `[deploy] digests = true`. Read-only. |
 | `--compare-env ENV` | Print a markdown table of computed tags against the live environment. Read-only. |
 | `--summary` | Write that table to `$GITHUB_STEP_SUMMARY`, or stdout, before deploying. Not with the read-only flags. |
 | `--head REF` | Compute versions at this commit. |

@@ -150,6 +150,7 @@ namespace     = "myorg-uat"
 overlay       = "k8s/overlays/uat"
 migration_job = "core-migrate-${CORE_VERSION}"
 migration_version_bucket = "core"
+vars = { APP_HOST = "uat.example.com", CDN_HOST = "" }
 
 [deploy.rollout]
 max_wait = 600
@@ -162,8 +163,15 @@ max_wait = 600
 | `namespace` | required | The k8s namespace. |
 | `overlay` | required | The kustomize overlay to render. |
 | `migration_timeout` | `600` | Seconds to wait for the migration Job. |
-| `migration_job` | none | The migration Job's name. `${...}` takes version variables. |
+| `migration_job` | none | The migration Job's name. `${...}` takes the deploy variables: `vars`, version and digest variables. |
 | `migration_version_bucket` | none | The bucket whose prior version a rollback migrates back to. |
+| `vars` | `{}` | Extra string variables for this environment, substituted beside the version variables. |
+
+`vars` is substituted wherever the version variables are: the render, `--render`, `--versions`,
+the migration Job name, a rollback's prior-tag render, and `after` (its arguments and its
+environment). Each name must be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`). A name may not equal
+a bucket's `<BUCKET>_VERSION`, an `[image.<bucket>]`'s `<BUCKET>_DIGEST` (even with `digests` off),
+`ENV`, or a process variable (`PATH`, `HOME`, `KUBECONFIG`, `LD_*`, `GITHUB_*`). An empty string is a value: `${CDN_HOST}` above renders as nothing.
 
 `[deploy.rollout]`, shared by every environment:
 
@@ -176,7 +184,8 @@ max_wait = 600
 
 `after` runs once a deploy has fully rolled out, never after a rollback. The string form means
 `fatal = false`. The table form is `[deploy.after]` with `cmd` and `fatal`. With `fatal = true`, a
-failed hook fails the deploy. `${ENV}` and each version variable are substituted per argument.
+failed hook fails the deploy. `${ENV}` and each deploy variable (the env's `vars`, the version variables, and the digest
+variables when on) are substituted per argument.
 
 `digests = true` (default `false`) makes a deploy resolve each `[image.<bucket>]` tag to its
 manifest digest with `regctl image digest`, before the summary, the render or any `kubectl` call.

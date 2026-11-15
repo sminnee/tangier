@@ -479,6 +479,55 @@ class TestDeployDigests(unittest.TestCase):
         self.assertEqual(digest_var_for("astronort-lector"), "ASTRONORT_LECTOR_DIGEST")
 
 
+UAT = '[deploy.uat]\nnamespace = "n"\noverlay = "o"\n'
+
+
+class TestDeployVars(unittest.TestCase):
+    def test_vars_parse_and_an_empty_string_is_a_value(self) -> None:
+        cfg = parse_toml(f'{UAT}vars = {{ APP_HOST = "uat2.example", CDN_HOST = "" }}\n')
+        self.assertEqual(cfg.deploy.envs["uat"].vars, {"APP_HOST": "uat2.example", "CDN_HOST": ""})
+
+    def test_absent_vars_are_empty(self) -> None:
+        self.assertEqual(parse_toml(UAT).deploy.envs["uat"].vars, {})
+
+    def test_a_non_string_value_is_rejected(self) -> None:
+        assert_config_error(self, f"{UAT}vars = {{ PORT = 80 }}\n", "`[deploy.uat].vars` must be a table of strings")
+
+    def test_a_non_table_is_rejected(self) -> None:
+        assert_config_error(self, f'{UAT}vars = "APP_HOST=x"\n', "`[deploy.uat].vars` must be a table of strings")
+
+    def test_a_name_that_is_not_an_identifier_is_rejected(self) -> None:
+        # envsubst and string.Template would both ignore it, silently.
+        assert_config_error(self, f'{UAT}vars = {{ "APP-HOST" = "x" }}\n', "`APP-HOST`", "not a valid variable name")
+        assert_config_error(self, f'{UAT}vars = {{ "1HOST" = "x" }}\n', "`1HOST`")
+
+    def test_a_version_variable_name_clashes(self) -> None:
+        assert_config_error(
+            self,
+            f'[core]\npaths = "c/**"\nsha = true\n{UAT}vars = {{ CORE_VERSION = "x" }}\n',
+            "`CORE_VERSION` clashes with bucket `core`'s version variable",
+        )
+
+    def test_a_digest_variable_name_clashes_even_with_digests_off(self) -> None:
+        # So turning digests on later cannot break a config that loads today.
+        assert_config_error(
+            self,
+            f'{REGISTRY}[core]\npaths = "c/**"\nsha = true\n[image.core]\ndockerfile = "Dockerfile"\n'
+            f'{UAT}vars = {{ CORE_DIGEST = "x" }}\n',
+            "`CORE_DIGEST` clashes with bucket `core`'s digest variable",
+        )
+
+    def test_env_is_reserved_for_the_after_hook(self) -> None:
+        assert_config_error(self, f'{UAT}vars = {{ ENV = "x" }}\n', "`ENV` clashes")
+
+    def test_a_process_variable_name_clashes(self) -> None:
+        # Merged over the process env, these would change how the render and hook run.
+        for name in ("PATH", "KUBECONFIG", "LD_PRELOAD", "GITHUB_TOKEN"):
+            assert_config_error(
+                self, f'{UAT}vars = {{ {name} = "x" }}\n', f"`{name}` clashes with a process environment variable"
+            )
+
+
 class TestTailnet(unittest.TestCase):
     def test_env_tables_and_the_default_operator(self) -> None:
         cfg = parse_toml('[tailnet.uat]\ntag = "tag:astronort-uat-deploy"\n')

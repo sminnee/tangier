@@ -32,7 +32,7 @@ Read-only modes show what a deploy would do:
 
 ```sh
 tangier deploy --render uat        # the manifests
-tangier deploy --versions uat      # the version variables
+tangier deploy --versions uat      # the variables a deploy substitutes
 tangier deploy --compare-env uat   # computed tags against what is live
 ```
 
