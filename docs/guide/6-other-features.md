@@ -19,8 +19,12 @@ pod starts, so they do not need the `migrate-step=pre` label. A ConfigMap or Sec
 the render, such as one secretmgr provides, must already exist.
 
 A migration failure exits 1 with no rollback: nothing has touched the deployments yet, so the old
-pods still serve. A rollout that times out or crash-loops re-runs the prior version's migration,
-rolls each deployment back, and exits 1.
+pods still serve. A Job with a `Failed` condition stops the wait at once. A rollout that times out
+or crash-loops re-runs the prior version's migration, rolls each deployment back, and exits 1.
+
+Both waits also stop when a container stays in `CreateContainerConfigError`, `ImagePullBackOff` or
+`ErrImagePull` for longer than `[deploy.rollout] stuck_grace` (default 60 seconds), and print the
+kubelet's message. Waiting longer would not help: the kubelet retries those forever.
 
 ```toml
 [deploy.uat]

@@ -138,6 +138,82 @@ class PodProblem:
     container: str
     reason: str
     restarts: int
+    message: str = ""
+
+
+def _pod_items(pods_json: str) -> list[dict]:
+    try:
+        data = json.loads(pods_json or "{}")
+    except json.JSONDecodeError:
+        return []
+    return data.get("items", []) if isinstance(data, dict) else []
+
+
+STUCK_REASONS = frozenset({"CreateContainerConfigError", "ImagePullBackOff", "ErrImagePull"})
+
+
+class StuckPods:
+    """Containers that cannot start and will not recover by waiting.
+
+    The kubelet retries a missing ConfigMap or an unpullable image forever, so
+    without this a wait burns its whole timeout. A short `grace` still lets a
+    registry blip or a late secretmgr sync clear.
+
+    The clock runs per (pod, container), not per reason: `ErrImagePull` and
+    `ImagePullBackOff` alternate on one container. A container that leaves the
+    stuck set is forgotten, so a later relapse starts a fresh clock.
+    """
+
+    def __init__(self, grace: int) -> None:
+        self.grace = grace
+        self._since: dict[tuple[str, str], int] = {}
+
+    def observe(self, pods_json: str, elapsed: int) -> list[PodProblem]:
+        """Record this tick's pods; return the containers stuck for at least `grace` seconds."""
+        seen: dict[tuple[str, str], int] = {}
+        problems: list[PodProblem] = []
+        for item in _pod_items(pods_json):
+            pod = item.get("metadata", {}).get("name", "")
+            status = item.get("status", {})
+            for key in ("initContainerStatuses", "containerStatuses"):
+                for cs in status.get(key) or []:
+                    waiting = cs.get("state", {}).get("waiting", {}) or {}
+                    if waiting.get("reason") not in STUCK_REASONS:
+                        continue
+                    container = cs.get("name", "")
+                    since = self._since.get((pod, container), elapsed)
+                    seen[(pod, container)] = since
+                    if elapsed - since >= self.grace:
+                        problems.append(
+                            PodProblem(
+                                pod=pod,
+                                container=container,
+                                reason=waiting["reason"],
+                                restarts=cs.get("restartCount", 0) or 0,
+                                message=waiting.get("message", ""),
+                            )
+                        )
+        self._since = seen
+        return problems
+
+
+def job_outcome(job_json: str) -> tuple[str, str]:
+    """A `kubectl get job -o json` payload's state.
+
+    `("Complete", "")`, `("Failed", reason and message)`, or `("", "")` while it runs.
+    """
+    try:
+        conditions = json.loads(job_json or "{}").get("status", {}).get("conditions") or []
+    except (json.JSONDecodeError, AttributeError):
+        return "", ""
+    for cond in conditions:
+        if cond.get("status") != "True":
+            continue
+        if cond.get("type") == "Complete":
+            return "Complete", ""
+        if cond.get("type") == "Failed":
+            return "Failed", ": ".join(p for p in (cond.get("reason", ""), cond.get("message", "")) if p) or "Failed"
+    return "", ""
 
 
 def find_crashing_pods(pods_json: str, threshold: int) -> list[PodProblem]:
@@ -152,12 +228,8 @@ def find_crashing_pods(pods_json: str, threshold: int) -> list[PodProblem]:
     This is the one place shell is replaced rather than wrapped, because the
     shell version is subtly wrong rather than merely ugly.
     """
-    try:
-        data = json.loads(pods_json or "{}")
-    except json.JSONDecodeError:
-        return []
     problems: list[PodProblem] = []
-    for item in data.get("items", []):
+    for item in _pod_items(pods_json):
         name = item.get("metadata", {}).get("name", "")
         status = item.get("status", {})
         for key in ("containerStatuses", "initContainerStatuses"):
