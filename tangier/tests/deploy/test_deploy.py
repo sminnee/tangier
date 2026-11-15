@@ -65,21 +65,19 @@ def _args(runner, env="uat", **kw) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def _pods(*specs) -> str:
-    """Build a `kubectl get pods -o json` payload."""
+def _pods(*specs, key: str = "containerStatuses") -> str:
+    """Build a `kubectl get pods -o json` payload.
+
+    Each container is `(name, waiting reason, restarts)`, with an optional
+    fourth item: the kubelet's waiting message.
+    """
     items = []
     for pod, containers in specs:
-        items.append(
-            {
-                "metadata": {"name": pod},
-                "status": {
-                    "containerStatuses": [
-                        {"name": n, "state": {"waiting": {"reason": r}} if r else {}, "restartCount": c}
-                        for n, r, c in containers
-                    ]
-                },
-            }
-        )
+        statuses = []
+        for name, reason, restarts, *message in containers:
+            waiting = {"reason": reason, "message": message[0]} if message else {"reason": reason}
+            statuses.append({"name": name, "state": {"waiting": waiting} if reason else {}, "restartCount": restarts})
+        items.append({"metadata": {"name": pod}, "status": {key: statuses}})
     return json.dumps({"items": items})
 
 
@@ -119,12 +117,20 @@ def _as_json(objects) -> str:
     return "\n".join(json.dumps(o, indent=4) for o in objects) + "\n"
 
 
+def _job(*conditions: str) -> str:
+    """A `kubectl get job -o json` payload with each named condition True."""
+    return json.dumps({"status": {"conditions": [{"type": c, "status": "True"} for c in conditions]}})
+
+
 INSPECT = ("kubectl", "annotate", "--local")
+GET_JOB = ("kubectl", "get", "job")
 
 # Canned responses for a fully successful deploy.
 OK_RESPONSES = {
     ("envsubst",): Result(0, MANIFESTS),
     INSPECT: Result(0, _as_json(MANIFEST_OBJECTS)),
+    GET_JOB: Result(0, _job("Complete")),
+    # The rollback's prior-tag migration waits with `kubectl wait`.
     ("kubectl", "wait"): Result(0),
     ("kubectl", "rollout", "status"): Result(0),
     ("kubectl", "apply"): Result(0),
@@ -240,7 +246,7 @@ class TestDeploySequence(unittest.TestCase):
         seq = [" ".join(c[:3]) for c in runner.calls]
         get_prior = seq.index("kubectl get deployment")
         first_apply = seq.index("kubectl apply -f")
-        wait = seq.index("kubectl wait --for=condition=complete")
+        wait = seq.index("kubectl get job")
         rollout = seq.index("kubectl rollout status")
         # The prior tag must be read BEFORE anything is applied.
         self.assertLess(get_prior, first_apply)
@@ -249,7 +255,7 @@ class TestDeploySequence(unittest.TestCase):
 
     def test_migration_failure_does_not_roll_back(self) -> None:
         # Nothing has touched the Deployments yet — old pods still serve.
-        runner = RecordingRunner({**OK_RESPONSES, ("kubectl", "wait"): Result(1)})
+        runner = RecordingRunner({**OK_RESPONSES, GET_JOB: Result(0, _job("Failed"))})
         rc, out = _run(_cfg(), runner)
         self.assertEqual(rc, 1)
         self.assertIn("Migration failed", out)
@@ -276,8 +282,55 @@ class TestDeploySequence(unittest.TestCase):
         self.assertEqual(runner.calls, [])
 
 
+def _stuck(reason: str, message: str = "", container: str = "migrate") -> str:
+    """One pod with one container waiting on `reason`."""
+    return _pods(("pod-a", [(container, reason, 0, message)]))
+
+
+class TestStuckPods(unittest.TestCase):
+    def test_under_grace_reports_nothing(self) -> None:
+        stuck = deploy_mod.StuckPods(grace=60)
+        self.assertEqual(stuck.observe(_stuck("CreateContainerConfigError"), 0), [])
+        self.assertEqual(stuck.observe(_stuck("CreateContainerConfigError"), 50), [])
+
+    def test_past_grace_reports_with_the_kubelet_message(self) -> None:
+        stuck = deploy_mod.StuckPods(grace=60)
+        payload = _stuck("CreateContainerConfigError", 'secret "s" not found')
+        _ = stuck.observe(payload, 0)
+        found = stuck.observe(payload, 60)
+        self.assertEqual(
+            [(p.pod, p.container, p.message) for p in found], [("pod-a", "migrate", 'secret "s" not found')]
+        )
+
+    def test_image_pull_reason_flip_does_not_reset_the_clock(self) -> None:
+        # The kubelet alternates these two on one container.
+        stuck = deploy_mod.StuckPods(grace=60)
+        _ = stuck.observe(_stuck("ErrImagePull"), 0)
+        _ = stuck.observe(_stuck("ImagePullBackOff"), 30)
+        self.assertEqual([p.reason for p in stuck.observe(_stuck("ErrImagePull"), 60)], ["ErrImagePull"])
+
+    def test_recovery_forgets_the_container(self) -> None:
+        stuck = deploy_mod.StuckPods(grace=60)
+        _ = stuck.observe(_stuck("ImagePullBackOff"), 0)
+        _ = stuck.observe(_pods(("pod-a", [("migrate", "", 0)])), 30)
+        # Stuck again: a fresh clock starts here.
+        self.assertEqual(stuck.observe(_stuck("ImagePullBackOff"), 40), [])
+        self.assertEqual(stuck.observe(_stuck("ImagePullBackOff"), 90), [])
+        self.assertEqual(len(stuck.observe(_stuck("ImagePullBackOff"), 100)), 1)
+
+    def test_init_containers_are_watched(self) -> None:
+        # An init container reading a missing ConfigMap is a common first-deploy stall.
+        stuck = deploy_mod.StuckPods(grace=0)
+        payload = _pods(("pod-a", [("wait-db", "CreateContainerConfigError", 0)]), key="initContainerStatuses")
+        self.assertEqual([p.container for p in stuck.observe(payload, 0)], ["wait-db"])
+
+    def test_other_reasons_are_not_stuck(self) -> None:
+        stuck = deploy_mod.StuckPods(grace=0)
+        self.assertEqual(stuck.observe(_stuck("ContainerCreating"), 0), [])
+
+
 class TestFirstDeploy(unittest.TestCase):
-    """Reading the render before anything touches the cluster, and what pass 1 needs from it."""
+    """A first deploy into an empty namespace fails fast and names the cause."""
 
     def test_unreadable_render_stops_before_touching_the_cluster(self) -> None:
         runner = RecordingRunner({**OK_RESPONSES, INSPECT: Result(1, "", "bad yaml")})
@@ -306,7 +359,77 @@ class TestFirstDeploy(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("migrate-step=pre", out)
         self.assertEqual([c for c in runner.calls if c[:2] == ["kubectl", "apply"]], [])
-        self.assertEqual([c for c in runner.calls if c[:2] == ["kubectl", "wait"]], [])
+        self.assertEqual([c for c in runner.calls if c[:3] == list(GET_JOB)], [])
+
+    def test_a_missing_job_fails_the_wait_at_once(self) -> None:
+        # Pass 1 applied the Job, so NotFound means that apply failed.
+        notfound = Result(1, "", 'Error from server (NotFound): jobs.batch "core-migrate-v2" not found')
+        runner = RecordingRunner({**OK_RESPONSES, GET_JOB: notfound})
+        rc, out = _run(_cfg(), runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("does not exist", out)
+        self.assertEqual(runner.slept, [])
+
+    def test_a_transient_job_read_failure_keeps_polling(self) -> None:
+        runner = RecordingRunner({**OK_RESPONSES, GET_JOB: [Result(1, "", "timeout"), Result(0, _job("Complete"))]})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, _out = _run(_cfg(), runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(runner.slept, [10])
+        self.assertIn("could not read job/core-migrate-v2", err.getvalue())
+
+    def test_failed_job_fails_at_once_with_its_message(self) -> None:
+        failed = json.dumps(
+            {"status": {"conditions": [{"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}]}}
+        )
+        runner = RecordingRunner({**OK_RESPONSES, GET_JOB: Result(0, failed)})
+        rc, out = _run(_cfg(), runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("BackoffLimitExceeded", out)
+        self.assertEqual(runner.slept, [])
+        self.assertEqual(len([c for c in runner.calls if c[:2] == ["kubectl", "apply"]]), 1)
+
+    def test_stuck_migration_pod_fails_after_grace(self) -> None:
+        runner = RecordingRunner(
+            {
+                **OK_RESPONSES,
+                GET_JOB: Result(0, _job()),
+                ("kubectl", "get", "pods"): Result(0, _stuck("CreateContainerConfigError", 'secret "x" not found')),
+            }
+        )
+        rc, out = _run(_cfg(), runner)
+        self.assertEqual(rc, 1)
+        self.assertIn('secret "x" not found', out)
+        # The 60s default grace, not the 600s migration timeout.
+        self.assertEqual(sum(runner.slept), 60)
+        self.assertIn(
+            ["kubectl", "get", "pods", "-n", "ns-uat", "-l", "job-name=core-migrate-v2", "-o", "json"], runner.calls
+        )
+        self.assertEqual(len([c for c in runner.calls if c[:2] == ["kubectl", "apply"]]), 1)
+
+    def test_running_job_times_out(self) -> None:
+        runner = RecordingRunner({**OK_RESPONSES, GET_JOB: Result(0, _job())})
+        rc, out = _run(_cfg(), runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("timed out after 600s", out)
+        self.assertEqual(sum(runner.slept), 600)
+
+    def test_stuck_rollout_pod_rolls_back(self) -> None:
+        runner = RecordingRunner(
+            {
+                **OK_RESPONSES,
+                ("kubectl", "rollout", "status"): Result(1),
+                ("kubectl", "get", "pods"): Result(
+                    0, _stuck("ImagePullBackOff", "manifest unknown", container="server")
+                ),
+            }
+        )
+        rc, out = _run(_cfg(), runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("manifest unknown", out)
+        self.assertIn("Rolling back", out)
+        self.assertEqual(sum(runner.slept), 60)
 
 class TestAfterHookExecution(unittest.TestCase):
     """`[deploy] after` — runs on rollout success only, without a shell."""
@@ -333,7 +456,7 @@ class TestAfterHookExecution(unittest.TestCase):
         self.assertEqual(self._hook_calls(runner), [])
 
     def test_does_not_run_when_the_migration_fails(self) -> None:
-        runner = RecordingRunner({**OK_RESPONSES, ("kubectl", "wait"): Result(1)})
+        runner = RecordingRunner({**OK_RESPONSES, GET_JOB: Result(0, _job("Failed"))})
         rc, _out = _run(_cfg(**self.HOOK), runner)
         self.assertEqual(rc, 1)
         self.assertEqual(self._hook_calls(runner), [])

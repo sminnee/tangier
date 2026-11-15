@@ -1,7 +1,7 @@
 """`tangier deploy ...` — render, apply in two passes, wait, and roll back on failure.
 
-Exit codes: 0 rolled out; 1 migration or rollout failure (rollback ran after a
-rollout failure); 2 unknown env, bad config, missing kubectl, a failed `[deploy] digests`
+Exit codes: 0 rolled out; 1 migration failure, rollout failure (rolled back),
+or a stuck pod; 2 unknown env, bad config, missing kubectl, a failed `[deploy] digests`
 lookup, or a render kubectl cannot read.
 """
 
@@ -16,11 +16,14 @@ import sys
 from tangier.config import Config, DeployEnv, digest_var_for, version_var_for
 from tangier.deploy import (
     DeployError,
+    PodProblem,
+    StuckPods,
     deployed_versions,
     deployment_targets,
     envsubst_allowlist,
     find_crashing_pods,
     image_digests,
+    job_outcome,
     migration_job_name,
     prior_version,
     render_argv,
@@ -167,18 +170,7 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
             print(f"kubectl apply (pass 1) returned {result.returncode}", file=sys.stderr)
 
         print(f"Waiting for migration job/{job} (timeout {env.migration_timeout}s)...")
-        waited = runner.run(
-            [
-                "kubectl",
-                "wait",
-                "--for=condition=complete",
-                f"--timeout={env.migration_timeout}s",
-                f"job/{job}",
-                "-n",
-                ns,
-            ]
-        )
-        if not waited.ok:
+        if not _wait_for_migration(runner, config, ns, job, env.migration_timeout):
             # No rollback here: nothing has touched the Deployments yet, so the
             # old pods are still serving.
             print("Migration failed; recent logs:")
@@ -220,6 +212,55 @@ def _inspect(runner: Runner, manifests: str) -> tuple[list[dict], list[str]]:
     return objects, docs
 
 
+def _report_stuck(problems: list[PodProblem]) -> None:
+    print("Pods cannot start:")
+    for p in problems:
+        print(f"  {p.pod} ({p.container}): {p.reason}" + (f": {p.message}" if p.message else ""))
+
+
+def _wait_for_migration(runner: Runner, cfg: Config, ns: str, job: str, timeout: int) -> bool:
+    """Poll the Job until it completes, fails, has a stuck pod, or times out.
+
+    A poll loop rather than `kubectl wait`, so each tick can also look at the
+    Job's pods. A Failed condition ends the wait at once instead of at the
+    timeout, and so does a Job that is not there: pass 1 has already applied it,
+    so NotFound means that apply failed. Any other failed `get` warns and polls on.
+    """
+    rollout = cfg.deploy.rollout
+    stuck = StuckPods(rollout.stuck_grace)
+    elapsed = 0
+    while elapsed < timeout:
+        got = runner.run(["kubectl", "get", "job", job, "-n", ns, "-o", "json"])
+        if not got.ok:
+            if "NotFound" in got.stderr:
+                print(f"Migration job/{job} does not exist: {got.stderr.strip()}")
+                return False
+            print(f"warning: could not read job/{job} (exit {got.returncode}): {got.stderr.strip()}", file=sys.stderr)
+        else:
+            state, detail = job_outcome(got.stdout)
+            if state == "Complete":
+                return True
+            if state == "Failed":
+                print(f"Migration job/{job} failed: {detail}")
+                return False
+
+        pods = runner.run(["kubectl", "get", "pods", "-n", ns, "-l", f"job-name={job}", "-o", "json"])
+        if not pods.ok:
+            print(
+                f"warning: could not list job pods (exit {pods.returncode}); stuck detection degraded", file=sys.stderr
+            )
+        problems = stuck.observe(pods.stdout, elapsed) if pods.ok else []
+        if problems:
+            _report_stuck(problems)
+            return False
+
+        runner.sleep(rollout.poll_interval)
+        elapsed += rollout.poll_interval
+
+    print(f"Migration timed out after {timeout}s")
+    return False
+
+
 def _run_after_hook(runner: Runner, cfg: Config, env, subst_vars: dict[str, str]) -> int:
     """Run `[deploy] after`, if configured. Returns the deploy's exit code.
 
@@ -245,12 +286,13 @@ def _run_after_hook(runner: Runner, cfg: Config, env, subst_vars: dict[str, str]
 
 
 def _wait_for_rollout(runner: Runner, cfg: Config, ns: str, targets: list[str]) -> bool:
-    """Poll until rolled out, crash-looping, or timed out.
+    """Poll until rolled out, crash-looping, stuck, or timed out.
 
     Elapsed time advances off the value handed to `runner.sleep`, never a real
     clock — so a 600s timeout costs microseconds under a fake runner.
     """
     rollout = cfg.deploy.rollout
+    stuck = StuckPods(rollout.stuck_grace)
     elapsed = 0
     while elapsed < rollout.max_wait:
         if runner.run(["kubectl", "rollout", "status", *targets, "-n", ns, "--timeout=1s"]).ok:
@@ -267,6 +309,10 @@ def _wait_for_rollout(runner: Runner, cfg: Config, ns: str, targets: list[str]) 
             for p in crashing:
                 print(f"  {p.pod} ({p.container}): {p.reason}, {p.restarts} restarts")
             _ = runner.run(["kubectl", "get", "pods", "-n", ns], capture=False)
+            return False
+        problems = stuck.observe(pods.stdout, elapsed) if pods.ok else []
+        if problems:
+            _report_stuck(problems)
             return False
 
         runner.sleep(rollout.poll_interval)

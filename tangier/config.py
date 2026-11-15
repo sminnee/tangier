@@ -131,6 +131,7 @@ class RolloutSettings:
     poll_interval: int = 10
     crash_threshold: int = 3
     rollback_migration_timeout: int = 600
+    stuck_grace: int = 60
 
 
 @dataclass
@@ -468,7 +469,7 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> DeploySettings:
                 path,
                 "deploy.rollout",
                 spec,
-                {"max_wait", "poll_interval", "crash_threshold", "rollback_migration_timeout"},
+                {"max_wait", "poll_interval", "crash_threshold", "rollback_migration_timeout", "stuck_grace"},
             )
             out.rollout = RolloutSettings(
                 max_wait=_as_int(path, "deploy.rollout", "max_wait", spec.get("max_wait", 600)),
@@ -477,6 +478,7 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> DeploySettings:
                 rollback_migration_timeout=_as_int(
                     path, "deploy.rollout", "rollback_migration_timeout", spec.get("rollback_migration_timeout", 600)
                 ),
+                stuck_grace=_as_int(path, "deploy.rollout", "stuck_grace", spec.get("stuck_grace", 60)),
             )
             continue
         _check_keys(

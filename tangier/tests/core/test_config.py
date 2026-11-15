@@ -320,6 +320,7 @@ class TestK8sAndDeploy(unittest.TestCase):
                     "[deploy.rollout]",
                     "max_wait = 900",
                     "crash_threshold = 5",
+                    "stuck_grace = 90",
                     "[a]",
                     'paths = "a/**"',
                     "sha = true",
@@ -331,10 +332,18 @@ class TestK8sAndDeploy(unittest.TestCase):
         self.assertEqual(env.migration_version_bucket, "a")
         self.assertEqual(cfg.deploy.rollout.max_wait, 900)
         self.assertEqual(cfg.deploy.rollout.crash_threshold, 5)
+        self.assertEqual(cfg.deploy.rollout.stuck_grace, 90)
         # Unset rollout keys keep their defaults.
         self.assertEqual(cfg.deploy.rollout.poll_interval, 10)
         # `rollout` is not an environment.
         self.assertNotIn("rollout", cfg.deploy.envs)
+
+    def test_stuck_grace_defaults_and_must_be_an_int(self) -> None:
+        cfg = parse_toml('[deploy.rollout]\nmax_wait = 900\n[a]\npaths = "a/**"\nsha = true\n')
+        self.assertEqual(cfg.deploy.rollout.stuck_grace, 60)
+        assert_config_error(
+            self, '[deploy.rollout]\nstuck_grace = "1m"\n[a]\npaths = "a/**"\nsha = true\n', "stuck_grace"
+        )
 
     def test_deploy_env_requires_namespace_and_overlay(self) -> None:
         assert_config_error(self, '[deploy.uat]\nnamespace = "ns"\n[a]\npaths = "a/**"\nsha = true\n', "overlay")

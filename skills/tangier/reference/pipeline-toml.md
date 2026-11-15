@@ -181,6 +181,7 @@ a bucket's `<BUCKET>_VERSION`, an `[image.<bucket>]`'s `<BUCKET>_DIGEST` (even w
 | `poll_interval` | `10` | Seconds between polls. |
 | `crash_threshold` | `3` | Restarts that count a pod as crash-looping. |
 | `rollback_migration_timeout` | `600` | Seconds to wait for the rollback migration. |
+| `stuck_grace` | `60` | Seconds a container may stay in `CreateContainerConfigError`, `ImagePullBackOff` or `ErrImagePull` before the migration or rollout wait fails. |
 
 Label the migration Job `migrate-step: pre`. Pass 1 applies it together with the ConfigMaps and
 Secrets in the render that its pod reads, so those need no label.
