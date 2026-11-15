@@ -82,6 +82,26 @@ when given `registry-password` or `aws-role-arn`.
 
 With `digests` off, `${X_DIGEST}` is not substituted, so a manifest that uses it fails at apply.
 
+### One overlay, two clusters
+
+`[deploy.<env>] vars` sets extra variables for one environment, and `[tailnet.<env>] operator`
+picks that environment's cluster. Together they deploy one overlay to two clusters under different
+hostnames:
+
+```toml
+[deploy.uat-aws]
+namespace = "astronort-uat"
+overlay   = "infra/k8s/overlays/uat-aws"
+vars      = { APP_HOST = "uat2.askastro.ai", API_HOST = "api-uat2.askastro.ai", CDN_HOST = "" }
+
+[tailnet.uat-aws]
+tag      = "tag:astronort-uat-deploy"
+operator = "askastro-k8s-operator"
+```
+
+An empty string renders as nothing. The rules for `vars` names are in the
+[`pipeline.toml` reference](../../skills/tangier/reference/pipeline-toml.md#deploy).
+
 ## `tangier tailnet`
 
 CI reaches the cluster over a Tailscale tailnet. Each environment names the tailnet ACL tag that

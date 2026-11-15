@@ -12,6 +12,7 @@ from tangier.config import (
     ConfigError,
     GateSet,
     GateSpec,
+    TailnetEnv,
     digest_var_for,
     gate_groups,
     read_config,
@@ -538,6 +539,14 @@ class TestTailnet(unittest.TestCase):
     def test_operator_is_overridable(self) -> None:
         cfg = parse_toml('[tailnet]\noperator = "ts-op"\n\n[tailnet.uat]\ntag = "tag:x"\n')
         self.assertEqual(cfg.tailnet.operator, "ts-op")
+
+    def test_an_env_may_set_its_own_operator(self) -> None:
+        cfg = parse_toml(
+            '[tailnet]\noperator = "ts-op"\n\n[tailnet.uat]\ntag = "tag:x"\n'
+            '[tailnet.uat-aws]\ntag = "tag:y"\noperator = "aws-op"\n'
+        )
+        self.assertEqual(cfg.tailnet.envs["uat-aws"], TailnetEnv(name="uat-aws", tag="tag:y", operator="aws-op"))
+        self.assertIsNone(cfg.tailnet.envs["uat"].operator)
 
     def test_absent_section_gives_the_default(self) -> None:
         cfg = parse_toml('[a]\npaths = "a/**"\nsha = true\n')

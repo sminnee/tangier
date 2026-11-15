@@ -38,7 +38,8 @@ inputs:
     default: ""
   operator:
     description: >-
-      Tailscale Kubernetes operator hostname, overriding `[tailnet] operator`.
+      Tailscale Kubernetes operator hostname, overriding `[tailnet.<env>] operator`,
+      then `[tailnet] operator`.
       Defaults to `tailscale-operator` when there is no config to read.
     required: false
     default: ""

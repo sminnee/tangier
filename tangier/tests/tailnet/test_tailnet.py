@@ -153,6 +153,25 @@ class TestCheck(unittest.TestCase):
         runner.responses[("kubectl", "config", "current-context")] = Result(0, stdout="docker-desktop\n")
         self.assertIn("tailscale configure kubeconfig ts-op", self._error(runner, cfg=cfg))
 
+    def _two_cluster_cfg(self):
+        return self._cfg(**{"tailnet.uat-aws": {"tag": "tag:astronort-uat-deploy", "operator": "aws-op"}})
+
+    def _in_context(self, context: str) -> RecordingRunner:
+        runner = self._healthy()
+        runner.responses[("kubectl", "config", "current-context")] = Result(0, stdout=f"{context}\n")
+        return runner
+
+    def test_a_named_env_with_its_own_operator_checks_against_it(self) -> None:
+        cfg = self._two_cluster_cfg()
+        self.assertEqual(self._check(self._in_context("uat@aws-op"), env="uat-aws", cfg=cfg), 0)
+        message = self._error(self._in_context("uat@tailscale-operator"), env="uat-aws", cfg=cfg)
+        self.assertIn("tailscale configure kubeconfig aws-op", message)
+
+    def test_without_an_env_the_shared_operator_applies(self) -> None:
+        cfg = self._two_cluster_cfg()
+        self.assertEqual(self._check(self._in_context("uat@tailscale-operator"), cfg=cfg), 0)
+        self.assertIn("kubeconfig tailscale-operator", self._error(self._in_context("uat@aws-op"), cfg=cfg))
+
 
 class TestCheckWithoutAConfig(unittest.TestCase):
     """`tailnet check` is the one command that runs with no `pipeline.toml`.

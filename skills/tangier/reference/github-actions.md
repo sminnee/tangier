@@ -412,7 +412,7 @@ environment holds its own `TS_DEPLOY_CLIENT_ID` and `TS_DEPLOY_AUDIENCE`, so nev
 | `audience` | required | Pass `${{ vars.TS_DEPLOY_AUDIENCE }}`. |
 | `env` | `""` | Reads `[tailnet.<env>] tag`. |
 | `tag` | `""` | The tag itself, for a repo with no `pipeline.toml`. |
-| `operator` | `[tailnet] operator` | Operator hostname. |
+| `operator` | `""` | Operator hostname, overriding `[tailnet.<env>] operator`, then `[tailnet] operator`. |
 | `version` | `1.104.4` | Tailscale release. Needs 1.90.1 or later. |
 
 | Output | Meaning |

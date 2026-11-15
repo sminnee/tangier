@@ -202,12 +202,17 @@ operator = "tailscale-operator"
 
 [tailnet.uat]
 tag = "tag:myorg-uat-deploy"
+
+[tailnet.uat-aws]
+tag = "tag:myorg-uat-deploy"
+operator = "aws-k8s-operator"
 ```
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `operator` | `"tailscale-operator"` | The Tailscale Kubernetes operator's hostname. |
 | `[tailnet.<env>] tag` | required | The tailnet ACL tag a deploy to `<env>` authenticates as. |
+| `[tailnet.<env>] operator` | `[tailnet] operator` | The operator for `<env>`, for an environment on another cluster. |
 
 A `[tailnet.<env>]` that names no `[deploy.<env>]` warns, when any deploy environment exists.
 
