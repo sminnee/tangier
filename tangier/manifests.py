@@ -152,3 +152,38 @@ def pass_one(docs: list[str], objects: list[dict], default_ns: str) -> str:
         if i not in labelled and obj.get("kind") in INPUT_KINDS and _key(obj, default_ns) in wanted
     ]
     return "---\n".join(docs[i] for i in [*inputs, *labelled])
+
+
+def deployment_selectors(objects: list[dict], names: list[str], default_ns: str) -> dict[str, dict]:
+    """Each named Deployment's `spec.selector` from the render, by name. A name the render lacks is absent."""
+    out: dict[str, dict] = {}
+    for obj in objects:
+        name = (obj.get("metadata") or {}).get("name", "")
+        if obj.get("kind") == "Deployment" and name in names and _namespace(obj, default_ns) == default_ns:
+            out[name] = (obj.get("spec") or {}).get("selector") or {}
+    return out
+
+
+def selects(selector: dict, labels: dict) -> bool:
+    """Whether a Kubernetes label selector (`matchLabels` and `matchExpressions`) matches `labels`.
+
+    An empty selector matches nothing here: Kubernetes rejects one on a
+    Deployment, and matching everything would put unrelated pods back in scope.
+    """
+    match_labels = selector.get("matchLabels") or {}
+    expressions = selector.get("matchExpressions") or []
+    if not match_labels and not expressions:
+        return False
+    if any(labels.get(k) != v for k, v in match_labels.items()):
+        return False
+    for expr in expressions:
+        key, op, values = expr.get("key", ""), expr.get("operator", ""), expr.get("values") or []
+        if op == "In" and labels.get(key) not in values:
+            return False
+        if op == "NotIn" and key in labels and labels[key] in values:
+            return False
+        if op == "Exists" and key not in labels:
+            return False
+        if op == "DoesNotExist" and key in labels:
+            return False
+    return True

@@ -8,10 +8,12 @@ import unittest
 
 from tangier.manifests import (
     Ref,
+    deployment_selectors,
     inspect_argv,
     parse_objects,
     pass_one,
     pod_refs,
+    selects,
     split_documents,
 )
 from tangier.tests.support import make_configmap, make_workload
@@ -79,6 +81,41 @@ class TestPodRefs(unittest.TestCase):
         self.assertEqual(
             pod_refs(make_workload("DaemonSet", pod, namespace="kube-system"), NS)[0].namespace, "kube-system"
         )
+
+
+class TestSelectors(unittest.TestCase):
+    def test_reads_each_named_deployment_in_the_namespace(self) -> None:
+        web = make_workload("Deployment", {}, "web")
+        web["spec"]["selector"] = {"matchLabels": {"app": "web"}}
+        other_ns = make_workload("Deployment", {}, "api", namespace="kube-system")
+        other_ns["spec"]["selector"] = {"matchLabels": {"app": "api"}}
+        not_named = make_workload("Deployment", {}, "cron")
+        found = deployment_selectors([web, other_ns, not_named, make_configmap("web")], ["web", "api"], NS)
+        self.assertEqual(found, {"web": {"matchLabels": {"app": "web"}}})
+
+    def test_match_labels(self) -> None:
+        selector = {"matchLabels": {"app": "web", "tier": "fe"}}
+        self.assertTrue(selects(selector, {"app": "web", "tier": "fe", "pod-template-hash": "x"}))
+        self.assertFalse(selects(selector, {"app": "web"}))
+
+    def test_match_expressions(self) -> None:
+        cases = [
+            ({"key": "env", "operator": "In", "values": ["a", "b"]}, {"env": "a"}, True),
+            ({"key": "env", "operator": "In", "values": ["a", "b"]}, {"env": "c"}, False),
+            ({"key": "env", "operator": "NotIn", "values": ["a"]}, {}, True),
+            ({"key": "env", "operator": "NotIn", "values": ["a"]}, {"env": "a"}, False),
+            ({"key": "env", "operator": "Exists"}, {"env": ""}, True),
+            ({"key": "env", "operator": "Exists"}, {}, False),
+            ({"key": "env", "operator": "DoesNotExist"}, {}, True),
+            ({"key": "env", "operator": "DoesNotExist"}, {"env": "a"}, False),
+        ]
+        for expr, labels, expected in cases:
+            with self.subTest(expr=expr, labels=labels):
+                self.assertEqual(selects({"matchExpressions": [expr]}, labels), expected)
+
+    def test_empty_selector_matches_nothing(self) -> None:
+        # Matching everything would put other apps' pods back in scope.
+        self.assertFalse(selects({}, {"app": "web"}))
 
 
 class TestSplitDocuments(unittest.TestCase):

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from tangier.changemap import buckets, sha_for_bucket
 from tangier.config import Config, DeployEnv, digest_var_for, version_var_for
 from tangier.image import digest_argv, image_ref, parse_image_tag
+from tangier.manifests import selects
 from tangier.runner import Runner
 
 
@@ -214,6 +215,21 @@ def job_outcome(job_json: str) -> tuple[str, str]:
         if cond.get("type") == "Failed":
             return "Failed", ": ".join(p for p in (cond.get("reason", ""), cond.get("message", "")) if p) or "Failed"
     return "", ""
+
+
+def pods_matching(pods_json: str, selectors: list[dict]) -> str:
+    """The `kubectl get pods -o json` payload cut to the pods any of `selectors` matches.
+
+    Scopes the rollout's crash and stuck checks to the deploy's own
+    Deployments, so a broken pod of another app in the namespace cannot fail
+    the deploy and roll back healthy workloads.
+    """
+    items = [
+        i
+        for i in _pod_items(pods_json)
+        if any(selects(s, i.get("metadata", {}).get("labels") or {}) for s in selectors)
+    ]
+    return json.dumps({"items": items})
 
 
 def find_crashing_pods(pods_json: str, threshold: int) -> list[PodProblem]:

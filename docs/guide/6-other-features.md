@@ -24,7 +24,9 @@ or crash-loops re-runs the prior version's migration, rolls each deployment back
 
 Both waits also stop when a container stays in `CreateContainerConfigError`, `ImagePullBackOff` or
 `ErrImagePull` for longer than `[deploy.rollout] stuck_grace` (default 60 seconds), and print the
-kubelet's message. Waiting longer would not help: the kubelet retries those forever.
+kubelet's message. Waiting longer would not help: the kubelet retries those forever. The rollout
+wait looks only at the pods of the `[k8s.*]` deployments, through each one's selector in the render,
+so another app's broken pod in the namespace does not roll the deploy back.
 
 ```toml
 [deploy.uat]

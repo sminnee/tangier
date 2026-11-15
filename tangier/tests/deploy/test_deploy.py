@@ -65,11 +65,12 @@ def _args(runner, env="uat", **kw) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def _pods(*specs, key: str = "containerStatuses") -> str:
+def _pods(*specs, key: str = "containerStatuses", labels: dict | None = None) -> str:
     """Build a `kubectl get pods -o json` payload.
 
     Each container is `(name, waiting reason, restarts)`, with an optional
-    fourth item: the kubelet's waiting message.
+    fourth item: the kubelet's waiting message. Pods carry the `core`
+    Deployment's labels unless `labels` says otherwise.
     """
     items = []
     for pod, containers in specs:
@@ -77,7 +78,8 @@ def _pods(*specs, key: str = "containerStatuses") -> str:
         for name, reason, restarts, *message in containers:
             waiting = {"reason": reason, "message": message[0]} if message else {"reason": reason}
             statuses.append({"name": name, "state": {"waiting": waiting} if reason else {}, "restartCount": restarts})
-        items.append({"metadata": {"name": pod}, "status": {key: statuses}})
+        meta = {"name": pod, "labels": {"app": "core"} if labels is None else labels}
+        items.append({"metadata": meta, "status": {key: statuses}})
     return json.dumps({"items": items})
 
 
@@ -93,12 +95,21 @@ def _run(cfg, runner, **kw) -> tuple[int, str]:
 # would otherwise be applied and reported as a successful deploy.
 #
 # The Job reads `env-config`, which the render supplies but does not label:
-# pass 1 must carry it. `web-config` is read only by the Deployment, so pass 1
+# pass 1 must carry it. `web-config` is read only by a Deployment, so pass 1
 # leaves it to pass 2.
+def _deployment(name: str, pod: dict) -> dict:
+    """A Deployment whose selector is `app: <name>`."""
+    obj = make_workload("Deployment", pod, name)
+    obj["spec"]["selector"] = {"matchLabels": {"app": name}}
+    return obj
+
+
 MANIFEST_OBJECTS = [
     make_configmap("web-config"),
     make_configmap("env-config"),
-    make_workload("Deployment", env_from(("ConfigMap", "web-config")), "core"),
+    _deployment("core", env_from(("ConfigMap", "web-config"))),
+    _deployment("core-worker", env_from()),
+    _deployment("scanner", env_from()),
     make_workload("Job", env_from(("ConfigMap", "env-config")), "core-migrate-v2", labels={"migrate-step": "pre"}),
 ]
 
@@ -237,7 +248,7 @@ class TestDeploySequence(unittest.TestCase):
         # re-applies them unchanged. Pass 2 is the whole render.
         inspected, first, second = [s for s in runner.stdins if s is not None]
         self.assertEqual(inspected, MANIFESTS)
-        self.assertEqual(first, MANIFEST_DOCS[1] + "---\n" + MANIFEST_DOCS[3])
+        self.assertEqual(first, MANIFEST_DOCS[1] + "---\n" + MANIFEST_DOCS[5])
         self.assertEqual(second, MANIFESTS)
 
     def test_ordering_prior_read_then_apply_then_wait_then_rollout(self) -> None:
@@ -346,7 +357,7 @@ class TestFirstDeploy(unittest.TestCase):
         runner = RecordingRunner({**OK_RESPONSES, INSPECT: Result(0, extra)})
         with self.assertRaises(DeployError) as ctx:
             _ = _run(_cfg(), runner)
-        self.assertIn("4 YAML documents but kubectl read 5 objects", str(ctx.exception))
+        self.assertIn("6 YAML documents but kubectl read 7 objects", str(ctx.exception))
         self.assertEqual([c for c in runner.calls if c[:2] == ["kubectl", "apply"]], [])
 
     def test_no_labelled_objects_fails_before_waiting(self) -> None:
@@ -430,6 +441,37 @@ class TestFirstDeploy(unittest.TestCase):
         self.assertIn("manifest unknown", out)
         self.assertIn("Rolling back", out)
         self.assertEqual(sum(runner.slept), 60)
+
+    def test_another_apps_broken_pods_do_not_fail_the_rollout(self) -> None:
+        # Only pods the target Deployments select count, for both checks.
+        other = {"app": "someone-else"}
+        stuck = _pods(("other-a", [("x", "ImagePullBackOff", 0)]), labels=other)
+        crashing = _pods(("other-b", [("x", "CrashLoopBackOff", 9)]), labels=other)
+        for payload in (stuck, crashing):
+            with self.subTest(payload=payload):
+                runner = RecordingRunner(
+                    {
+                        **OK_RESPONSES,
+                        ("kubectl", "rollout", "status"): Result(1),
+                        ("kubectl", "get", "pods"): Result(0, payload),
+                    }
+                )
+                rc, out = _run(_cfg(), runner)
+                self.assertEqual(rc, 1)
+                self.assertIn("timed out after 600s", out)
+
+    def test_a_target_missing_from_the_render_warns(self) -> None:
+        objects = [o for o in MANIFEST_OBJECTS if o["metadata"]["name"] != "scanner"]
+        _docs, render = _render_of(objects)
+        runner = RecordingRunner(
+            {**OK_RESPONSES, ("envsubst",): Result(0, render), INSPECT: Result(0, _as_json(objects))}
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, _out = _run(_cfg(), runner)
+        self.assertEqual(rc, 0)
+        self.assertIn("deployment/scanner is not in the render", err.getvalue())
+
 
 class TestAfterHookExecution(unittest.TestCase):
     """`[deploy] after` — runs on rollout success only, without a shell."""
