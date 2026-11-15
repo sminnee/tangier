@@ -20,6 +20,14 @@ from tangier.config import (
 from tangier.tests.support import parse_toml, parse_toml_stderr
 
 
+def assert_config_error(test: unittest.TestCase, body: str, *fragments: str) -> None:
+    """Parsing `body` raises a ConfigError whose message holds each fragment."""
+    with test.assertRaises(ConfigError) as ctx:
+        _ = parse_toml(body)
+    for fragment in fragments:
+        test.assertIn(fragment, str(ctx.exception))
+
+
 class TestTomlReader(unittest.TestCase):
     # SPEC: changemap#toml-table-form
     # SPEC: changemap#items-field-projection
@@ -73,29 +81,26 @@ class TestTomlReader(unittest.TestCase):
     # SPEC: changemap#file-set-field
     def test_exclude_on_files_table_raises(self) -> None:
         # A file-set table's globs are already an explicit allowlist — nothing to subtract from.
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[unittest-files]\nfiles = true\npaths = ["a/**"]\nexclude = "a/gen.py"\n')
-        self.assertIn("exclude", str(ctx.exception))
+        assert_config_error(self, '[unittest-files]\nfiles = true\npaths = ["a/**"]\nexclude = "a/gen.py"\n', "exclude")
 
     # SPEC: changemap#file-set-field
     def test_tag_fields_on_files_table_raise(self) -> None:
         # A file-set is never selected, so each of these would be silently ignored.
         for field in ("sha = true", "touched = true", 'depends = "a"', 'unittest_items = "a"'):
-            with self.subTest(field=field), self.assertRaises(ConfigError) as ctx:
-                _ = parse_toml(f'[a]\npaths = "a/**"\nsha = true\n[unittest-files]\nfiles = true\n{field}\n')
-            self.assertIn(field.split(" ")[0], str(ctx.exception))
+            with self.subTest(field=field):
+                assert_config_error(
+                    self,
+                    f'[a]\npaths = "a/**"\nsha = true\n[unittest-files]\nfiles = true\n{field}\n',
+                    field.split(" ")[0],
+                )
 
     # SPEC: changemap#unknown-field-raises
     def test_unknown_field_raises(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[a]\npaths = "a/**"\nfoo = "bar"\n')
-        self.assertIn("foo", str(ctx.exception))
+        assert_config_error(self, '[a]\npaths = "a/**"\nfoo = "bar"\n', "foo")
 
     # SPEC: changemap#unknown-dependency-raises
     def test_unknown_dependency_raises(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[a]\npaths = "a/**"\ndepends = "nonexistent"\n')
-        self.assertIn("nonexistent", str(ctx.exception))
+        assert_config_error(self, '[a]\npaths = "a/**"\ndepends = "nonexistent"\n', "nonexistent")
 
     # SPEC: changemap#cycle-raises
     def test_cycle_raises(self) -> None:
@@ -128,14 +133,10 @@ class TestTomlReader(unittest.TestCase):
 
     # SPEC: changemap#file-set-field
     def test_files_table_must_be_true(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[x]\nfiles = "yes"\npaths = ["a/**"]\n')
-        self.assertIn("files", str(ctx.exception))
+        assert_config_error(self, '[x]\nfiles = "yes"\npaths = ["a/**"]\n', "files")
 
     def test_non_table_top_level_raises(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('a = "not a table"\n')
-        self.assertIn("must be a table", str(ctx.exception))
+        assert_config_error(self, 'a = "not a table"\n', "must be a table")
 
 
 class TestConfigWarnings(unittest.TestCase):
@@ -170,9 +171,7 @@ class TestNestedTags(unittest.TestCase):
         self.assertEqual(cfg.depends["b"], ["a"])
 
     def test_duplicate_tag_in_both_forms_raises(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[a]\npaths = "a/**"\n[tags.a]\npaths = "other/**"\n')
-        self.assertIn("both", str(ctx.exception))
+        assert_config_error(self, '[a]\npaths = "a/**"\n[tags.a]\npaths = "other/**"\n', "both")
 
     def test_reserved_name_usable_as_a_tag_when_nested(self) -> None:
         # `[sha]` is the reserved settings section; a tag genuinely called `sha`
@@ -182,9 +181,7 @@ class TestNestedTags(unittest.TestCase):
         self.assertEqual(cfg.sha.exclude, [])
 
     def test_malformed_reserved_section_error_names_the_nesting_escape(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('sha = "not a table"\n')
-        self.assertIn("[tags.sha]", str(ctx.exception))
+        assert_config_error(self, 'sha = "not a table"\n', "[tags.sha]")
 
 
 class TestShaSettings(unittest.TestCase):
@@ -208,9 +205,7 @@ class TestShaSettings(unittest.TestCase):
         self.assertEqual(cfg.sha.exclude, ["**/*.md"])
 
     def test_unknown_key_raises(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[sha]\nnope = 1\n[a]\npaths = "a/**"\nsha = true\n')
-        self.assertIn("nope", str(ctx.exception))
+        assert_config_error(self, '[sha]\nnope = 1\n[a]\npaths = "a/**"\nsha = true\n', "nope")
 
 
 class TestRunners(unittest.TestCase):
@@ -237,14 +232,12 @@ class TestRunners(unittest.TestCase):
         self.assertIsNone(cfg.runners["e2e"].files)
 
     def test_runner_requires_cmd(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[runners]\nunittest = { files = "x" }\n[a]\npaths = "a/**"\nsha = true\n')
-        self.assertIn("cmd", str(ctx.exception))
+        assert_config_error(self, '[runners]\nunittest = { files = "x" }\n[a]\npaths = "a/**"\nsha = true\n', "cmd")
 
     def test_runner_rejects_unknown_key(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[runners]\nunittest = { cmd = "x", nope = "y" }\n[a]\npaths = "a/**"\nsha = true\n')
-        self.assertIn("nope", str(ctx.exception))
+        assert_config_error(
+            self, '[runners]\nunittest = { cmd = "x", nope = "y" }\n[a]\npaths = "a/**"\nsha = true\n', "nope"
+        )
 
 
 class TestRegistryAndImage(unittest.TestCase):
@@ -288,14 +281,10 @@ class TestRegistryAndImage(unittest.TestCase):
         self.assertEqual(spec.secrets, [])
 
     def test_image_requires_dockerfile(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[image.a]\ncontext = "."\n[a]\npaths = "a/**"\nsha = true\n')
-        self.assertIn("dockerfile", str(ctx.exception))
+        assert_config_error(self, '[image.a]\ncontext = "."\n[a]\npaths = "a/**"\nsha = true\n', "dockerfile")
 
     def test_image_for_unknown_bucket_raises(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[image.nope]\ndockerfile = "d"\n[a]\npaths = "a/**"\nsha = true\n')
-        self.assertIn("nope", str(ctx.exception))
+        assert_config_error(self, '[image.nope]\ndockerfile = "d"\n[a]\npaths = "a/**"\nsha = true\n', "nope")
 
 
 class TestK8sAndDeploy(unittest.TestCase):
@@ -315,9 +304,7 @@ class TestK8sAndDeploy(unittest.TestCase):
     def test_k8s_for_unknown_bucket_raises(self) -> None:
         # A typo here would otherwise be silent deploy breakage: the version
         # variable it derives would never be substituted into any manifest.
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[k8s.nope]\ndeployments = ["x"]\n[a]\npaths = "a/**"\nsha = true\n')
-        self.assertIn("nope", str(ctx.exception))
+        assert_config_error(self, '[k8s.nope]\ndeployments = ["x"]\n[a]\npaths = "a/**"\nsha = true\n', "nope")
 
     def test_parses_deploy_envs_and_rollout(self) -> None:
         cfg = parse_toml(
@@ -349,9 +336,7 @@ class TestK8sAndDeploy(unittest.TestCase):
         self.assertNotIn("rollout", cfg.deploy.envs)
 
     def test_deploy_env_requires_namespace_and_overlay(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[deploy.uat]\nnamespace = "ns"\n[a]\npaths = "a/**"\nsha = true\n')
-        self.assertIn("overlay", str(ctx.exception))
+        assert_config_error(self, '[deploy.uat]\nnamespace = "ns"\n[a]\npaths = "a/**"\nsha = true\n', "overlay")
 
 
 class TestReadConfigErrors(unittest.TestCase):
@@ -441,17 +426,13 @@ class TestAfterHook(unittest.TestCase):
     def test_shell_operator_is_rejected_at_parse_time(self) -> None:
         for op in ("&&", "||", "|", ";", ">", "&"):
             with self.subTest(op=op):
-                with self.assertRaises(ConfigError) as ctx:
-                    _ = parse_toml(f'[deploy]\nafter = "bin/x {op} bin/y"\n')
-                message = str(ctx.exception)
-                self.assertIn("without a shell", message)
-                self.assertIn("script", message)
+                assert_config_error(self, f'[deploy]\nafter = "bin/x {op} bin/y"\n', "without a shell", "script")
 
     def test_command_substitution_is_rejected(self) -> None:
         # Neither form can ever be substituted, so both mean "run a shell".
         for marker in ("$(whoami)", "`whoami`"):
-            with self.subTest(marker=marker), self.assertRaises(ConfigError):
-                _ = parse_toml(f'[deploy]\nafter = "bin/x {marker}"\n')
+            with self.subTest(marker=marker):
+                assert_config_error(self, f'[deploy]\nafter = "bin/x {marker}"\n')
 
     def test_an_operator_inside_an_argument_is_not_a_shell_operator(self) -> None:
         # `&` here is a character in a value, not a backgrounding operator. No
@@ -464,13 +445,10 @@ class TestAfterHook(unittest.TestCase):
         self.assertEqual(cfg.deploy.after.argv, ["bin/x", "${ENV}"])
 
     def test_empty_command_is_rejected(self) -> None:
-        with self.assertRaises(ConfigError):
-            _ = parse_toml('[deploy]\nafter = ""\n')
+        assert_config_error(self, '[deploy]\nafter = ""\n')
 
     def test_table_without_cmd_is_rejected(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml("[deploy.after]\nfatal = true\n")
-        self.assertIn("requires `cmd`", str(ctx.exception))
+        assert_config_error(self, "[deploy.after]\nfatal = true\n", "requires `cmd`")
 
     def test_after_does_not_become_a_deploy_environment(self) -> None:
         cfg = parse_toml('[deploy]\nafter = "bin/x"\n[deploy.uat]\nnamespace = "ns"\noverlay = "k8s/uat"\n')
@@ -488,14 +466,10 @@ class TestDeployDigests(unittest.TestCase):
         self.assertTrue(parse_toml(f"{REGISTRY}[deploy]\ndigests = true\n").deploy.digests)
 
     def test_needs_a_registry(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml("[deploy]\ndigests = true\n")
-        self.assertIn("[registry] url", str(ctx.exception))
+        assert_config_error(self, "[deploy]\ndigests = true\n", "[registry] url")
 
     def test_a_non_boolean_is_rejected(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[deploy]\ndigests = "yes"\n')
-        self.assertIn("digests", str(ctx.exception))
+        assert_config_error(self, '[deploy]\ndigests = "yes"\n', "digests")
 
     def test_digests_is_not_read_as_an_environment(self) -> None:
         cfg = parse_toml(f'{REGISTRY}[deploy]\ndigests = true\n[deploy.uat]\nnamespace = "n"\noverlay = "o"\n')
@@ -522,19 +496,13 @@ class TestTailnet(unittest.TestCase):
         self.assertEqual(cfg.tailnet.envs, {})
 
     def test_env_without_a_tag_raises(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml("[tailnet.uat]\n")
-        self.assertIn("`[tailnet.uat]` requires `tag`", str(ctx.exception))
+        assert_config_error(self, "[tailnet.uat]\n", "`[tailnet.uat]` requires `tag`")
 
     def test_unknown_scalar_field_raises(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[tailnet]\noperater = "typo"\n')
-        self.assertIn("operater", str(ctx.exception))
+        assert_config_error(self, '[tailnet]\noperater = "typo"\n', "operater")
 
     def test_unknown_field_on_an_env_raises(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[tailnet.uat]\ntag = "tag:x"\naudience = "y"\n')
-        self.assertIn("audience", str(ctx.exception))
+        assert_config_error(self, '[tailnet.uat]\ntag = "tag:x"\naudience = "y"\n', "audience")
 
     def test_tailnet_is_reserved_so_a_bare_tag_of_that_name_must_nest(self) -> None:
         # The escape hatch, which is what makes reserving the name non-breaking.
@@ -566,10 +534,7 @@ class TestErrorMessageQuality(unittest.TestCase):
         self.assertNotIn("tags.deploy.uat", str(ctx.exception))
 
     def test_field_directly_under_tags_names_the_real_problem(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml('[tags]\npaths = "a/**"\n')
-        self.assertIn("[tags.paths]", str(ctx.exception))
-        self.assertIn("tag names", str(ctx.exception))
+        assert_config_error(self, '[tags]\npaths = "a/**"\n', "[tags.paths]", "tag names")
 
 
 _GATE_TAGS = (
@@ -643,9 +608,7 @@ class TestGate(unittest.TestCase):
         }
         for label, (body, expected) in cases.items():
             with self.subTest(label):
-                with self.assertRaises(ConfigError) as ctx:
-                    _ = parse_toml(_gate(body))
-                self.assertIn(expected, str(ctx.exception))
+                assert_config_error(self, _gate(body), expected)
 
     # SPEC: gate#junit-config
     def test_junit_names_the_report_path(self) -> None:
@@ -669,21 +632,20 @@ class TestGate(unittest.TestCase):
     def test_prune_after_days_must_be_a_day_or_more(self) -> None:
         # Less than a day would put the cutoff in the future and prune every record.
         for value in ("0", "-1", "1.5", '"30"', "true"):
-            with self.subTest(value), self.assertRaises(ConfigError) as ctx:
-                _ = parse_toml(_GATE_TAGS + f"[gate]\nprune-after-days = {value}\n")
-            self.assertIn("prune-after-days` must be a whole number of days", str(ctx.exception))
+            with self.subTest(value):
+                assert_config_error(
+                    self,
+                    _GATE_TAGS + f"[gate]\nprune-after-days = {value}\n",
+                    "prune-after-days` must be a whole number of days",
+                )
 
     # SPEC: gate#prune-after-days
     def test_any_other_scalar_in_gate_is_an_unknown_field(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml(_GATE_TAGS + "[gate]\nprune-after = 30\n")
-        self.assertIn("unknown field `prune-after` on `[gate]`", str(ctx.exception))
+        assert_config_error(self, _GATE_TAGS + "[gate]\nprune-after = 30\n", "unknown field `prune-after` on `[gate]`")
 
     # SPEC: gate#config-table
     def test_a_gate_name_must_be_usable_in_a_ref(self) -> None:
-        with self.assertRaises(ConfigError) as ctx:
-            _ = parse_toml(_GATE_TAGS + '[gate."a b"]\ncmd = "bin/test"\nscope = "svc"\n')
-        self.assertIn("gate name", str(ctx.exception))
+        assert_config_error(self, _GATE_TAGS + '[gate."a b"]\ncmd = "bin/test"\nscope = "svc"\n', "gate name")
 
     # SPEC: gate#group-table
     def test_a_table_without_cmd_is_a_group_of_member_gates(self) -> None:
@@ -744,9 +706,7 @@ class TestGate(unittest.TestCase):
         }
         for label, (body, expected) in cases.items():
             with self.subTest(label):
-                with self.assertRaises(ConfigError) as ctx:
-                    _ = parse_toml(_GATE_TAGS + body)
-                self.assertIn(expected, str(ctx.exception))
+                assert_config_error(self, _GATE_TAGS + body, expected)
 
     # SPEC: gate#output-name-collision
     def test_two_gates_whose_outputs_share_a_name_raise(self) -> None:
@@ -757,18 +717,13 @@ class TestGate(unittest.TestCase):
         member = '[gate.lint.check]\ncmd = "ruff"\nscope = "svc"\n'
         for label, other in cases.items():
             with self.subTest(label):
-                with self.assertRaises(ConfigError) as ctx:
-                    _ = parse_toml(_GATE_TAGS + member + other)
-                self.assertIn("share the output name `lint-check-run`", str(ctx.exception))
+                assert_config_error(self, _GATE_TAGS + member + other, "share the output name `lint-check-run`")
 
     # SPEC: gate#cmd-no-shell
     def test_shell_syntax_is_rejected_at_parse_time(self) -> None:
         for cmd in ("bin/test && bin/lint", "bin/test | tee log", "bin/test $(whoami)"):
             with self.subTest(cmd=cmd):
-                with self.assertRaises(ConfigError) as ctx:
-                    _ = parse_toml(_gate(f'cmd = "{cmd}"\nscope = "svc"\n'))
-                self.assertIn("without a shell", str(ctx.exception))
-                self.assertIn("[gate.backend]", str(ctx.exception))
+                assert_config_error(self, _gate(f'cmd = "{cmd}"\nscope = "svc"\n'), "without a shell", "[gate.backend]")
 
     # SPEC: gate#scope-packages
     def test_scope_entry_must_be_a_bucket_or_a_tag_with_paths(self) -> None:
@@ -780,9 +735,7 @@ class TestGate(unittest.TestCase):
         }
         for entry, expected in cases.items():
             with self.subTest(entry=entry):
-                with self.assertRaises(ConfigError) as ctx:
-                    _ = parse_toml(_gate(f'cmd = "bin/test"\nscope = "{entry}"\n', tags))
-                self.assertIn(expected, str(ctx.exception))
+                assert_config_error(self, _gate(f'cmd = "bin/test"\nscope = "{entry}"\n', tags), expected)
 
     # SPEC: gate#placeholder-whole-token
     def test_placeholder_must_name_an_items_list_or_a_file_set(self) -> None:
@@ -793,9 +746,7 @@ class TestGate(unittest.TestCase):
         }
         for cmd, expected in cases.items():
             with self.subTest(cmd=cmd):
-                with self.assertRaises(ConfigError) as ctx:
-                    _ = parse_toml(_gate(f'cmd = "{cmd}"\nscope = "svc"\n'))
-                self.assertIn(expected, str(ctx.exception))
+                assert_config_error(self, _gate(f'cmd = "{cmd}"\nscope = "svc"\n'), expected)
 
     # SPEC: gate#scope-is-ci-signal
     def test_a_gate_scope_counts_as_a_ci_signal(self) -> None:
@@ -812,9 +763,11 @@ class TestGate(unittest.TestCase):
         }
         for label, (extra, entry) in cases.items():
             with self.subTest(label):
-                with self.assertRaises(ConfigError) as ctx:
-                    _ = parse_toml(_gate(f'cmd = "bin/test"\nscope = "{entry}"\n', _GATE_TAGS + extra))
-                self.assertIn("`[globby].paths` glob `src/*.py`", str(ctx.exception))
+                assert_config_error(
+                    self,
+                    _gate(f'cmd = "bin/test"\nscope = "{entry}"\n', _GATE_TAGS + extra),
+                    "`[globby].paths` glob `src/*.py`",
+                )
 
 
 # Two gates and a group, for `[gate-set]` to name.
@@ -842,6 +795,4 @@ class TestGateSet(unittest.TestCase):
         }
         for label, (body, expected) in cases.items():
             with self.subTest(label):
-                with self.assertRaises(ConfigError) as ctx:
-                    _ = parse_toml(_SET_GATES + body)
-                self.assertIn(expected, str(ctx.exception))
+                assert_config_error(self, _SET_GATES + body, expected)
