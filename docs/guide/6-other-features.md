@@ -9,9 +9,14 @@ the same `pipeline.toml`. Keys are in the
 `tangier deploy <env>` puts this commit's images on a Kubernetes environment:
 
 1. Render the kustomize overlay **once**, substituting each `<BUCKET>_VERSION`.
-2. Apply the migration Job, the objects labelled `migrate-step=pre`, and wait for it.
-3. Apply everything, from the same rendered bytes. The Job re-apply is then a no-op.
+2. Apply the migration Job, the objects labelled `migrate-step=pre`, together with the ConfigMaps
+   and Secrets from the render that the Job's pod reads. Wait for the Job.
+3. Apply everything, from the same rendered bytes. Re-applying step 2's objects is then a no-op.
 4. Wait for every deployment to roll out.
+
+Step 2 is what lets a first deploy into an empty namespace work: the Job's inputs exist before its
+pod starts, so they do not need the `migrate-step=pre` label. A ConfigMap or Secret that is not in
+the render, such as one secretmgr provides, must already exist.
 
 A migration failure exits 1 with no rollback: nothing has touched the deployments yet, so the old
 pods still serve. A rollout that times out or crash-loops re-runs the prior version's migration,

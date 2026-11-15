@@ -135,9 +135,9 @@ tangier deploy --compare-env <env>
 | `--summary` | Write that table to `$GITHUB_STEP_SUMMARY`, or stdout, before deploying. Not with the read-only flags. |
 | `--head REF` | Compute versions at this commit. |
 
-Exit codes: 0 rolled out, 1 migration or rollout failure, 2 unknown environment, bad config, no
-`kubectl`, or a failed `[deploy] digests` lookup. A fatal `[deploy] after` hook that fails also
-exits non-zero.
+Exit codes: 0 rolled out; 1 a migration or rollout failure; 2 unknown environment, bad config, no
+`kubectl`, a failed `[deploy] digests` lookup, or a render kubectl cannot read. A fatal
+`[deploy] after` hook that fails also exits non-zero.
 
 ## `tailnet`
 

@@ -182,6 +182,9 @@ a bucket's `<BUCKET>_VERSION`, an `[image.<bucket>]`'s `<BUCKET>_DIGEST` (even w
 | `crash_threshold` | `3` | Restarts that count a pod as crash-looping. |
 | `rollback_migration_timeout` | `600` | Seconds to wait for the rollback migration. |
 
+Label the migration Job `migrate-step: pre`. Pass 1 applies it together with the ConfigMaps and
+Secrets in the render that its pod reads, so those need no label.
+
 `after` runs once a deploy has fully rolled out, never after a rollback. The string form means
 `fatal = false`. The table form is `[deploy.after]` with `cmd` and `fatal`. With `fatal = true`, a
 failed hook fails the deploy. `${ENV}` and each deploy variable (the env's `vars`, the version variables, and the digest

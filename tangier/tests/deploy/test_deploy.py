@@ -24,7 +24,7 @@ from tangier.deploy import (
     resolve_env,
 )
 from tangier.runner import Result
-from tangier.tests.support import RecordingRunner, make_config
+from tangier.tests.support import RecordingRunner, env_from, make_config, make_configmap, make_workload
 
 CONFIG_TABLES = {
     "registry": {"url": "registry.example/ns"},
@@ -93,11 +93,38 @@ def _run(cfg, runner, **kw) -> tuple[int, str]:
 # A non-empty render: `_render` rejects empty output, because a failing
 # `kubectl kustomize` still exits 0 through `envsubst` and empty manifests
 # would otherwise be applied and reported as a successful deploy.
-MANIFESTS = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: core\n"
+#
+# The Job reads `env-config`, which the render supplies but does not label:
+# pass 1 must carry it. `web-config` is read only by the Deployment, so pass 1
+# leaves it to pass 2.
+MANIFEST_OBJECTS = [
+    make_configmap("web-config"),
+    make_configmap("env-config"),
+    make_workload("Deployment", env_from(("ConfigMap", "web-config")), "core"),
+    make_workload("Job", env_from(("ConfigMap", "env-config")), "core-migrate-v2", labels={"migrate-step": "pre"}),
+]
+
+
+def _render_of(objects) -> tuple[list[str], str]:
+    """The YAML documents for `objects`, and the render that joins them. JSON is valid YAML."""
+    docs = [json.dumps(o) + "\n" for o in objects]
+    return docs, "---\n".join(docs)
+
+
+MANIFEST_DOCS, MANIFESTS = _render_of(MANIFEST_OBJECTS)
+
+
+def _as_json(objects) -> str:
+    """What `kubectl annotate --local -o json` prints: one pretty-printed object per document."""
+    return "\n".join(json.dumps(o, indent=4) for o in objects) + "\n"
+
+
+INSPECT = ("kubectl", "annotate", "--local")
 
 # Canned responses for a fully successful deploy.
 OK_RESPONSES = {
     ("envsubst",): Result(0, MANIFESTS),
+    INSPECT: Result(0, _as_json(MANIFEST_OBJECTS)),
     ("kubectl", "wait"): Result(0),
     ("kubectl", "rollout", "status"): Result(0),
     ("kubectl", "apply"): Result(0),
@@ -197,12 +224,15 @@ class TestDeploySequence(unittest.TestCase):
 
         applies = [c for c in runner.calls if c[:2] == ["kubectl", "apply"]]
         self.assertEqual(len(applies), 2)
-        # Pass 1 is label-scoped to the migration Job; pass 2 is everything.
-        self.assertIn("migrate-step=pre", applies[0])
-        self.assertNotIn("-l", applies[1])
-        # Both passes are fed the same manifests, via stdin.
-        applied_stdin = [s for s in runner.stdins if s is not None]
-        self.assertEqual(applied_stdin[0], applied_stdin[1])
+        # Neither pass uses a label selector: tangier chooses pass 1's objects.
+        self.assertTrue(all("-l" not in c for c in applies))
+        # stdin goes to the inspect step, then pass 1, then pass 2. Pass 1 is
+        # the Job's ConfigMap then the Job, in the render's own bytes, so pass 2
+        # re-applies them unchanged. Pass 2 is the whole render.
+        inspected, first, second = [s for s in runner.stdins if s is not None]
+        self.assertEqual(inspected, MANIFESTS)
+        self.assertEqual(first, MANIFEST_DOCS[1] + "---\n" + MANIFEST_DOCS[3])
+        self.assertEqual(second, MANIFESTS)
 
     def test_ordering_prior_read_then_apply_then_wait_then_rollout(self) -> None:
         runner = RecordingRunner(OK_RESPONSES)
@@ -245,6 +275,38 @@ class TestDeploySequence(unittest.TestCase):
             _ = _run(_cfg(), runner)
         self.assertEqual(runner.calls, [])
 
+
+class TestFirstDeploy(unittest.TestCase):
+    """Reading the render before anything touches the cluster, and what pass 1 needs from it."""
+
+    def test_unreadable_render_stops_before_touching_the_cluster(self) -> None:
+        runner = RecordingRunner({**OK_RESPONSES, INSPECT: Result(1, "", "bad yaml")})
+        with self.assertRaises(DeployError):
+            _ = _run(_cfg(), runner)
+        # It stops at the inspect step, before even the prior-tag read.
+        self.assertEqual(tuple(runner.calls[-1][:3]), INSPECT)
+        self.assertEqual([c for c in runner.calls if c[:2] == ["kubectl", "get"]], [])
+
+    def test_document_and_object_counts_must_match(self) -> None:
+        # Otherwise pass 1 could apply a different document than the one it chose.
+        extra = _as_json([*MANIFEST_OBJECTS, make_configmap("extra")])
+        runner = RecordingRunner({**OK_RESPONSES, INSPECT: Result(0, extra)})
+        with self.assertRaises(DeployError) as ctx:
+            _ = _run(_cfg(), runner)
+        self.assertIn("4 YAML documents but kubectl read 5 objects", str(ctx.exception))
+        self.assertEqual([c for c in runner.calls if c[:2] == ["kubectl", "apply"]], [])
+
+    def test_no_labelled_objects_fails_before_waiting(self) -> None:
+        objects = [make_workload("Job", env_from(), "core-migrate-v2")]
+        _docs, render = _render_of(objects)
+        runner = RecordingRunner(
+            {**OK_RESPONSES, ("envsubst",): Result(0, render), INSPECT: Result(0, _as_json(objects))}
+        )
+        rc, out = _run(_cfg(), runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("migrate-step=pre", out)
+        self.assertEqual([c for c in runner.calls if c[:2] == ["kubectl", "apply"]], [])
+        self.assertEqual([c for c in runner.calls if c[:2] == ["kubectl", "wait"]], [])
 
 class TestAfterHookExecution(unittest.TestCase):
     """`[deploy] after` — runs on rollout success only, without a shell."""

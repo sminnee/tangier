@@ -76,7 +76,7 @@ paths = ["tangier/image.py", "tangier/commands/image_cmds.py"]
 depends = "changemap-src"
 
 [deploy-src]
-paths = ["tangier/deploy.py", "tangier/commands/deploy_cmds.py"]
+paths = ["tangier/deploy.py", "tangier/manifests.py", "tangier/commands/deploy_cmds.py"]
 depends = "image-src"
 
 [tailnet-src]
