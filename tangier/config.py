@@ -168,6 +168,7 @@ class TailnetEnv:
 
     name: str
     tag: str
+    operator: str | None = None
 
 
 @dataclass
@@ -175,11 +176,17 @@ class TailnetSettings:
     """`[tailnet]` — how CI reaches the cluster over the tailnet.
 
     `operator` is the Tailscale Kubernetes operator's hostname, which appears in
-    the kubeconfig context name. All four consuming repos use the default.
+    the kubeconfig context name. A `[tailnet.<env>] operator` overrides it for
+    one environment.
     """
 
     operator: str = "tailscale-operator"
     envs: dict[str, TailnetEnv] = field(default_factory=dict)
+
+    def operator_for(self, env: str | None) -> str:
+        """The operator for `env`: its own if it sets one, else the shared one."""
+        own = self.envs[env].operator if env in self.envs else None
+        return own or self.operator
 
 
 @dataclass
@@ -708,12 +715,17 @@ def _parse_tailnet(path: str, body: dict[str, Any]) -> TailnetSettings:
     settings = TailnetSettings()
     for key, value in body.items():
         if isinstance(value, dict):
-            _check_keys(path, f"tailnet.{key}", value, {"tag"})
+            _check_keys(path, f"tailnet.{key}", value, {"tag", "operator"})
             if "tag" not in value:
                 # A `[tailnet.<env>]` with nothing in it is a typo, not a way to
                 # say "this env needs no tag" — there is no such thing.
                 raise ConfigError(f"{path}: `[tailnet.{key}]` requires `tag`")
-            settings.envs[key] = TailnetEnv(name=key, tag=_as_str(path, f"tailnet.{key}", "tag", value["tag"]))
+            operator = value.get("operator")
+            settings.envs[key] = TailnetEnv(
+                name=key,
+                tag=_as_str(path, f"tailnet.{key}", "tag", value["tag"]),
+                operator=None if operator is None else _as_str(path, f"tailnet.{key}", "operator", operator),
+            )
         elif key == "operator":
             settings.operator = _as_str(path, "tailnet", "operator", value)
         else:

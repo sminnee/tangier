@@ -10,7 +10,9 @@
 # call sites want the tailnet connect ALONE, and making them install uv
 # and tangier to read one string would defeat the point of the action.
 set -euo pipefail
-# Precedence: explicit input, then config. An explicit `tag` also means
+# Precedence: explicit input, then config. For the operator that is the
+# `operator` input, then `[tailnet.<env>] operator`, then `[tailnet] operator`,
+# then `tailscale-operator`. An explicit `tag` also means
 # `pipeline.toml` need not exist at all — which is how a repo with no
 # images (k8s-cluster is helm and kubectl) uses this action without a
 # config file that would misrepresent it.
@@ -25,8 +27,11 @@ import os, tomllib
 with open("pipeline.toml", "rb") as fh:
     cfg = tomllib.load(fh).get("tailnet", {})
 env = os.environ.get("INPUT_ENV", "")
-print((cfg.get(env) or {}).get("tag", "") if env else "")
-print(cfg.get("operator", "tailscale-operator"))
+env_cfg = cfg.get(env) if env else None
+if not isinstance(env_cfg, dict):
+    env_cfg = {}
+print(env_cfg.get("tag", ""))
+print(env_cfg.get("operator") or cfg.get("operator", "tailscale-operator"))
 ')"
   CFG_TAG="$(printf '%s' "$CFG" | sed -n 1p)"
   CFG_OPERATOR="$(printf '%s' "$CFG" | sed -n 2p)"

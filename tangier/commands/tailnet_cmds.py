@@ -52,7 +52,7 @@ def cmd_check(config: Config, args: argparse.Namespace) -> int:
     #    non-zero, which on its own reads as a kubectl failure.
     ctx_result = runner.run(["kubectl", "config", "current-context"])
     context = ctx_result.stdout.strip()
-    operator = config.tailnet.operator
+    operator = config.tailnet.operator_for(env_name)
     if not context:
         raise TailnetError(f"no current kubectl context — run `tailscale configure kubeconfig {operator}`")
 
