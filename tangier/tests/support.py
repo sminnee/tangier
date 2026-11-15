@@ -130,6 +130,27 @@ def make_origin(testcase: Any, repo: str) -> str:
     return origin
 
 
+def make_workload(kind: str, pod: dict, name: str = "w", **meta: Any) -> dict:
+    """A k8s `kind` object holding `pod` as its pod spec, wherever that kind keeps it."""
+    if kind == "Pod":
+        spec = pod
+    elif kind == "CronJob":
+        spec = {"jobTemplate": {"spec": {"template": {"spec": pod}}}}
+    else:
+        spec = {"template": {"spec": pod}}
+    return {"kind": kind, "metadata": {"name": name, **meta}, "spec": spec}
+
+
+def make_configmap(name: str, **meta: Any) -> dict:
+    return {"kind": "ConfigMap", "metadata": {"name": name, **meta}}
+
+
+def env_from(*refs: tuple[str, str]) -> dict:
+    """A pod spec with one container reading each `(kind, name)` through `envFrom`."""
+    key = {"ConfigMap": "configMapRef", "Secret": "secretRef"}
+    return {"containers": [{"name": "c", "envFrom": [{key[k]: {"name": n}} for k, n in refs]}]}
+
+
 class RecordingRunner:
     """A Runner that records calls and replays canned responses.
 

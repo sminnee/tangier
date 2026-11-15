@@ -1,12 +1,14 @@
 """`tangier deploy ...` — render, apply in two passes, wait, and roll back on failure.
 
-Exit codes: 0 rolled out; 1 migration or rollout failure (rollback ran);
-2 unknown env, bad config, missing kubectl, or a failed `[deploy] digests` lookup.
+Exit codes: 0 rolled out; 1 migration or rollout failure (rollback ran after a
+rollout failure); 2 unknown env, bad config, missing kubectl, a failed `[deploy] digests`
+lookup, or a render kubectl cannot read.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import string
 import sys
@@ -26,6 +28,13 @@ from tangier.deploy import (
     versions,
 )
 from tangier.github import write_summary
+from tangier.manifests import (
+    PASS_ONE_SELECTOR,
+    inspect_argv,
+    parse_objects,
+    pass_one,
+    split_documents,
+)
 from tangier.runner import Runner, Subprocess
 
 
@@ -138,14 +147,21 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
     print(f"Deploying to {env.name} ({ns})...")
     manifests = _render(runner, config, env, subst_vars)
 
+    objects, docs = _inspect(runner, manifests)
+
     # Read the prior tag BEFORE applying anything — once pass 1 lands, this
     # reads the new tag. Empty on a first-ever deploy.
     prior = prior_version(runner, env, config)
 
     job = migration_job_name(env, subst_vars)
     if job:
-        # Pass 1: the migration Job only.
-        result = runner.run(["kubectl", "apply", "-f", "-", "-n", ns, "-l", "migrate-step=pre"], input=manifests)
+        # Pass 1: the migration Job and the ConfigMaps and Secrets it reads from the render.
+        first = pass_one(docs, objects, ns)
+        if not first:
+            # The Job could never appear, so waiting for it would only burn the timeout.
+            print(f"No `{PASS_ONE_SELECTOR}` objects in the render, so job/{job} cannot run")
+            return 1
+        result = runner.run(["kubectl", "apply", "-f", "-", "-n", ns], input=first)
         if not result.ok:
             # Logged and ignored, exactly as the bash fell through with no set -e.
             print(f"kubectl apply (pass 1) returned {result.returncode}", file=sys.stderr)
@@ -183,6 +199,25 @@ def cmd_deploy(config: Config, args: argparse.Namespace) -> int:
     print("Rolling back")
     _rollback(runner, config, env, subst_vars, prior, targets)
     return 1
+
+
+def _inspect(runner: Runner, manifests: str) -> tuple[list[dict], list[str]]:
+    """The render as JSON objects and as YAML documents, index-aligned.
+
+    Runs before anything touches the cluster. A render kubectl cannot read
+    would fail at apply too, so it stops the deploy here instead.
+    """
+    result = runner.run(inspect_argv(), input=manifests)
+    if not result.ok:
+        raise DeployError(f"kubectl could not read the rendered manifests: {result.stderr.strip()}")
+    try:
+        objects = parse_objects(result.stdout)
+    except json.JSONDecodeError as e:
+        raise DeployError(f"kubectl printed unreadable JSON for the rendered manifests: {e}") from e
+    docs = split_documents(manifests)
+    if len(docs) != len(objects):
+        raise DeployError(f"the render has {len(docs)} YAML documents but kubectl read {len(objects)} objects")
+    return objects, docs
 
 
 def _run_after_hook(runner: Runner, cfg: Config, env, subst_vars: dict[str, str]) -> int:
@@ -263,7 +298,7 @@ def _rollback(
             _ = runner.run(["kubectl", "delete", "job", prior_job, "-n", env.namespace, "--ignore-not-found"])
             rendered = _render(runner, cfg, env, prior_vars)
             _ = runner.run(
-                ["kubectl", "apply", "-f", "-", "-n", env.namespace, "-l", "migrate-step=pre"], input=rendered
+                ["kubectl", "apply", "-f", "-", "-n", env.namespace, "-l", PASS_ONE_SELECTOR], input=rendered
             )
             waited = runner.run(
                 [
