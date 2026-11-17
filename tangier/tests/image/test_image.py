@@ -1016,8 +1016,118 @@ class TestLegBuild(unittest.TestCase):
         )
 
 
-class TestLegAndBuildxArgParser(unittest.TestCase):
-    """`--leg` and `--buildx-arg`, through the real parser."""
+class TestMerge(unittest.TestCase):
+    """`image merge`: join the legs, then publish the index everywhere."""
+
+    def _merge(self, runner, mirrors=("mirror.example/ns",), **kw) -> int:
+        self.out = io.StringIO()
+        with contextlib.redirect_stdout(self.out):
+            return image_cmds.cmd_merge(_cfg(mirrors), _args(runner, **kw))
+
+    def _writes(self, runner) -> list[list[str]]:
+        return [c for c in runner.calls if c[:2] == ["docker", "buildx"] or c[:3] == ["regctl", "image", "copy"]]
+
+    def test_everything_published_makes_no_calls_past_the_probes(self) -> None:
+        runner = _registry(final={PRIMARY: _index(AMD, ARM), MIRROR: _index(AMD, ARM)})
+        self.assertEqual(self._merge(runner), 0)
+        self.assertEqual(self._writes(runner), [])
+        self.assertEqual(self.out.getvalue().splitlines()[-3:], ["skipped svc", f"tag={TAG}", "built=false"])
+
+    def test_a_complete_primary_is_copied_with_latest_to_a_mirror_that_lacks_a_platform(self) -> None:
+        # The re-run after a merge whose mirror copy failed: `:latest` must follow too.
+        runner = _registry(final={PRIMARY: _index(AMD, ARM), MIRROR: _index(AMD)})
+        self.assertEqual(self._merge(runner), 0)
+        self.assertEqual(
+            self._writes(runner),
+            [_copy(PRIMARY, MIRROR), ["regctl", "image", "copy", f"{PRIMARY}:latest", f"{MIRROR}:latest"]],
+        )
+        self.assertIn("copied svc", self.out.getvalue())
+
+    def test_joins_the_legs_then_copies_tag_and_latest_to_each_mirror(self) -> None:
+        runner = _registry(legs=(AMD, ARM))
+        self.assertEqual(self._merge(runner, mirrors=("mirror.example/ns", "mirror2.example/ns")), 0)
+        self.assertEqual(
+            self._writes(runner),
+            [
+                [
+                    "docker",
+                    "buildx",
+                    "imagetools",
+                    "create",
+                    "--tag",
+                    f"{PRIMARY}:{TAG}",
+                    "--tag",
+                    f"{PRIMARY}:latest",
+                    f"{PRIMARY}:{TAG}-linux-amd64",
+                    f"{PRIMARY}:{TAG}-linux-arm64",
+                ],
+                ["regctl", "image", "copy", f"{PRIMARY}:{TAG}", f"{MIRROR}:{TAG}"],
+                ["regctl", "image", "copy", f"{PRIMARY}:latest", f"{MIRROR}:latest"],
+                ["regctl", "image", "copy", f"{PRIMARY}:{TAG}", f"{MIRROR_2}:{TAG}"],
+                ["regctl", "image", "copy", f"{PRIMARY}:latest", f"{MIRROR_2}:latest"],
+            ],
+        )
+        self.assertEqual(self.out.getvalue().splitlines()[-3:], ["merged svc", f"tag={TAG}", "built=true"])
+
+    def test_an_old_single_platform_tag_is_the_source_for_its_platform(self) -> None:
+        # Published amd64-only before the move: the amd64 leg skipped, so there is no amd64 leg tag.
+        runner = _registry(final={PRIMARY: _index(AMD)}, legs=(ARM,))
+        self.assertEqual(self._merge(runner, no_mirrors=True), 0)
+        [create] = self._writes(runner)
+        self.assertEqual(create[-2:], [f"{PRIMARY}:{TAG}", f"{PRIMARY}:{TAG}-linux-arm64"])
+
+    def test_a_platform_with_no_source_is_an_error_that_names_it(self) -> None:
+        runner = _registry(legs=(AMD,))
+        with self.assertRaises(ImageError) as ctx:
+            _ = self._merge(runner)
+        self.assertIn("svc linux/arm64", str(ctx.exception))
+        self.assertNotIn("linux/amd64", str(ctx.exception))
+        self.assertEqual(self._writes(runner), [])
+
+    def test_a_missing_leg_in_any_bucket_fails_before_any_bucket_is_pushed(self) -> None:
+        _fake_tags(self)
+        api, web = "registry.example/ns/api", "registry.example/ns/web"
+        legs = [_leg_probe(api, AMD, "sha-api"), _leg_probe(api, ARM, "sha-api"), _leg_probe(web, AMD, "sha-web")]
+        runner = _registry(extra=dict.fromkeys(legs, Result(0)))
+        self.out = io.StringIO()
+        with self.assertRaises(ImageError) as ctx, contextlib.redirect_stdout(self.out):
+            _ = image_cmds.cmd_merge(_multi_cfg(), _args(runner, buckets=["api", "web"], tag=None))
+        self.assertIn("web linux/arm64", str(ctx.exception))
+        self.assertNotIn("api", str(ctx.exception))
+        self.assertEqual(self._writes(runner), [])
+
+    def test_a_failed_join_copies_nothing(self) -> None:
+        runner = _registry(legs=(AMD, ARM), extra={("docker", "buildx", "imagetools"): Result(6)})
+        self.assertEqual(self._merge(runner), 6)
+        self.assertEqual([c for c in self._writes(runner) if c[0] == "regctl"], [])
+        self.assertIn("merge failed svc", self.out.getvalue())
+
+    def test_a_failed_copy_stops_with_a_non_zero_exit(self) -> None:
+        runner = _registry(legs=(AMD, ARM), extra={("regctl", "image", "copy"): Result(5)})
+        self.assertEqual(self._merge(runner, mirrors=("mirror.example/ns", "mirror2.example/ns")), 5)
+        self.assertEqual(len(self._writes(runner)), 2)
+        self.assertIn("merge failed svc", self.out.getvalue())
+
+    def test_no_mirrors_touches_the_primary_only(self) -> None:
+        runner = _registry(legs=(AMD, ARM))
+        self.assertEqual(self._merge(runner, no_mirrors=True), 0)
+        self.assertFalse(any(MIRROR in " ".join(c) for c in runner.calls))
+        self.assertEqual(len(self._writes(runner)), 1)
+
+    def test_one_platform_is_not_a_merge(self) -> None:
+        with self.assertRaises(ImageError) as ctx:
+            _ = self._merge(_registry(), platforms="linux/amd64")
+        self.assertIn("at least two platforms", str(ctx.exception))
+
+    def test_a_platform_must_be_os_and_arch(self) -> None:
+        for bad in ("linux,linux/arm64", "linux/amd64,linux//v7", "linux/amd64,a/b/c/d"):
+            with self.subTest(bad), self.assertRaises(ImageError) as ctx:
+                _ = self._merge(_registry(), platforms=bad)
+            self.assertIn("not a platform", str(ctx.exception))
+
+
+class TestLegAndMergeParser(unittest.TestCase):
+    """`--leg`, `--buildx-arg` and `image merge`, through the real parser."""
 
     def setUp(self) -> None:
         self.path = write_config(
@@ -1048,6 +1158,11 @@ class TestLegAndBuildxArgParser(unittest.TestCase):
         rc, out, _ = self._main("build", "svc", "--tag", "t", "--push", "--print", "--buildx-arg=--provenance=false")
         self.assertEqual(rc, 0)
         self.assertTrue(out.strip().endswith("--provenance=false ."))
+
+    def test_merge_needs_platforms(self) -> None:
+        rc, _, err = self._main("merge", "svc")
+        self.assertEqual(rc, 2)
+        self.assertIn("--platforms", err)
 
 
 class TestUncommittedFiles(unittest.TestCase):

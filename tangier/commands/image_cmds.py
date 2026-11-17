@@ -23,8 +23,11 @@ from tangier.image import (
     index_platforms,
     leg_tag,
     manifest_argv,
+    merge_argv,
     native_platform_argv,
+    parse_platforms,
     plan_build,
+    plan_merge,
     render_compose,
     resolve_secrets,
     tag_for,
@@ -288,6 +291,76 @@ def _fill_from(runner: Runner, src: str, missing: list[str], tag: str) -> int:
     return 0
 
 
+def cmd_merge(config: Config, args: argparse.Namespace) -> int:
+    """Join each bucket's `--leg` pushes into one multi-platform image, and publish it.
+
+    `plan_merge` decides per bucket. See "Multi-platform images" in
+    docs/guide/4-packages-and-builds.md.
+    """
+    names: list[str] = list(dict.fromkeys(args.buckets))
+    if args.tag and len(names) > 1:
+        raise ImageError("--tag names one image, so it takes one bucket")
+    platforms = parse_platforms(args.platforms)
+    runner = _runner(args)
+    _refuse_dirty(_dirty_buckets(config, names, args.head))
+
+    steps = plan_merge(
+        config,
+        names,
+        platforms,
+        args.head,
+        mirrors=not args.no_mirrors,
+        tag=args.tag,
+        platforms_at=lambda ref, tag: platforms_at(runner, ref, tag),
+        # A leg tag holds only the platform it names, so plain existence is enough.
+        leg_exists=lambda ref, tag, platform: published(runner, ref, leg_tag(tag, platform), platform),
+    )
+    if any(s.action == "merge" for s in steps) and runner.which("docker") is None:
+        raise ImageError("docker not found on PATH — cannot merge")
+
+    rc = 0
+    outcome: dict[str, int] = {}
+    for step in steps:
+        primary = step.refs[0]
+        if step.action == "skip":
+            print(f"{primary}:{step.tag} already holds {', '.join(platforms)} everywhere; skipping merge")
+            outcome[step.bucket] = 0
+        elif step.action == "copy":
+            outcome[step.bucket] = _copy_tag_and_latest(runner, primary, step.lacking, step.tag)
+        else:
+            joined = runner.run(merge_argv(step.sources, [f"{primary}:{step.tag}", f"{primary}:latest"]), capture=False)
+            ok = joined.ok
+            outcome[step.bucket] = (
+                _copy_tag_and_latest(runner, primary, step.refs[1:], step.tag) if ok else joined.returncode
+            )
+        rc = rc or outcome[step.bucket]
+
+    done = {"merge": "merged", "copy": "copied", "skip": "skipped"}
+    for step in steps:
+        code = outcome[step.bucket]
+        print(f"{done[step.action] if code == 0 else step.action + ' failed'} {step.bucket}")
+
+    if len(steps) == 1:
+        [step] = steps
+        built = step.action == "merge" and outcome[step.bucket] == 0
+        emit_outputs({"tag": step.tag, "built": "true" if built else "false"})
+    return rc
+
+
+def _copy_tag_and_latest(runner: Runner, primary: str, dests: list[str], tag: str) -> int:
+    """Copy the primary's merged `:<tag>` and `:latest` to each of `dests`, stopping at a failure.
+
+    Unlike `_fill_from`, `:latest` moves too: a merge publishes it, so a re-run
+    after a failed copy must finish the job.
+    """
+    for dest in dests:
+        for t in (tag, "latest"):
+            copied = runner.run(copy_argv(f"{primary}:{t}", f"{dest}:{t}"), capture=False)
+            if not copied.ok:
+                return copied.returncode
+    return 0
+
+
 def cmd_registries(config: Config, args: argparse.Namespace) -> int:
     """Print each registry `image build --push` pushes to, one per line: `url` first.
 
@@ -377,6 +450,25 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
     )
     _ = bp.add_argument("--print", action="store_true", help="print the command line instead of running it")
     bp.set_defaults(func=cmd_build)
+
+    mp = isub.add_parser(
+        "merge",
+        help="join each bucket's `image build --leg` pushes into one multi-platform image, and publish it",
+    )
+    _ = mp.add_argument("buckets", nargs="+", metavar="bucket")
+    _ = mp.add_argument(
+        "--platforms",
+        required=True,
+        help="comma-separated platforms the image must hold, such as linux/amd64,linux/arm64",
+    )
+    _ = mp.add_argument(
+        "--tag", default=None, help="tag to merge (default: the computed content hash); one bucket only"
+    )
+    _ = mp.add_argument("--head", default="HEAD")
+    _ = mp.add_argument(
+        "--no-mirrors", action="store_true", help="publish to `[registry] url` only, not to `[registry] mirrors`"
+    )
+    mp.set_defaults(func=cmd_merge)
 
     rp = isub.add_parser("registries", help="print the registries `image build --push` pushes to")
     _ = rp.add_argument("--no-mirrors", action="store_true", help="print `[registry] url` only")

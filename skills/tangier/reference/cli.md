@@ -86,6 +86,7 @@ Content-addressed image tags and builds. A tag is the bucket's hash.
 | `image tag <bucket>` | `--head` | Print the bucket's tag. | 0, or 2 for an unknown bucket |
 | `image exists <bucket>` | `--tag`, `--head` | Print `exists` or `missing`. Needs `regctl`. | 0 exists, 1 missing, 2 no `regctl` |
 | `image build <bucket>...` | see below | Push or pull each bucket's image, building those that are not published. | 0, or the first failed step's exit code |
+| `image merge <bucket>...` | `--platforms`, `--no-mirrors`, `--tag`, `--head` | Join each bucket's `image build --leg` pushes into one multi-platform image and publish it. See below. | 0, or the first failed step's exit code |
 | `image registries` | `--no-mirrors` | Print `[registry] url`, then each `[registry] mirrors` entry, one per line. `--no-mirrors` prints `url` only. The build action reads it to choose its logins. | 0 |
 | `image compose <template>` | `--head` | Print the template with each `[[bucket]]` replaced by `<registry>/<bucket>:<sha>`. | 0 |
 
@@ -101,6 +102,8 @@ Content-addressed image tags and builds. A tag is the bucket's hash.
 | `--tag TAG` | Use this tag instead of the bucket's hash. One bucket only. |
 | `--head REF` | Hash the bucket at this commit. |
 | `--secret id=<id>` | An extra buildx secret id. Passed only when its upper-cased variable is set. Repeats. |
+| `--leg` | With `--push`: build the Docker daemon's own platform as one leg of a multi-platform image, for `image merge`. See below. |
+| `--buildx-arg=ARG` | An extra argument passed verbatim to `docker buildx build`, just before the context, such as `--buildx-arg=--provenance=false`. Write it with `=`. Repeats. |
 | `--print` | Print the command line and exit. Needs no registry. |
 
 One of `--push` and `--pull` is required. Every bucket is checked before any pull or build: an
@@ -127,6 +130,30 @@ of a bucket whose spec sets `platform` pulls that platform.
 With one bucket, `image build` also emits `tag=<sha>` and `built=true|false` to stdout and
 `$GITHUB_OUTPUT`, except with `--print`. `built` is `false` when the build was skipped, copied,
 pulled or failed.
+
+### Multi-platform images
+
+One image for several platforms is built on native runners, one per platform, then joined:
+
+1. On each runner, `image build <bucket> --push --leg` reads the platform from the Docker daemon
+   (`docker version`), builds it with `--platform` set to that, and pushes `<url>/<bucket>:<sha>-<os>-<arch>`
+   (`/` becomes `-`, so `linux/arm/v7` gives `-linux-arm-v7`). It pushes to `url` only, with no
+   `:latest` and no mirror. Its cache ref is `:buildcache-<os>-<arch>`. It skips when `:<sha>`
+   already holds its platform, or its leg tag exists. It emits `tag=<sha>`, the final tag.
+2. `image merge <bucket> --platforms linux/amd64,linux/arm64` probes `:<sha>` on every destination:
+   - every destination holds every platform: skip;
+   - `url` holds every platform: `regctl image copy` its `:<sha>` and `:latest` to each destination
+     that does not;
+   - otherwise: `docker buildx imagetools create` joins one source per platform into `:<sha>` and
+     `:latest` on `url`, then copies both to each mirror. A platform's source is its leg tag, else
+     `:<sha>` when that already holds it, such as an image published amd64-only before. A platform
+     with neither exits 2 and names it, before anything is pushed. So does a `--platforms` entry
+     that is not `os/arch[/variant]`.
+
+   It prints `merged`, `copied` or `skipped` per bucket, and emits `tag` and `built` for one
+   bucket, as `image build` does. It needs at least two platforms, `regctl`, and `docker` to join.
+
+`--leg --print` shows the `linux/amd64` leg, because reading the real platform needs a daemon.
 
 ## `deploy`
 
