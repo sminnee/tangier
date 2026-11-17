@@ -10,3 +10,13 @@ sha   = true
 [image.fixture]
 dockerfile = "app/Dockerfile"
 context    = "app"
+
+# Built for linux/amd64 and linux/arm64 by the `build-action-multiplatform`
+# and `build-action-merge` jobs.
+[multi]
+paths = "multi/**"
+sha   = true
+
+[image.multi]
+dockerfile = "multi/Dockerfile"
+context    = "multi"

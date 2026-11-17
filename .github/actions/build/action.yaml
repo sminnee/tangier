@@ -1,7 +1,8 @@
 name: tangier build
 description: >-
   Build and push one package's content-addressed image, skipping the build
-  entirely when that tag is already published.
+  entirely when that tag is already published. With `platform-leg` and
+  `merge-platforms`, build one image for several platforms on native runners.
 
 inputs:
   package:
@@ -46,6 +47,28 @@ inputs:
       block (a composite action cannot read the `secrets` context).
     required: false
     default: ""
+  platform-leg:
+    description: >-
+      `true` builds this runner's own platform as one leg of a multi-platform
+      image: it pushes `<tag>-<os>-<arch>` to `[registry] url` only, with no
+      `:latest` and no mirror copy, for a later `merge-platforms` job to join.
+      Skipped when the tag or the leg already holds this platform.
+    required: false
+    default: "false"
+  merge-platforms:
+    description: >-
+      Comma-separated platforms, such as `linux/amd64,linux/arm64`. Set, the
+      action builds nothing: it joins the `platform-leg` pushes into one image
+      under `:<tag>` and `:latest`, then copies it to each mirror. Fails when a
+      platform has no leg. Cannot be combined with `platform-leg`.
+    required: false
+    default: ""
+  buildx-args:
+    description: >-
+      Space-separated extra arguments passed verbatim to `docker buildx build`,
+      such as `--provenance=false`. Ignored by `merge-platforms`.
+    required: false
+    default: ""
   regctl-version:
     description: regctl release to install. Pinned, never `latest`.
     required: false
@@ -76,8 +99,9 @@ outputs:
     value: ${{ steps.build.outputs.tag }}
   published:
     description: >-
-      `true` when this run built and pushed the image, `false` when the tag was
-      already published and the build was skipped.
+      `true` when this run built and pushed the image (or its leg, or merged
+      it), `false` when the tag was already published and the build was
+      skipped.
     value: ${{ steps.build.outputs.built }}
 
 runs:
@@ -153,13 +177,32 @@ runs:
         PACKAGE: ${{ inputs.package }}
         EXTRA_SECRETS: ${{ inputs.extra-secrets }}
         MIRRORS: ${{ inputs.mirrors }}
+        PLATFORM_LEG: ${{ inputs.platform-leg }}
+        MERGE_PLATFORMS: ${{ inputs.merge-platforms }}
+        BUILDX_ARGS: ${{ inputs.buildx-args }}
       run: |
         set -euo pipefail
+        # The input lists below are split on spaces; -f stops a `*` in one from globbing.
+        set -f
         ARGS=()
         if [ "$MIRRORS" = "false" ]; then
           ARGS+=(--no-mirrors)
         fi
+        if [ -n "$MERGE_PLATFORMS" ]; then
+          if [ "$PLATFORM_LEG" = "true" ]; then
+            echo "::error::set platform-leg or merge-platforms, not both" >&2
+            exit 1
+          fi
+          tangier image merge "$PACKAGE" --platforms "$MERGE_PLATFORMS" "${ARGS[@]+"${ARGS[@]}"}"
+          exit 0
+        fi
+        if [ "$PLATFORM_LEG" = "true" ]; then
+          ARGS+=(--leg)
+        fi
         for id in $EXTRA_SECRETS; do
           ARGS+=(--secret "id=$id")
+        done
+        for arg in $BUILDX_ARGS; do
+          ARGS+=("--buildx-arg=$arg")
         done
         tangier image build "$PACKAGE" --push "${ARGS[@]+"${ARGS[@]}"}"
