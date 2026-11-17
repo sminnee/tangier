@@ -7,6 +7,7 @@ asserted as a rendered command line rather than executed.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
@@ -101,6 +102,16 @@ def resolve_secrets(
     return out
 
 
+def platform_suffix(platform: str) -> str:
+    """The tag suffix for a platform: `linux/arm64` gives `linux-arm64`."""
+    return platform.replace("/", "-")
+
+
+def leg_tag(tag: str, platform: str) -> str:
+    """The tag one platform's leg pushes before `image merge` joins the legs."""
+    return f"{tag}-{platform_suffix(platform)}"
+
+
 def build_argv(
     spec: ImageSpec,
     ref: str,
@@ -109,6 +120,8 @@ def build_argv(
     push: bool = False,
     secrets: list[SecretArg] | None = None,
     mirrors: list[str] | None = None,
+    leg: str | None = None,
+    extra: list[str] | None = None,
 ) -> list[str]:
     """Render the `docker buildx build` command line: a push, or a local build into the Docker daemon.
 
@@ -128,12 +141,19 @@ def build_argv(
     A local build reads the cache but never writes it: see "Images" in
     docs/guide/4-packages-and-builds.md for why.
 
+    `leg` is the platform of one leg of a multi-platform image. It builds that
+    platform, tags only `<ref>:<tag>-<os>-<arch>` and caches to
+    `:buildcache-<os>-<arch>`: see "Multi-platform images" in
+    docs/guide/4-packages-and-builds.md for why.
+
+    `extra` is passed to buildx verbatim, just before the context.
+
     The build context is always the repo root. `code-path` in the old workflows
     was a *dockerfile prefix*, not a context — modelling it as a context breaks
     every build.
     """
     argv = ["docker", "buildx", "build"]
-    cache_ref = f"{ref}:buildcache"
+    cache_ref = f"{ref}:buildcache-{platform_suffix(leg)}" if leg else f"{ref}:buildcache"
 
     if not push:
         # Cross-build and load into the local daemon so docker compose can use the image.
@@ -142,22 +162,29 @@ def build_argv(
         argv += ["--load"]
         if spec.cache:
             argv += ["--cache-from", f"type=registry,ref={cache_ref}"]
-    elif spec.cache:
-        argv += [
-            "--cache-from",
-            f"type=registry,ref={cache_ref}",
-            "--cache-to",
-            f"type=registry,ref={cache_ref},mode=max,image-manifest=true,oci-mediatypes=true",
-        ]
+    else:
+        if leg:
+            # The tag names this platform, so make the builder build exactly it.
+            argv += ["--platform", leg]
+        if spec.cache:
+            argv += [
+                "--cache-from",
+                f"type=registry,ref={cache_ref}",
+                "--cache-to",
+                f"type=registry,ref={cache_ref},mode=max,image-manifest=true,oci-mediatypes=true",
+            ]
 
     for secret in secrets or []:
         argv += ["--secret", f"id={secret.id},env={secret.env}"]
 
     argv += ["--file", spec.dockerfile]
-    for dest in [ref, *(mirrors or [])] if push else [ref]:
-        argv += ["--tag", f"{dest}:{tag}"]
-        if push and tag != "latest":
-            argv += ["--tag", f"{dest}:latest"]
+    if push and leg:
+        argv += ["--tag", f"{ref}:{leg_tag(tag, leg)}"]
+    else:
+        for dest in [ref, *(mirrors or [])] if push else [ref]:
+            argv += ["--tag", f"{dest}:{tag}"]
+            if push and tag != "latest":
+                argv += ["--tag", f"{dest}:latest"]
 
     if push:
         argv += ["--output", "type=registry"]
@@ -166,6 +193,7 @@ def build_argv(
     for key in sorted(spec.args):
         argv += ["--build-arg", f"{key}={spec.args[key]}"]
 
+    argv += extra or []
     argv.append(spec.context)
     return argv
 
@@ -217,6 +245,60 @@ def plan_build(
 def exists_argv(ref: str, tag: str, platform: str = "linux/amd64") -> list[str]:
     """The `regctl` probe for whether a tag is already published."""
     return ["regctl", "manifest", "get", "--platform", platform, f"{ref}:{tag}"]
+
+
+def manifest_argv(ref: str, tag: str) -> list[str]:
+    """The `regctl` fetch of a tag's top-level manifest, as JSON, to read its platforms.
+
+    Not `exists_argv`: `regctl manifest get --platform` ignores the platform
+    when the tag is a single manifest, not an index, and succeeds for any.
+    """
+    return ["regctl", "manifest", "get", "--format", "raw-body", f"{ref}:{tag}"]
+
+
+def config_platform_argv(ref: str, tag: str) -> list[str]:
+    """The `regctl` lookup of a single-manifest image's platform, from its config."""
+    fmt = "{{.OS}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}"
+    return ["regctl", "image", "config", "--format", fmt, f"{ref}:{tag}"]
+
+
+def index_platforms(body: str) -> list[str] | None:
+    """The platforms an index lists, or None when `body` is a single manifest.
+
+    Attestation entries (`unknown/unknown`) are left out.
+    """
+    try:
+        manifest = json.loads(body)
+    except ValueError as e:
+        raise ImageError(f"registry returned a manifest that is not JSON: {e}") from e
+    if "manifests" not in manifest:
+        return None
+    found: list[str] = []
+    for entry in manifest["manifests"]:
+        p = entry.get("platform") or {}
+        if p.get("os", "unknown") == "unknown":
+            continue
+        found.append("/".join(x for x in (p.get("os"), p.get("architecture"), p.get("variant")) if x))
+    return found
+
+
+def has_platform(platforms: Collection[str], want: str) -> bool:
+    """Whether `want` (`os/arch[/variant]`) is among `platforms`.
+
+    A variant is compared only when both sides name one, so `linux/arm64`
+    matches the `linux/arm64/v8` an arm64 image's config reports.
+    """
+    w = want.split("/")
+    for have in platforms:
+        h = have.split("/")
+        if h[:2] == w[:2] and (len(h) < 3 or len(w) < 3 or h[2] == w[2]):
+            return True
+    return False
+
+
+def native_platform_argv() -> list[str]:
+    """The Docker daemon's own platform, such as `linux/arm64` on an arm64 runner."""
+    return ["docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"]
 
 
 def digest_argv(ref: str, tag: str) -> list[str]:

@@ -7,6 +7,7 @@ never executed. No test touches a registry.
 import argparse
 import contextlib
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -19,6 +20,9 @@ from tangier.config import ImageSpec
 from tangier.image import (
     ImageError,
     build_argv,
+    copy_argv,
+    has_platform,
+    index_platforms,
     parse_image_tag,
     plan_build,
     render_compose,
@@ -74,6 +78,9 @@ def _args(runner, **kw) -> argparse.Namespace:
         no_mirrors=False,
         secret=[],
         print=False,
+        leg=False,
+        buildx_arg=[],
+        platforms="linux/amd64,linux/arm64",
     )
     base.update(kw)
     return argparse.Namespace(**base)
@@ -839,6 +846,208 @@ class TestBuildParser(unittest.TestCase):
         rc, _, err = self._main("a", "--tag", "t", "--pull", "--jobs", "0", "--print")
         self.assertEqual(rc, 2)
         self.assertIn("must be at least 1", err)
+
+
+TAG = "abc1234567"
+AMD, ARM = "linux/amd64", "linux/arm64"
+
+
+def _index(*platforms: str) -> str:
+    """A buildx-style index body: each platform, plus its attestation entry."""
+    entries = []
+    for p in platforms:
+        os_, arch, *variant = p.split("/")
+        entries.append({"platform": {"os": os_, "architecture": arch, **({"variant": variant[0]} if variant else {})}})
+        entries.append({"platform": {"os": "unknown", "architecture": "unknown"}})
+    return json.dumps({"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": entries})
+
+
+def _final(ref: str) -> tuple[str, ...]:
+    """The platform-list probe of `<ref>:<TAG>`."""
+    return ("regctl", "manifest", "get", "--format", "raw-body", f"{ref}:{TAG}")
+
+
+def _leg_probe(ref: str, platform: str, tag: str = TAG) -> tuple[str, ...]:
+    return ("regctl", "manifest", "get", "--platform", platform, f"{ref}:{tag}-{platform.replace('/', '-')}")
+
+
+def _registry(
+    final: dict[str, str] | None = None, legs: tuple[str, ...] = (), extra: dict | None = None
+) -> RecordingRunner:
+    """A runner whose registry holds `final` (ref -> index body) and the primary's leg tags for `legs`, and nothing else.
+
+    `extra` adds or overrides responses.
+    """
+    responses: dict[tuple[str, ...], object] = {
+        ("regctl", "manifest", "get"): Result(1),
+        ("docker", "version"): Result(0, f"{ARM}\n"),
+    }
+    for ref, body in (final or {}).items():
+        responses[_final(ref)] = Result(0, body)
+    for platform in legs:
+        responses[_leg_probe(PRIMARY, platform)] = Result(0)
+    responses.update(extra or {})
+    return RecordingRunner(responses)
+
+
+class TestPlatforms(unittest.TestCase):
+    def test_index_platforms_leave_out_attestations(self) -> None:
+        self.assertEqual(index_platforms(_index(AMD, "linux/arm/v7")), [AMD, "linux/arm/v7"])
+
+    def test_a_single_manifest_has_no_index_platforms(self) -> None:
+        self.assertIsNone(index_platforms('{"mediaType": "application/vnd.oci.image.manifest.v1+json"}'))
+
+    def test_a_variant_is_compared_only_when_both_name_one(self) -> None:
+        self.assertTrue(has_platform(["linux/arm64/v8"], ARM))
+        self.assertTrue(has_platform([ARM], "linux/arm64/v8"))
+        self.assertFalse(has_platform(["linux/arm/v6"], "linux/arm/v7"))
+        self.assertFalse(has_platform([AMD], ARM))
+
+    def test_a_single_manifest_reports_its_config_platform(self) -> None:
+        # `regctl manifest get --platform linux/arm64` succeeds on an amd64-only
+        # single manifest, so the platform comes from the image config instead.
+        runner = RecordingRunner(
+            {
+                _final(PRIMARY): Result(0, '{"mediaType": "application/vnd.oci.image.manifest.v1+json"}'),
+                ("regctl", "image", "config"): Result(0, "linux/amd64\n"),
+            }
+        )
+        self.assertEqual(image_cmds.platforms_at(runner, PRIMARY, TAG), [AMD])
+
+    def test_a_missing_tag_has_no_platforms(self) -> None:
+        self.assertIsNone(image_cmds.platforms_at(_registry(), PRIMARY, TAG))
+
+    def test_the_mirror_copy_keeps_every_platform(self) -> None:
+        # No `--platform`: regctl copies the whole index.
+        self.assertEqual(copy_argv("a:t", "b:t"), ["regctl", "image", "copy", "a:t", "b:t"])
+
+
+class TestLegArgv(unittest.TestCase):
+    def test_a_leg_tags_its_platform_on_the_primary_with_its_own_cache(self) -> None:
+        argv = build_argv(_spec(), REF, TAG, push=True, mirrors=[MIRROR], leg=ARM)
+        self.assertEqual(
+            argv,
+            [
+                "docker",
+                "buildx",
+                "build",
+                "--platform",
+                "linux/arm64",
+                "--cache-from",
+                f"type=registry,ref={REF}:buildcache-linux-arm64",
+                "--cache-to",
+                f"type=registry,ref={REF}:buildcache-linux-arm64,mode=max,image-manifest=true,oci-mediatypes=true",
+                "--file",
+                "svc/Dockerfile",
+                "--tag",
+                f"{REF}:{TAG}-linux-arm64",
+                "--output",
+                "type=registry",
+                "--build-arg",
+                f"PACKAGE_VERSION={TAG}",
+                ".",
+            ],
+        )
+
+    def test_a_variant_goes_into_the_suffix(self) -> None:
+        argv = build_argv(_spec(), REF, TAG, push=True, leg="linux/arm/v7")
+        self.assertIn(f"{REF}:{TAG}-linux-arm-v7", argv)
+
+    def test_extra_args_come_just_before_the_context(self) -> None:
+        argv = build_argv(_spec(), REF, TAG, push=True, extra=["--provenance=false", "--build-context", "x=y"])
+        self.assertEqual(argv[-4:], ["--provenance=false", "--build-context", "x=y", "."])
+
+
+class TestLegBuild(unittest.TestCase):
+    """`image build --push --leg`, with the daemon on linux/arm64."""
+
+    def _build(self, runner, mirrors=("mirror.example/ns",), cfg=None, **kw) -> int:
+        self.out = io.StringIO()
+        self.err = io.StringIO()
+        args = _args(runner, **{"push": True, "leg": True, **kw})
+        with contextlib.redirect_stdout(self.out), contextlib.redirect_stderr(self.err):
+            return image_cmds.cmd_build(cfg or _cfg(mirrors), args)
+
+    def _buildx(self, runner) -> list[list[str]]:
+        return [c for c in runner.calls if c[:3] == ["docker", "buildx", "build"]]
+
+    def test_skips_when_the_final_tag_has_the_platform(self) -> None:
+        runner = _registry(final={PRIMARY: _index(AMD, ARM)})
+        self.assertEqual(self._build(runner), 0)
+        self.assertEqual(self._buildx(runner), [])
+        self.assertEqual(self.out.getvalue().splitlines()[-3:], ["skipped svc", f"tag={TAG}", "built=false"])
+
+    def test_skips_when_the_leg_tag_exists(self) -> None:
+        runner = _registry(final={PRIMARY: _index(AMD)}, legs=(ARM,))
+        self.assertEqual(self._build(runner), 0)
+        self.assertEqual(self._buildx(runner), [])
+
+    def test_builds_the_leg_when_neither_has_it(self) -> None:
+        runner = _registry(final={PRIMARY: _index(AMD)})
+        self.assertEqual(self._build(runner), 0)
+        self.assertEqual(len(self._buildx(runner)), 1)
+        # The emitted tag is the final one, which `image merge` publishes.
+        self.assertEqual(self.out.getvalue().splitlines()[-2:], [f"tag={TAG}", "built=true"])
+
+    def test_never_probes_or_copies_to_a_mirror(self) -> None:
+        runner = _registry(final={PRIMARY: _index(AMD, ARM)})
+        _ = self._build(runner)
+        self.assertFalse(any(MIRROR in " ".join(c) for c in runner.calls))
+
+    def test_leg_with_pull_is_an_error(self) -> None:
+        with self.assertRaises(ImageError) as ctx:
+            _ = self._build(_registry(), push=False, pull=True)
+        self.assertIn("needs --push", str(ctx.exception))
+
+    def test_an_unreadable_daemon_platform_stops_before_any_build(self) -> None:
+        runner = _registry(extra={("docker", "version"): Result(1, "", "Cannot connect to the Docker daemon")})
+        with self.assertRaises(ImageError) as ctx:
+            _ = self._build(runner)
+        self.assertIn("Cannot connect", str(ctx.exception))
+        self.assertEqual(self._buildx(runner), [])
+
+    def test_two_buckets_each_build_their_leg(self) -> None:
+        _fake_tags(self)
+        runner = _registry()
+        self.assertEqual(self._build(runner, cfg=_multi_cfg(), buckets=["api", "web"], tag=None), 0)
+        tags = sorted(c[i + 1] for c in self._buildx(runner) for i, a in enumerate(c) if a == "--tag")
+        self.assertEqual(
+            tags, ["registry.example/ns/api:sha-api-linux-arm64", "registry.example/ns/web:sha-web-linux-arm64"]
+        )
+
+
+class TestLegAndBuildxArgParser(unittest.TestCase):
+    """`--leg` and `--buildx-arg`, through the real parser."""
+
+    def setUp(self) -> None:
+        self.path = write_config(
+            self,
+            '[registry]\nurl = "registry.example/ns"\nmirrors = ["mirror.example/ns"]\n'
+            '[image.svc]\ndockerfile = "svc/Dockerfile"\n[svc]\npaths = ["svc/**"]\nsha = true\n',
+        )
+
+    def _main(self, *argv: str) -> tuple[int, str, str]:
+        from tangier import cli
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli.main(["--config", self.path, "image", *argv])
+            except SystemExit as e:
+                rc = e.code if isinstance(e.code, int) else 1
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_leg_print_shows_the_amd64_leg_and_says_so(self) -> None:
+        rc, out, err = self._main("build", "svc", "--tag", "t", "--push", "--leg", "--print")
+        self.assertEqual(rc, 0)
+        self.assertIn(f"--tag {PRIMARY}:t-linux-amd64 ", out)
+        self.assertNotIn(MIRROR, out)
+        self.assertIn("linux/amd64 leg", err)
+
+    def test_buildx_arg_accepts_a_value_that_starts_with_dashes(self) -> None:
+        rc, out, _ = self._main("build", "svc", "--tag", "t", "--push", "--print", "--buildx-arg=--provenance=false")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.strip().endswith("--provenance=false ."))
 
 
 class TestUncommittedFiles(unittest.TestCase):
