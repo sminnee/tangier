@@ -8,23 +8,38 @@ import argparse
 import contextlib
 import io
 import os
+import subprocess
 import tempfile
 import unittest
 import unittest.mock
 
+from tangier import git
 from tangier.commands import image_cmds
 from tangier.config import ImageSpec
 from tangier.image import (
     ImageError,
     build_argv,
     parse_image_tag,
+    plan_build,
     render_compose,
     resolve_secrets,
 )
 from tangier.runner import Result
-from tangier.tests.support import RecordingRunner, make_config, write_config
+from tangier.tests.support import RecordingRunner, make_config, make_git_repo, write_config
 
 REF = "registry.example/ns/svc"
+
+# The real one, for `TestUncommittedFiles`: `setUpModule` patches it away.
+_uncommitted_files = git.uncommitted_files
+
+
+def setUpModule() -> None:
+    # `image build` checks the working tree for uncommitted changes. These
+    # tests run in tangier's own checkout, so they see a clean one; a test of
+    # the dirty rule patches its own file list.
+    patcher = unittest.mock.patch.object(git, "uncommitted_files", return_value=[])
+    _ = patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 def _spec(**kw) -> ImageSpec:
@@ -48,11 +63,13 @@ def _args(runner, **kw) -> argparse.Namespace:
     """`image build`/`image exists` arguments, as the parser would hand them over."""
     base = dict(
         bucket="svc",
+        buckets=["svc"],
         tag="abc1234567",
         head="HEAD",
         runner=runner,
         push=False,
-        load=False,
+        pull=False,
+        jobs=1,
         force=False,
         no_mirrors=False,
         secret=[],
@@ -100,13 +117,33 @@ class TestBuildArgv(unittest.TestCase):
         self.assertIn("image-manifest=true", cache_to)
         self.assertIn("oci-mediatypes=true", cache_to)
 
-    def test_no_push_uses_the_image_output_form_and_no_cache(self) -> None:
+    def test_local_build_loads_and_reads_the_cache_without_writing_it(self) -> None:
+        # A local build must never write the cache: a branch's RUN layers would
+        # poison what published builds reuse.
         argv = build_argv(_spec(), REF, "abc1234567")
-        self.assertIn("--output", argv)
-        self.assertEqual(argv[argv.index("--output") + 1], f"type=image,name={REF}")
+        self.assertEqual(
+            argv,
+            [
+                "docker",
+                "buildx",
+                "build",
+                "--load",
+                "--cache-from",
+                f"type=registry,ref={REF}:buildcache",
+                "--file",
+                "svc/Dockerfile",
+                "--tag",
+                f"{REF}:abc1234567",
+                "--build-arg",
+                "PACKAGE_VERSION=abc1234567",
+                ".",
+            ],
+        )
+
+    def test_local_build_with_the_cache_disabled_has_no_cache_flags(self) -> None:
+        argv = build_argv(_spec(cache=False), REF, "t")
         self.assertNotIn("--cache-from", argv)
-        # No :latest tag when not pushing.
-        self.assertEqual(argv.count("--tag"), 1)
+        self.assertNotIn("--cache-to", argv)
 
     def test_push_of_latest_does_not_double_tag(self) -> None:
         argv = build_argv(_spec(), REF, "latest", push=True)
@@ -117,9 +154,9 @@ class TestBuildArgv(unittest.TestCase):
         self.assertNotIn("--cache-from", argv)
         self.assertEqual(argv[argv.index("--output") + 1], "type=registry")
 
-    def test_load_builds_for_the_local_daemon(self) -> None:
+    def test_local_build_cross_builds_for_the_spec_platform(self) -> None:
         # The bin/build-local shape: cross-build and load, no --output.
-        argv = build_argv(_spec(platform="linux/amd64"), REF, "t", load=True)
+        argv = build_argv(_spec(platform="linux/amd64"), REF, "t")
         self.assertIn("--load", argv)
         self.assertEqual(argv[argv.index("--platform") + 1], "linux/amd64")
         self.assertNotIn("--output", argv)
@@ -237,16 +274,10 @@ class TestExistsAndSkip(unittest.TestCase):
             _ = image_cmds.cmd_build(_cfg(), _args(runner, push=True, force=True))
         self.assertEqual(len(runner.commands(binary="docker")), 1)
 
-    def test_build_without_push_does_not_probe_the_registry(self) -> None:
-        runner = RecordingRunner()
-        with contextlib.redirect_stdout(io.StringIO()):
-            _ = image_cmds.cmd_build(_cfg(), _args(runner))
-        self.assertEqual(runner.commands(binary="regctl"), [])
-
     def test_unbuildable_bucket_raises(self) -> None:
         cfg = make_config(**{"registry": {"url": "registry.example/ns"}, "svc": {"paths": ["svc/**"], "sha": True}})
         with self.assertRaises(ImageError) as ctx:
-            _ = image_cmds.cmd_build(cfg, _args(RecordingRunner()))
+            _ = image_cmds.cmd_build(cfg, _args(RecordingRunner(), push=True, force=True))
         self.assertIn("not buildable", str(ctx.exception))
 
     def test_unknown_bucket_tag_raises(self) -> None:
@@ -495,9 +526,10 @@ class TestMirrors(unittest.TestCase):
         [docker] = runner.commands(binary="docker")
         self.assertNotIn(MIRROR, docker)
 
-    def test_load_ignores_mirrors(self) -> None:
-        runner = RecordingRunner()
-        _ = self._build(runner, push=False, load=True)
+    def test_pull_ignores_mirrors(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(1)})
+        _ = self._build(runner, push=False, pull=True)
+        self.assertEqual(runner.commands(binary="regctl"), [" ".join(_probe(PRIMARY))])
         [docker] = runner.commands(binary="docker")
         self.assertNotIn(MIRROR, docker)
 
@@ -554,3 +586,303 @@ class TestMirrors(unittest.TestCase):
 
         with unittest.mock.patch.object(image_mod, "sha_for_bucket", return_value="v1"):
             self.assertEqual(render_compose(_cfg(("mirror.example/ns",)), "x: [[svc]]"), f"x: {PRIMARY}:v1")
+
+
+def _multi_cfg(mirrors: tuple[str, ...] = (), api_platform: str | None = None):
+    """Three buckets: `api` and `web` are buildable, `docs` has no `[image.docs]`."""
+    registry: dict[str, object] = {"url": "registry.example/ns"}
+    if mirrors:
+        registry["mirrors"] = list(mirrors)
+    api: dict[str, object] = {"dockerfile": "api/Dockerfile"}
+    if api_platform:
+        api["platform"] = api_platform
+    return make_config(
+        **{
+            "registry": registry,
+            "image.api": api,
+            "image.web": {"dockerfile": "web/Dockerfile"},
+            "api": {"paths": ["api/**"], "sha": True},
+            "web": {"paths": ["web/**"], "sha": True},
+            "docs": {"paths": ["docs/**"], "sha": True},
+        }
+    )
+
+
+def _fake_tags(testcase: unittest.TestCase) -> None:
+    """Tag each bucket `sha-<bucket>` without reading a git tree."""
+    from tangier import image as image_mod
+
+    patcher = unittest.mock.patch.object(image_mod, "sha_for_bucket", side_effect=lambda c, b, h="HEAD": f"sha-{b}")
+    _ = patcher.start()
+    testcase.addCleanup(patcher.stop)
+
+
+class TestPlanBuild(unittest.TestCase):
+    def setUp(self) -> None:
+        _fake_tags(self)
+        self.probed: list[tuple[str, str]] = []
+
+    def _plan(self, names, published=(), **kw):
+        def is_published(bucket: str, tag: str) -> bool:
+            self.probed.append((bucket, tag))
+            return bucket in published
+
+        steps = plan_build(_multi_cfg(), names, is_published=is_published, **kw)
+        return [(s.bucket, s.tag, s.action) for s in steps]
+
+    def test_published_is_reused_and_unpublished_is_built(self) -> None:
+        self.assertEqual(
+            self._plan(["api", "web"], published={"api"}),
+            [("api", "sha-api", "reuse"), ("web", "sha-web", "build")],
+        )
+
+    def test_force_builds_everything_without_probing(self) -> None:
+        self.assertEqual(
+            self._plan(["api", "web"], published={"api", "web"}, force=True),
+            [("api", "sha-api", "build"), ("web", "sha-web", "build")],
+        )
+        self.assertEqual(self.probed, [])
+
+    def test_a_dirty_bucket_builds_even_when_published(self) -> None:
+        plan = self._plan(["api", "web"], published={"api", "web"}, dirty={"web"})
+        self.assertEqual(plan, [("api", "sha-api", "reuse"), ("web", "sha-web", "build")])
+        self.assertEqual(self.probed, [("api", "sha-api")])
+
+    def test_a_published_bucket_without_an_image_spec_is_reused(self) -> None:
+        self.assertEqual(self._plan(["docs"], published={"docs"}), [("docs", "sha-docs", "reuse")])
+
+    def test_an_unknown_bucket_raises_before_any_probe(self) -> None:
+        with self.assertRaises(ImageError) as ctx:
+            _ = self._plan(["api", "nope"])
+        self.assertIn("unknown bucket: nope", str(ctx.exception))
+        self.assertEqual(self.probed, [])
+
+    def test_a_bucket_to_build_without_an_image_spec_raises(self) -> None:
+        with self.assertRaises(ImageError) as ctx:
+            _ = self._plan(["api", "docs"], force=True)
+        self.assertIn("[image.docs]", str(ctx.exception))
+
+    def test_tag_overrides_the_computed_tag(self) -> None:
+        self.assertEqual(self._plan(["api"], tag="t1"), [("api", "t1", "build")])
+
+
+def _probe_of(bucket: str) -> tuple[str, ...]:
+    return ("regctl", "manifest", "get", "--platform", "linux/amd64", f"registry.example/ns/{bucket}:sha-{bucket}")
+
+
+def _local_build(bucket: str) -> str:
+    """The whole `--pull` build command line for one of `_multi_cfg`'s buckets."""
+    ref = f"registry.example/ns/{bucket}"
+    return (
+        f"docker buildx build --load --cache-from type=registry,ref={ref}:buildcache "
+        f"--file {bucket}/Dockerfile --tag {ref}:sha-{bucket} --build-arg PACKAGE_VERSION=sha-{bucket} ."
+    )
+
+
+class TestBuildCommand(unittest.TestCase):
+    """`image build` over several buckets, through `cmd_build`."""
+
+    def setUp(self) -> None:
+        _fake_tags(self)
+
+    def _build(self, runner, buckets, cfg=None, **kw) -> int:
+        self.out = io.StringIO()
+        self.err = io.StringIO()
+        args = _args(runner, buckets=buckets, tag=None, **kw)
+        with contextlib.redirect_stdout(self.out), contextlib.redirect_stderr(self.err):
+            return image_cmds.cmd_build(cfg or _multi_cfg(), args)
+
+    def test_pull_pulls_the_published_and_builds_the_rest(self) -> None:
+        runner = RecordingRunner({_probe_of("api"): Result(0), _probe_of("web"): Result(1)})
+        self.assertEqual(self._build(runner, ["api", "web"], pull=True), 0)
+        self.assertEqual(
+            runner.commands(binary="docker"),
+            ["docker pull registry.example/ns/api:sha-api", _local_build("web")],
+        )
+        self.assertEqual(self.out.getvalue().splitlines(), ["pulled api", "built web"])
+
+    def test_pull_asks_for_the_spec_platform(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(0)})
+        _ = self._build(runner, ["api"], cfg=_multi_cfg(api_platform="linux/amd64"), pull=True)
+        self.assertEqual(
+            runner.commands(binary="docker"), ["docker pull --platform linux/amd64 registry.example/ns/api:sha-api"]
+        )
+
+    def test_pull_builds_a_dirty_bucket_and_names_the_files(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(0)})
+        with unittest.mock.patch.object(git, "uncommitted_files", return_value=["web/app.py"]):
+            self.assertEqual(self._build(runner, ["api", "web"], pull=True), 0)
+        self.assertEqual(
+            self.out.getvalue().splitlines(), ["pulled api", "built web (uncommitted changes: web/app.py)"]
+        )
+
+    def test_push_with_a_dirty_bucket_errors_before_any_call(self) -> None:
+        runner = RecordingRunner()
+        dirty = unittest.mock.patch.object(git, "uncommitted_files", return_value=["web/app.py", "other.txt"])
+        with dirty, self.assertRaises(ImageError) as ctx:
+            _ = self._build(runner, ["api", "web"], push=True)
+        self.assertIn("web: web/app.py", str(ctx.exception))
+        self.assertNotIn("other.txt", str(ctx.exception))
+        self.assertEqual(runner.calls, [])
+
+    def test_push_copies_one_bucket_and_builds_another(self) -> None:
+        runner = RecordingRunner(
+            {
+                _probe_of("api"): Result(0),
+                ("regctl", "manifest", "get", "--platform", "linux/amd64", "mirror.example/ns/api:sha-api"): Result(1),
+                ("regctl", "manifest", "get", "--platform", "linux/amd64", "registry.example/ns/web:sha-web"): Result(
+                    1
+                ),
+                ("regctl", "manifest", "get", "--platform", "linux/amd64", "mirror.example/ns/web:sha-web"): Result(1),
+            }
+        )
+        self.assertEqual(self._build(runner, ["api", "web"], cfg=_multi_cfg(("mirror.example/ns",)), push=True), 0)
+        copies = [c for c in runner.calls if c[:3] == ["regctl", "image", "copy"]]
+        self.assertEqual(
+            copies, [["regctl", "image", "copy", "registry.example/ns/api:sha-api", "mirror.example/ns/api:sha-api"]]
+        )
+        [build] = runner.commands(binary="docker")
+        self.assertIn("--tag mirror.example/ns/web:sha-web", build)
+        self.assertEqual(self.out.getvalue().splitlines()[-2:], ["copied api", "built web"])
+
+    def test_a_failed_build_does_not_stop_the_other(self) -> None:
+        api_build = tuple(_local_build("api").split())
+        runner = RecordingRunner({("regctl",): Result(1), api_build: Result(3)})
+        self.assertEqual(self._build(runner, ["api", "web"], pull=True, jobs=2), 3)
+        self.assertEqual(len(runner.commands(binary="docker")), 2)
+        self.assertEqual(self.out.getvalue().splitlines(), ["build failed api", "built web"])
+        # Side by side, each build's output is printed whole under its own header.
+        self.assertIn("== build api (exit 3) ==", self.err.getvalue())
+        self.assertIn("== build web (exit 0) ==", self.err.getvalue())
+
+    def test_a_failed_pull_reports_and_returns_its_code(self) -> None:
+        runner = RecordingRunner(
+            {
+                _probe_of("api"): Result(0),
+                _probe_of("web"): Result(1),
+                ("docker", "pull"): Result(4),
+                tuple(_local_build("web").split()): Result(3),
+            }
+        )
+        self.assertEqual(self._build(runner, ["api", "web"], pull=True), 4)
+        self.assertEqual(self.out.getvalue().splitlines(), ["pull failed api", "build failed web"])
+
+    def test_missing_docker_errors_before_any_pull_or_build(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(1)})
+        runner.missing.add("docker")
+        with self.assertRaises(ImageError):
+            _ = self._build(runner, ["api"], pull=True)
+        self.assertEqual(runner.commands(binary="docker"), [])
+
+    def test_several_buckets_emit_no_outputs(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(1)})
+        _ = self._build(runner, ["api", "web"], push=True)
+        self.assertNotIn("tag=", self.out.getvalue())
+
+    def test_one_bucket_still_emits_tag_and_built(self) -> None:
+        runner = RecordingRunner({("regctl",): Result(1)})
+        _ = self._build(runner, ["api"], pull=True)
+        self.assertEqual(self.out.getvalue().splitlines(), ["built api", "tag=sha-api", "built=true"])
+
+    def test_print_shows_every_bucket_without_any_call(self) -> None:
+        runner = RecordingRunner()
+        self.assertEqual(self._build(runner, ["api", "web"], pull=True, print=True), 0)
+        self.assertEqual(self.out.getvalue().splitlines(), [_local_build("api"), _local_build("web")])
+        self.assertEqual(runner.calls, [])
+
+
+class TestBuildParser(unittest.TestCase):
+    """The `image build` flags, through the real parser."""
+
+    def setUp(self) -> None:
+        self.path = write_config(
+            self,
+            '[registry]\nurl = "registry.example/ns"\n'
+            '[image.a]\ndockerfile = "a/Dockerfile"\n[a]\npaths = ["a/**"]\nsha = true\n'
+            '[image.b]\ndockerfile = "b/Dockerfile"\n[b]\npaths = ["b/**"]\nsha = true\n',
+        )
+
+    def _main(self, *argv: str) -> tuple[int, str, str]:
+        """Exit code, stdout and stderr of `image build <argv>`."""
+        from tangier import cli
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = cli.main(["--config", self.path, "image", "build", *argv])
+            except SystemExit as e:
+                rc = e.code if isinstance(e.code, int) else 1
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_neither_push_nor_pull_is_an_error(self) -> None:
+        rc, _, err = self._main("a", "--tag", "t", "--print")
+        self.assertEqual(rc, 2)
+        self.assertIn("one of the arguments --push --pull is required", err)
+
+    def test_push_and_pull_together_is_an_error(self) -> None:
+        rc, _, err = self._main("a", "--tag", "t", "--push", "--pull", "--print")
+        self.assertEqual(rc, 2)
+        self.assertIn("not allowed with argument", err)
+
+    def test_load_is_pull(self) -> None:
+        rc, out, _ = self._main("a", "--tag", "t", "--load", "--print")
+        self.assertEqual(rc, 0)
+        self.assertIn("--load", out)
+        self.assertNotIn("--output", out)
+
+    def test_tag_with_two_buckets_is_an_error(self) -> None:
+        rc, _, err = self._main("a", "b", "--tag", "t", "--pull", "--print")
+        self.assertEqual(rc, 2)
+        self.assertIn("--tag names one image", err)
+
+    def test_jobs_must_be_at_least_one(self) -> None:
+        rc, _, err = self._main("a", "--tag", "t", "--pull", "--jobs", "0", "--print")
+        self.assertEqual(rc, 2)
+        self.assertIn("must be at least 1", err)
+
+
+class TestUncommittedFiles(unittest.TestCase):
+    """`git.uncommitted_files`: the files that can make a bucket dirty."""
+
+    def setUp(self) -> None:
+        self.root = make_git_repo(self, {"svc/main.py": "main = 1\n", ".gitignore": "*.log\n"})
+
+    def _write(self, rel: str, content: str = "x\n") -> None:
+        with open(os.path.join(self.root, rel), "w") as fh:
+            _ = fh.write(content)
+
+    def _files(self, cwd: str = "") -> list[str]:
+        with contextlib.chdir(os.path.join(self.root, cwd)):
+            return _uncommitted_files()
+
+    def _git(self, *args: str) -> None:
+        _ = subprocess.run(["git", "-C", self.root, *args], capture_output=True, check=True)
+
+    def test_a_clean_tree_has_none(self) -> None:
+        self.assertEqual(self._files(), [])
+
+    def test_a_modified_tracked_file(self) -> None:
+        self._write("svc/main.py", "main = 2\n")
+        self.assertEqual(self._files(), ["svc/main.py"])
+
+    def test_a_staged_change(self) -> None:
+        self._write("svc/main.py", "main = 2\n")
+        self._git("add", "svc/main.py")
+        self.assertEqual(self._files(), ["svc/main.py"])
+
+    def test_a_staged_rename_lists_both_paths(self) -> None:
+        # The old path left the bucket, so it counts as much as the new one.
+        self._git("mv", "svc/main.py", "svc/moved.py")
+        self.assertEqual(sorted(self._files()), ["svc/main.py", "svc/moved.py"])
+
+    def test_an_untracked_file(self) -> None:
+        self._write("svc/new.py")
+        self.assertEqual(self._files(), ["svc/new.py"])
+
+    def test_an_ignored_file_is_left_out(self) -> None:
+        self._write("svc/out.log")
+        self.assertEqual(self._files(), [])
+
+    def test_paths_are_repo_relative_from_a_subdirectory(self) -> None:
+        self._write("svc/new.py")
+        self.assertEqual(self._files("svc"), ["svc/new.py"])

@@ -8,7 +8,9 @@ asserted as a rendered command line rather than executed.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
+from typing import Literal
 
 from tangier.changemap import buckets, sha_for_bucket
 from tangier.config import Config, ImageSpec
@@ -105,13 +107,12 @@ def build_argv(
     tag: str,
     *,
     push: bool = False,
-    load: bool = False,
     secrets: list[SecretArg] | None = None,
     mirrors: list[str] | None = None,
 ) -> list[str]:
-    """Render the `docker buildx build` command line.
+    """Render the `docker buildx build` command line: a push, or a local build into the Docker daemon.
 
-    Argument order reproduces bin/build-github exactly. Kept verbatim from it:
+    The push form's argument order reproduces bin/build-github exactly. Kept verbatim from it:
 
     - the whole cache-to string. `mode=max` keeps builder-stage layers, and
       `image-manifest=true,oci-mediatypes=true` is required for a plain
@@ -120,25 +121,28 @@ def build_argv(
     - the unconditional `--build-arg PACKAGE_VERSION=<tag>`, which every
       Dockerfile turns into its Sentry release identifier.
     - also tagging `:latest` when pushing a non-latest tag.
-    - both `--output` forms: `type=registry` pushes, `type=image,name=...` does not.
 
     A push also tags each of `mirrors` (`:tag` and `:latest`), so one buildx run
     publishes to every registry. The cache lives on `ref`, the primary, only.
+
+    A local build reads the cache but never writes it: see "Images" in
+    docs/guide/4-packages-and-builds.md for why.
 
     The build context is always the repo root. `code-path` in the old workflows
     was a *dockerfile prefix*, not a context — modelling it as a context breaks
     every build.
     """
     argv = ["docker", "buildx", "build"]
+    cache_ref = f"{ref}:buildcache"
 
-    if load:
-        # The local dev-loop form: cross-build and load into the local daemon so
-        # docker compose can use the image.
+    if not push:
+        # Cross-build and load into the local daemon so docker compose can use the image.
         if spec.platform:
             argv += ["--platform", spec.platform]
         argv += ["--load"]
-    elif push and spec.cache:
-        cache_ref = f"{ref}:buildcache"
+        if spec.cache:
+            argv += ["--cache-from", f"type=registry,ref={cache_ref}"]
+    elif spec.cache:
         argv += [
             "--cache-from",
             f"type=registry,ref={cache_ref}",
@@ -155,8 +159,8 @@ def build_argv(
         if push and tag != "latest":
             argv += ["--tag", f"{dest}:latest"]
 
-    if not load:
-        argv += ["--output", "type=registry" if push else f"type=image,name={ref}"]
+    if push:
+        argv += ["--output", "type=registry"]
 
     argv += ["--build-arg", f"PACKAGE_VERSION={tag}"]
     for key in sorted(spec.args):
@@ -164,6 +168,50 @@ def build_argv(
 
     argv.append(spec.context)
     return argv
+
+
+@dataclass
+class BuildStep:
+    """What `image build` does with one bucket: `build` it, or `reuse` its published tag."""
+
+    bucket: str
+    tag: str
+    action: Literal["build", "reuse"]
+
+
+def plan_build(
+    cfg: Config,
+    bucket_names: list[str],
+    head: str = "HEAD",
+    *,
+    force: bool = False,
+    dirty: Collection[str] = (),
+    is_published: Callable[[str, str], bool],
+    tag: str | None = None,
+) -> list[BuildStep]:
+    """Decide, per bucket, whether to build it or reuse its published tag.
+
+    A bucket is reused only when its tag is published, it is not in `dirty`,
+    and `force` is off; `is_published(bucket, tag)` is not called otherwise.
+    Every check that can raise runs before the caller pulls or builds anything.
+    `tag` overrides the computed tag.
+    """
+    known = buckets(cfg)
+    for name in bucket_names:
+        if name not in known:
+            raise ImageError(f"unknown bucket: {name} (known: {', '.join(sorted(known)) or '(none)'})")
+
+    steps: list[BuildStep] = []
+    for name in bucket_names:
+        step_tag = tag or sha_for_bucket(cfg, name, head)
+        reuse = not force and name not in dirty and is_published(name, step_tag)
+        steps.append(BuildStep(name, step_tag, "reuse" if reuse else "build"))
+
+    configured = ", ".join(sorted(cfg.images)) or "(none)"
+    for step in steps:
+        if step.action == "build" and step.bucket not in cfg.images:
+            raise ImageError(f"no `[image.{step.bucket}]` in config — not buildable here (configured: {configured})")
+    return steps
 
 
 def exists_argv(ref: str, tag: str, platform: str = "linux/amd64") -> list[str]:
