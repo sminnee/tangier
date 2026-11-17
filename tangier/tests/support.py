@@ -93,6 +93,18 @@ def make_config(**tables: dict[str, Any]) -> Config:
     return parse_toml(to_toml(tables))
 
 
+def write_config(testcase: Any, body: str) -> str:
+    """Write `body` to a temporary `.toml` file, removed when `testcase` ends, and return its path.
+
+    For tests that drive `cli.main(["--config", path, ...])`. Build `body` with
+    `to_toml` when it fits.
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+        _ = fh.write(body)
+    testcase.addCleanup(os.unlink, fh.name)
+    return fh.name
+
+
 def make_git_repo(testcase: Any, files: dict[str, str]) -> str:
     """Create a throwaway git repo containing `files`, returning its path."""
     tmp = tempfile.TemporaryDirectory()
