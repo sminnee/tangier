@@ -10,9 +10,17 @@
 # GitHub-hosted images, but not on a self-hosted runner or a container job
 # running as non-root.
 set -euo pipefail
+case "$(uname -m)" in
+  x86_64) arch=amd64 ;;
+  aarch64 | arm64) arch=arm64 ;;
+  *)
+    echo "::error::no regctl build for this runner's architecture: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
 mkdir -p "$RUNNER_TEMP/bin"
 curl -fsSL -o "$RUNNER_TEMP/bin/regctl" \
-  "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64"
+  "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-${arch}"
 chmod 755 "$RUNNER_TEMP/bin/regctl"
 echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
 "$RUNNER_TEMP/bin/regctl" version
