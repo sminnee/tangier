@@ -100,12 +100,40 @@ hash.
 
 Builds run two at a time. `--jobs 1` runs one at a time, for a machine short of memory.
 
+`--buildx-arg=<arg>` passes an extra argument to `docker buildx build`, such as
+`--buildx-arg=--provenance=false`. It repeats.
+
 `[registry] mirrors` lists more registries that each image is pushed to as well. Only `url` is read
 from. [Builds](5-github-actions.md#builds) shows how to move registries with it.
 
 `tangier changemap build-matrix` lists the buckets a diff touches that have an `[image.*]` table,
 as a JSON array for a CI matrix. A bucket reached only through `depends` is included, because its
 hash moved.
+
+### Multi-platform images
+
+Buildx can only build several platforms in one run by emulating the ones the machine is not, which
+is slow. Tangier builds each platform on a machine of its own, then joins them:
+
+```sh
+tangier image build astrochat --push --leg          # on an amd64 machine, and again on an arm64 one
+tangier image merge astrochat --platforms linux/amd64,linux/arm64
+```
+
+A leg builds the Docker daemon's own platform and pushes it to `url` alone as
+`:<tag>-<os>-<arch>`, such as `:3f9c2a71b0-linux-arm64`. It writes no `:latest` and no mirror, so
+nothing pulls a one-platform image by the final tag. Each leg has its own cache,
+`:buildcache-<os>-<arch>`, because two legs would overwrite one shared cache. A leg skips when the
+final tag or its leg tag already holds its platform.
+
+`image merge` joins the legs into one index under `:<tag>` and `:latest` on `url`, then copies both
+to each mirror. It skips when every registry already has every platform, and copies `:<tag>` and
+`:latest` from `url` when `url` has them all. An image published for one platform before has the same tag after, because the tag hashes
+only source files. That platform's leg skips, and the merge takes it from the published tag. The
+merge writes a new index over that tag, so its digest changes.
+
+[Multi-platform images](5-github-actions.md#multi-platform-images) shows the jobs that run a leg on
+each runner and then the merge.
 
 ## Running a whole stack at one commit
 

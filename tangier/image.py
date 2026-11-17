@@ -224,10 +224,7 @@ def plan_build(
     Every check that can raise runs before the caller pulls or builds anything.
     `tag` overrides the computed tag.
     """
-    known = buckets(cfg)
-    for name in bucket_names:
-        if name not in known:
-            raise ImageError(f"unknown bucket: {name} (known: {', '.join(sorted(known)) or '(none)'})")
+    _check_known(cfg, bucket_names)
 
     steps: list[BuildStep] = []
     for name in bucket_names:
@@ -239,6 +236,91 @@ def plan_build(
     for step in steps:
         if step.action == "build" and step.bucket not in cfg.images:
             raise ImageError(f"no `[image.{step.bucket}]` in config — not buildable here (configured: {configured})")
+    return steps
+
+
+def _check_known(cfg: Config, bucket_names: list[str]) -> None:
+    known = buckets(cfg)
+    for name in bucket_names:
+        if name not in known:
+            raise ImageError(f"unknown bucket: {name} (known: {', '.join(sorted(known)) or '(none)'})")
+
+
+def parse_platforms(value: str) -> list[str]:
+    """The `--platforms` list of `image merge`: at least two `os/arch[/variant]` entries."""
+    platforms = list(dict.fromkeys(p.strip() for p in value.split(",") if p.strip()))
+    for platform in platforms:
+        parts = platform.split("/")
+        if not 2 <= len(parts) <= 3 or not all(parts):
+            raise ImageError(f"not a platform: {platform!r} (want os/arch[/variant], such as linux/arm64)")
+    if len(platforms) < 2:
+        raise ImageError("--platforms needs at least two platforms to merge, such as linux/amd64,linux/arm64")
+    return platforms
+
+
+@dataclass
+class MergeStep:
+    """What `image merge` does with one bucket.
+
+    `merge` joins `sources` into the primary, then copies to every mirror.
+    `copy` copies the complete primary to each of `lacking`. `skip` does nothing.
+    """
+
+    bucket: str
+    tag: str
+    refs: list[str]
+    action: Literal["merge", "copy", "skip"]
+    lacking: list[str]
+    sources: list[str]
+
+
+def plan_merge(
+    cfg: Config,
+    bucket_names: list[str],
+    platforms: list[str],
+    head: str = "HEAD",
+    *,
+    mirrors: bool = True,
+    tag: str | None = None,
+    platforms_at: Callable[[str, str], list[str] | None],
+    leg_exists: Callable[[str, str, str], bool],
+) -> list[MergeStep]:
+    """Decide, per bucket, whether to join its legs, copy its published index, or skip it.
+
+    `platforms_at(ref, tag)` lists what a published tag holds (None when it is
+    not published). `leg_exists(ref, tag, platform)` probes one leg tag. A
+    platform's source is its leg tag, else the final `:<tag>` when that already
+    holds it: an image published before it was multi-platform. A platform with
+    neither raises, for every bucket, before the caller pushes anything.
+    """
+    _check_known(cfg, bucket_names)
+    steps: list[MergeStep] = []
+    missing: list[str] = []
+    for name in bucket_names:
+        step_tag = tag or sha_for_bucket(cfg, name, head)
+        refs = destination_refs(cfg, name, mirrors=mirrors)
+        held = {ref: platforms_at(ref, step_tag) or [] for ref in refs}
+        lacking = [ref for ref in refs if not all(has_platform(held[ref], p) for p in platforms)]
+        primary = refs[0]
+        if not lacking:
+            steps.append(MergeStep(name, step_tag, refs, "skip", [], []))
+            continue
+        if primary not in lacking:
+            steps.append(MergeStep(name, step_tag, refs, "copy", lacking, []))
+            continue
+        sources: list[str] = []
+        for platform in platforms:
+            if leg_exists(primary, step_tag, platform):
+                sources.append(f"{primary}:{leg_tag(step_tag, platform)}")
+            elif has_platform(held[primary], platform):
+                sources.append(f"{primary}:{step_tag}")
+            else:
+                missing.append(f"{name} {platform}")
+        steps.append(MergeStep(name, step_tag, refs, "merge", lacking, list(dict.fromkeys(sources))))
+    if missing:
+        raise ImageError(
+            f"no leg tag or published image for: {', '.join(missing)}. Run `image build --leg` on that platform"
+        )
     return steps
 
 
@@ -299,6 +381,14 @@ def has_platform(platforms: Collection[str], want: str) -> bool:
 def native_platform_argv() -> list[str]:
     """The Docker daemon's own platform, such as `linux/arm64` on an arm64 runner."""
     return ["docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"]
+
+
+def merge_argv(sources: list[str], targets: list[str]) -> list[str]:
+    """Join images into one index under each of `targets`, keeping their attestations."""
+    argv = ["docker", "buildx", "imagetools", "create"]
+    for target in targets:
+        argv += ["--tag", target]
+    return argv + sources
 
 
 def digest_argv(ref: str, tag: str) -> list[str]:
