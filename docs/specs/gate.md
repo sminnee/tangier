@@ -232,7 +232,8 @@ whole rule: there is no separate config.
 
 - A gate is needed only when a changed file touches its scope. A file touches the scope when it
   matches a scope tag or one of its transitive `depends` tags. A deleted file counts, and so does
-  an uncommitted change or an untracked file. `[need-scope-touched]`
+  an uncommitted change or an untracked file. A moved file touches both the scope it left and
+  the one it joined. `[need-scope-touched]`
 - Only key inputs count. A file that `[sha] exclude` or a tag's own `exclude` removes from the key
   does not touch the scope, because it cannot move the key. With the default `[sha] exclude`, a
   README-only change does not need the gate. `[need-key-inputs-only]`

@@ -883,6 +883,24 @@ class TestNeed(GateCase):
         self.assert_not_needed()
 
     # SPEC: gate#need-scope-touched
+    def test_a_file_moved_out_of_the_scope_runs(self) -> None:
+        # Git reports a move as one rename, under its new path only. The old
+        # path left the scope, and code there may still import it.
+        self.use_config(self.NO_PLACEHOLDER)
+        _ = _git(self.repo, "mv", "svc/b.py", "docs/b.py")
+        _ = _git(self.repo, "commit", "-qm", "move b")
+        self.assertEqual(self.run_gate()[3].calls, [["bin/test"], ["bin/lint"]])
+
+    # SPEC: gate#need-scope-touched
+    # SPEC: gate#run-dirty-notice
+    def test_an_uncommitted_move_out_of_the_scope_runs_and_is_noted(self) -> None:
+        self.use_config(self.NO_PLACEHOLDER)
+        _ = _git(self.repo, "mv", "svc/b.py", "docs/b.py")
+        _, _, err, runner = self.run_gate()
+        self.assertEqual(runner.calls, [["bin/test"], ["bin/lint"]])
+        self.assertIn("svc/b.py", err)
+
+    # SPEC: gate#need-scope-touched
     def test_a_change_inside_the_scope_runs(self) -> None:
         self.use_config(self.NO_PLACEHOLDER)
         _ = _commit(self.repo, "bin/test", "#!/bin/sh\nexit 0\n")
