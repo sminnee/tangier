@@ -14,10 +14,16 @@ from tangier.image import (
     BuildStep,
     ImageError,
     build_argv,
+    config_platform_argv,
     copy_argv,
     destination_refs,
     exists_argv,
+    has_platform,
     image_ref,
+    index_platforms,
+    leg_tag,
+    manifest_argv,
+    native_platform_argv,
     plan_build,
     render_compose,
     resolve_secrets,
@@ -35,7 +41,7 @@ def cmd_tag(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def published(runner: Runner, ref: str, tag: str) -> bool:
+def published(runner: Runner, ref: str, tag: str, platform: str = "linux/amd64") -> bool:
     """Whether `<ref>:<tag>` is already in its registry.
 
     A missing `regctl` raises rather than reporting "missing". The old script
@@ -43,9 +49,43 @@ def published(runner: Runner, ref: str, tag: str) -> bool:
     an already-published tag — a fail-open that costs a full build and moves
     `:latest` for no reason.
     """
+    _need_regctl(runner)
+    return runner.run(exists_argv(ref, tag, platform)).ok
+
+
+def _need_regctl(runner: Runner) -> None:
     if runner.which("regctl") is None:
         raise ImageError("regctl not found on PATH — cannot check whether the tag is published")
-    return runner.run(exists_argv(ref, tag)).ok
+
+
+def platforms_at(runner: Runner, ref: str, tag: str) -> list[str] | None:
+    """The platforms `<ref>:<tag>` holds, or None when the tag is not published.
+
+    Reads the index's platform list, or a single manifest's config: see
+    `manifest_argv` for why `published` cannot answer this.
+    """
+    _need_regctl(runner)
+    result = runner.run(manifest_argv(ref, tag))
+    if not result.ok:
+        return None
+    found = index_platforms(result.stdout)
+    if found is not None:
+        return found
+    config = runner.run(config_platform_argv(ref, tag))
+    if not config.ok:
+        raise ImageError(f"cannot read the platform of {ref}:{tag}: {config.stderr.strip()}")
+    return [config.stdout.strip()]
+
+
+def _native_platform(runner: Runner) -> str:
+    """The Docker daemon's platform: the one a `--leg` build produces."""
+    if runner.which("docker") is None:
+        raise ImageError("docker not found on PATH — cannot build")
+    result = runner.run(native_platform_argv())
+    platform = result.stdout.strip()
+    if not result.ok or "/" not in platform:
+        raise ImageError(f"cannot read the Docker daemon's platform: {(result.stderr or result.stdout).strip()}")
+    return platform
 
 
 def cmd_exists(config: Config, args: argparse.Namespace) -> int:
@@ -68,38 +108,52 @@ def cmd_build(config: Config, args: argparse.Namespace) -> int:
     A bucket whose tag is already published is reused unless `--force`: `--push`
     skips it, or copies it to a destination that lacks it, and `--pull` runs
     `docker pull`. Every other bucket is built, up to `--jobs` at a time.
+
+    `--leg` pushes one platform's leg of a multi-platform image, for
+    `image merge` to join: the daemon's own platform, to the primary only, as
+    `<tag>-<os>-<arch>`. It is reused when the final tag already holds that
+    platform or the leg tag exists.
     """
     names: list[str] = list(dict.fromkeys(args.buckets))
     if args.tag and len(names) > 1:
         raise ImageError("--tag names one image, so it takes one bucket")
     push = not args.pull
+    if args.leg and not push:
+        raise ImageError("--leg builds one platform of a pushed image, so it needs --push")
     runner = _runner(args)
     extra_secrets = [_normalise_secret(s) for s in (args.secret or [])]
-    # Mirrors are push destinations only: a pull reads `url`.
-    with_mirrors = push and not args.no_mirrors
+    # Mirrors are push destinations only: a pull reads `url`. A leg is not the
+    # finished image, so it goes to the primary alone.
+    with_mirrors = push and not args.no_mirrors and not args.leg
+    leg: str | None = None
 
     def build_cmd(bucket: str, tag: str) -> list[str]:
         spec = config.images[bucket]
         refs = destination_refs(config, bucket, mirrors=with_mirrors)
         secrets = resolve_secrets(spec.secrets, extra_secrets)
-        return build_argv(spec, refs[0], tag, push=push, secrets=secrets, mirrors=refs[1:])
+        return build_argv(
+            spec, refs[0], tag, push=push, secrets=secrets, mirrors=refs[1:], leg=leg, extra=args.buildx_arg
+        )
 
     # `--print` is a dry run, so it must not need a registry: probing first
     # would make it fail on exactly the machine most likely to want it. It
     # therefore emits no outputs either — there is no build to describe.
     if args.print:
+        if args.leg:
+            # Reading the real platform would need a Docker daemon.
+            leg = "linux/amd64"
+            print("--leg --print shows the linux/amd64 leg; a real run builds the daemon's platform", file=sys.stderr)
         steps = plan_build(config, names, args.head, force=True, is_published=lambda b, t: False, tag=args.tag)
         for step in steps:
             print(" ".join(build_cmd(step.bucket, step.tag)))
         return 0
 
     dirty = _dirty_buckets(config, names, args.head)
-    if push and dirty:
-        detail = "; ".join(f"{bucket}: {', '.join(files)}" for bucket, files in dirty.items())
-        raise ImageError(
-            "uncommitted changes would be pushed under a tag that hashes the committed tree. "
-            f"Commit or remove them first ({detail})"
-        )
+    if push:
+        _refuse_dirty(dirty)
+
+    if args.leg:
+        leg = _native_platform(runner)
 
     # Which destinations already hold each bucket's tag, from the `--push` probe.
     have: dict[str, list[str]] = {}
@@ -107,6 +161,16 @@ def cmd_build(config: Config, args: argparse.Namespace) -> int:
     def is_published(bucket: str, tag: str) -> bool:
         if not push:
             return published(runner, image_ref(config, bucket), tag)
+        if leg:
+            ref = image_ref(config, bucket)
+            final = platforms_at(runner, ref, tag)
+            if final is not None and has_platform(final, leg):
+                print(f"{ref}:{tag} already holds {leg}; skipping build")
+            elif published(runner, ref, leg_tag(tag, leg), leg):
+                print(f"{ref}:{leg_tag(tag, leg)} already published; skipping build")
+            else:
+                return False
+            return True
         refs = destination_refs(config, bucket, mirrors=with_mirrors)
         have[bucket] = [r for r in refs if published(runner, r, tag)]
         return bool(have[bucket])
@@ -122,7 +186,9 @@ def cmd_build(config: Config, args: argparse.Namespace) -> int:
     for step in steps:
         if step.action != "reuse":
             continue
-        if push:
+        if leg:
+            outcome[step.bucket] = ("skip", 0)
+        elif push:
             refs = destination_refs(config, step.bucket, mirrors=with_mirrors)
             missing = [r for r in refs if r not in have[step.bucket]]
             rc = _fill_from(runner, have[step.bucket][0], missing, step.tag)
@@ -178,6 +244,16 @@ def _run_builds(runner: Runner, builds: dict[str, list[str]], jobs: int) -> dict
                 sys.stderr.flush()
             codes[bucket] = result.returncode
     return codes
+
+
+def _refuse_dirty(dirty: dict[str, list[str]]) -> None:
+    """Stop a push of a bucket with uncommitted changes."""
+    if dirty:
+        detail = "; ".join(f"{bucket}: {', '.join(files)}" for bucket, files in dirty.items())
+        raise ImageError(
+            "uncommitted changes would be pushed under a tag that hashes the committed tree. "
+            f"Commit or remove them first ({detail})"
+        )
 
 
 def _dirty_buckets(config: Config, names: list[str], head: str) -> dict[str, list[str]]:
@@ -285,6 +361,19 @@ def add_parsers(sub: argparse._SubParsersAction) -> None:
         default=[],
         metavar="id=<id>",
         help="extra buildx secret id; emitted only when its env var is set (repeatable)",
+    )
+    _ = bp.add_argument(
+        "--leg",
+        action="store_true",
+        help="with --push: push this machine's platform as one leg of a multi-platform image,"
+        " as <tag>-<os>-<arch> on `[registry] url` only, for `image merge` to join",
+    )
+    _ = bp.add_argument(
+        "--buildx-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help="extra argument passed verbatim to `docker buildx build`; write it as --buildx-arg=--flag (repeatable)",
     )
     _ = bp.add_argument("--print", action="store_true", help="print the command line instead of running it")
     bp.set_defaults(func=cmd_build)
