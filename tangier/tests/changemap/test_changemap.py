@@ -6,6 +6,7 @@ read `fixtures/synthetic.toml` instead of another repo's live config.
 
 import contextlib
 import os
+import subprocess
 import unittest
 import unittest.mock
 from typing import Any
@@ -159,6 +160,21 @@ class TestShaBucketExclude(unittest.TestCase):
         before = self._sha(cfg, "svc", make_git_repo(self, {"f/a.ts": "a", "f/gen.ts": "1", "f/README.md": "1"}))
         after = self._sha(cfg, "svc", make_git_repo(self, {"f/a.ts": "a", "f/gen.ts": "2", "f/README.md": "2"}))
         self.assertEqual(before, after)
+
+
+class TestChangedFiles(unittest.TestCase):
+    """`git.changed_files`, which `changemap` answers from, in a real repo."""
+
+    def test_a_rename_lists_its_old_path_too(self) -> None:
+        # The old path left its tag's scope, so that tag changed as much as the new path's.
+        root = make_git_repo(self, {"old/a.py": "a = 1\n"})
+        for cmd in (
+            ["mv", "old", "new"],
+            ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "move"],
+        ):
+            _ = subprocess.run(["git", "-C", root, *cmd], capture_output=True, check=True)
+        with contextlib.chdir(root):
+            self.assertEqual(sorted(git.changed_files("HEAD~1", "HEAD")), ["new/a.py", "old/a.py"])
 
 
 class TestScopeTouched(unittest.TestCase):

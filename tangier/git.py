@@ -54,7 +54,8 @@ def changed_files(base: str, head: str) -> list[str]:
     clone without `origin/main` must degrade to running nothing selective,
     not explode.
     """
-    out = _git("diff", "--name-only", f"{base}...{head}")
+    # `--no-renames`, so a moved file lists its old path too: the tags that owned it changed.
+    out = _git("diff", "--name-only", "--no-renames", f"{base}...{head}", "--")
     return [line for line in out.splitlines() if line]
 
 
@@ -169,7 +170,8 @@ def diff_names(a: str, b: str) -> list[str]:
     Two-dot, unlike `changed_files`: a three-dot diff needs commits, and given
     a tree it reads as an empty diff.
     """
-    out = _git_checked("diff", "--name-only", a, b)
+    # `--no-renames`, so a moved file lists its old path too: the scope it left changed.
+    out = _git_checked("diff", "--name-only", "--no-renames", a, b, "--")
     return [line for line in out.splitlines() if line]
 
 
