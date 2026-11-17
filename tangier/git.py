@@ -59,6 +59,18 @@ def changed_files(base: str, head: str) -> list[str]:
     return [line for line in out.splitlines() if line]
 
 
+def uncommitted_files(head: str = "HEAD") -> list[str]:
+    """Files on disk that differ from `head`: tracked changes, staged or not, and untracked files.
+
+    Ignored files are left out, as `worktree_tree` leaves them out of a key.
+    """
+    # `--no-renames`, so a moved file lists its old path too: the bucket that owned it changed.
+    changed = _git_checked("diff", "--name-only", "--no-renames", head, "--").splitlines()
+    # `:/` and `--full-name` make the list repo-relative from any directory, as `diff` already is.
+    untracked = _git_checked("ls-files", "--others", "--exclude-standard", "--full-name", ":/").splitlines()
+    return [f for f in dict.fromkeys([*changed, *untracked]) if f]
+
+
 def ls_tree(head: str, paths: list[str]) -> list[str]:
     """Raw `git ls-tree -r` lines (`<mode> <type> <sha>\\t<path>`) for `paths`.
 

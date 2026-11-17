@@ -114,8 +114,8 @@ The key must name a SHA bucket. A bucket with no `[image.*]` table still hashes,
 | --- | --- | --- |
 | `dockerfile` | required | Path from the repo root. |
 | `context` | `"."` | Build context. |
-| `platform` | none | Passed to `--platform` with `image build --load`. |
-| `cache` | `true` | Use a registry layer cache, `<image>:buildcache`, when pushing. |
+| `platform` | none | Passed to `--platform` with `image build --pull`. |
+| `cache` | `true` | Use a registry layer cache, `<image>:buildcache`: `--push` reads and writes it, `--pull` only reads it. |
 | `args` | `{}` | Extra `--build-arg` values. `PACKAGE_VERSION=<sha>` is always passed. |
 | `secrets` | `[]` | Buildx secret ids. Each is passed as `--secret id=x,env=X` only when `X` is set. |
 

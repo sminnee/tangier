@@ -67,15 +67,38 @@ secrets    = ["sentry_auth_token"]
 ```
 
 ```sh
-tangier image tag astrochat           # the tag: the bucket's hash
-tangier image build astrochat --push  # build and push, unless already published
-tangier image build astrochat --load  # build into the local Docker daemon
-tangier image build astrochat --print # print the docker command only
+tangier image tag astrochat                         # the tag: the bucket's hash
+tangier image build astrochat --push                # build and push, unless already published
+tangier image build astrochat smartypants --pull    # pull each image, or build it locally
+tangier image build astrochat --pull --print        # print the docker command only
 ```
 
-`image build --push` first asks each registry whether the tag exists. When all have it, the build
-is skipped. This is what makes a "build everything" step cheap: only the images whose content changed
-do any work.
+`image build` takes three settings:
+
+1. **Which images.** One or more bucket names.
+2. **Where they go.** `--push` publishes to the registry. `--pull` gets them into the local Docker
+   daemon. One of the two is required.
+3. **Reuse or rebuild.** By default, a bucket whose tag is already published is not built.
+   `--force` builds every bucket.
+
+| | reuse (default) | `--force` |
+| --- | --- | --- |
+| `--push` | Published on every registry: skip. Published on some: copy to the rest. Otherwise: build and push, reading and writing the cache. | Build and push, reading and writing the cache. |
+| `--pull` | Published: `docker pull`. Otherwise: build into the local daemon, reading the cache only. | Build into the local daemon, reading the cache only. |
+
+The reuse is what makes a "build everything" step cheap: only the images whose content changed do
+any work. A pull request's e2e job can run `image build <every bucket> --pull` and build only the
+images the change touched, reading the cache that `main`'s builds wrote.
+
+A `--pull` build never writes the cache. Buildx keys a cached `RUN` layer by its command text, not
+by what the command fetched, so a branch build could poison the cache that `main`'s builds reuse.
+
+A bucket with uncommitted changes is never reused, because its tag hashes the committed tree, not
+the files on disk. With `--pull` it is built, and its line ends `(uncommitted changes: <files>)`.
+With `--push` it is an error, because the push would publish uncommitted content under a committed
+hash.
+
+Builds run two at a time. `--jobs 1` runs one at a time, for a machine short of memory.
 
 `[registry] mirrors` lists more registries that each image is pushed to as well. Only `url` is read
 from. [Builds](5-github-actions.md#builds) shows how to move registries with it.
