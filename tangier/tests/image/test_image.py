@@ -22,7 +22,7 @@ from tangier.image import (
     resolve_secrets,
 )
 from tangier.runner import Result
-from tangier.tests.support import RecordingRunner, make_config
+from tangier.tests.support import RecordingRunner, make_config, write_config
 
 REF = "registry.example/ns/svc"
 
@@ -505,17 +505,16 @@ class TestMirrors(unittest.TestCase):
         # Through the real parser, so the flag and the attribute cmd_build reads agree.
         from tangier import cli
 
-        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
-            _ = fh.write(
-                '[registry]\nurl = "registry.example/ns"\nmirrors = ["mirror.example/ns"]\n'
-                '[image.svc]\ndockerfile = "svc/Dockerfile"\n[svc]\npaths = ["svc/**"]\nsha = true\n'
-            )
-        self.addCleanup(os.unlink, fh.name)
+        path = write_config(
+            self,
+            '[registry]\nurl = "registry.example/ns"\nmirrors = ["mirror.example/ns"]\n'
+            '[image.svc]\ndockerfile = "svc/Dockerfile"\n[svc]\npaths = ["svc/**"]\nsha = true\n',
+        )
 
         def printed(*flags: str) -> str:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                rc = cli.main(["--config", fh.name, "image", "build", "svc", "--tag", "t", "--push", "--print", *flags])
+                rc = cli.main(["--config", path, "image", "build", "svc", "--tag", "t", "--push", "--print", *flags])
             self.assertEqual(rc, 0)
             return buf.getvalue()
 

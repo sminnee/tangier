@@ -15,7 +15,7 @@ import unittest.mock
 
 from tangier import changemap, cli, git
 from tangier.commands import changemap_cmds
-from tangier.tests.support import Raw, make_config, make_git_repo
+from tangier.tests.support import Raw, make_config, make_git_repo, write_config
 
 
 def _capture(fn, *args) -> str:
@@ -367,14 +367,8 @@ class TestItems(unittest.TestCase):
 
 
 class TestCli(unittest.TestCase):
-    def _write_config(self, body: str) -> str:
-        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
-            _ = fh.write(body)
-        self.addCleanup(os.unlink, fh.name)
-        return fh.name
-
     def test_malformed_files_pair_exits_2(self) -> None:
-        path = self._write_config('[a]\npaths = "a/**"\nunittest_items = "x"\n')
+        path = write_config(self, '[a]\npaths = "a/**"\nunittest_items = "x"\n')
         with contextlib.redirect_stderr(io.StringIO()):
             rc = cli.main(["--config", path, "changemap", "explain", "--files", "no-equals-sign"])
         self.assertEqual(rc, 2)
@@ -385,19 +379,19 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 2)
 
     def test_config_error_exits_2(self) -> None:
-        path = self._write_config('[a]\npaths = "a/**"\nbogus = 1\n')
+        path = write_config(self, '[a]\npaths = "a/**"\nbogus = 1\n')
         with contextlib.redirect_stderr(io.StringIO()):
             rc = cli.main(["--config", path, "changemap", "list"])
         self.assertEqual(rc, 2)
 
     def test_list_prints_tags_and_globs(self) -> None:
-        path = self._write_config('[b]\npaths = "b/**"\nsha = true\n[a]\npaths = "a/**"\nsha = true\n')
+        path = write_config(self, '[b]\npaths = "b/**"\nsha = true\n[a]\npaths = "a/**"\nsha = true\n')
         with contextlib.redirect_stderr(io.StringIO()):
             out = _capture(cli.main, ["--config", path, "changemap", "list"])
         self.assertEqual(out.splitlines(), ["a", "  a/**", "b", "  b/**"])
 
     def test_list_graph_prints_depends(self) -> None:
-        path = self._write_config('[a]\npaths = "a/**"\nsha = true\n[b]\npaths = "b/**"\ndepends = "a"\nsha = true\n')
+        path = write_config(self, '[a]\npaths = "a/**"\nsha = true\n[b]\npaths = "b/**"\ndepends = "a"\nsha = true\n')
         with contextlib.redirect_stderr(io.StringIO()):
             out = _capture(cli.main, ["--config", path, "changemap", "list", "--graph"])
         self.assertEqual(out.splitlines(), ["a", "b", "  a"])
