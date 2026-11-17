@@ -173,6 +173,23 @@ image's digest from `[registry] url`, so the deploy action needs a registry logi
 `id-token: write`, and the role must trust the deploy job's Environment, uat or prod. A push role
 that trusts only `images` is not enough. Without a credential, the deploy action does not log in.
 
+### Multi-platform images
+
+To build one image for amd64 and arm64, call the build action itself, in two jobs. The first runs
+on a native runner per platform, with `platform-leg: true`. Each leg pushes its own platform to
+`url` as `:<tag>-<os>-<arch>`. The second job joins the legs with `merge-platforms`, then publishes
+`:<tag>` and `:latest` to `url` and every mirror. See
+[Multi-platform images](4-packages-and-builds.md#multi-platform-images) for the tags and the skip
+rules.
+
+The [build action reference](../../skills/tangier/reference/github-actions.md#sminneetangiergithubactionsbuildv0)
+has the two jobs to copy.
+
+The matrix names runners, not platforms: each leg builds the platform of the runner it is on. The
+merge lists the platforms it expects, so a missing leg fails the merge rather than publishing a
+smaller image. The merge job needs no build secrets, but it does need the full history, because
+tangier hashes the git tree to get the tag. The reusable `build.yaml` builds one platform only.
+
 ## The nightly
 
 The workflow also runs `on: schedule`. On that event the plan job sets `full=--full` and passes it

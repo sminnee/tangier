@@ -390,6 +390,9 @@ Builds and pushes one bucket's image, unless its tag is already published.
 | `aws-role-arn` | `""` | IAM role to assume through GitHub OIDC, then log in to each ECR registry in `[registry] url` and `mirrors`. The job needs `id-token: write`. Skipped when none is ECR. |
 | `mirrors` | `"true"` | `"false"` pushes to `[registry] url` only (`image build --no-mirrors`), and logs in to it only. |
 | `extra-secrets` | `""` | Space-separated buildx secret ids. Pass values through the step's `env:`. |
+| `platform-leg` | `"false"` | `"true"` builds the runner's own platform as one leg (`image build --leg`): it pushes `:<tag>-<os>-<arch>` to `[registry] url` only, with no `:latest` and no mirror. |
+| `merge-platforms` | `""` | Comma-separated platforms, such as `linux/amd64,linux/arm64`. Builds nothing: joins the legs into `:<tag>` and `:latest` and copies them to each mirror (`image merge`). Fails when a platform has no leg. Not with `platform-leg`. |
+| `buildx-args` | `""` | Space-separated extra arguments for `docker buildx build`, such as `--provenance=false`. Not used by `merge-platforms`. |
 | `regctl-version` | `v0.6.1` | `regctl` release. |
 | `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
 | `tangier-version` | PyPI latest | The CLI release to install. Pass the plan's resolved version. |
@@ -398,7 +401,54 @@ Builds and pushes one bucket's image, unless its tag is already published.
 | Output | Meaning |
 | --- | --- |
 | `tag` | The bucket's tag, built or not. |
-| `published` | `true` when this run built and pushed. `false` when the tag already existed. |
+| `published` | `true` when this run built and pushed, or merged. `false` when the tag already existed. |
+
+A multi-platform image takes a leg job per native runner, then a merge job:
+
+```yaml
+build:
+  needs: plan-build
+  strategy:
+    matrix:
+      package: ${{ fromJSON(needs.plan-build.outputs.build-packages) }}
+      runner: [ubuntu-24.04, ubuntu-24.04-arm]
+  runs-on: ${{ matrix.runner }}
+  permissions:
+    contents: read
+    id-token: write
+  steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+    - uses: sminnee/tangier/.github/actions/build@v0
+      with:
+        package: ${{ matrix.package }}
+        platform-leg: true
+        registry-password: ${{ secrets.REGISTRY_PASSWORD }}
+        aws-role-arn: arn:aws:iam::123456789012:role/ci/push-image
+merge:
+  needs: [plan-build, build]
+  strategy:
+    matrix:
+      package: ${{ fromJSON(needs.plan-build.outputs.build-packages) }}
+  runs-on: ubuntu-24.04
+  permissions:
+    contents: read
+    id-token: write
+  steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+    - uses: sminnee/tangier/.github/actions/build@v0
+      with:
+        package: ${{ matrix.package }}
+        merge-platforms: linux/amd64,linux/arm64
+        registry-password: ${{ secrets.REGISTRY_PASSWORD }}
+        aws-role-arn: arn:aws:iam::123456789012:role/ci/push-image
+```
+
+The matrix names runners, not platforms: each leg reads its platform from the Docker daemon. The
+merge job needs the full history for the tag, but no build secrets.
 
 ### `sminnee/tangier/.github/actions/tailnet@v0`
 

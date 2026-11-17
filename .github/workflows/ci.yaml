@@ -160,6 +160,85 @@ jobs:
           test -n "$TAG" || { echo "::error::the build action emitted no tag"; exit 1; }
           echo "tag=$TAG"
 
+  build-action-multiplatform:
+    # One leg of the `multi` fixture per native runner, for `build-action-merge`
+    # to join. Gated as `build-action` is. Every run after the first skips both
+    # legs, because the tag is content-addressed.
+    needs: plan
+    if: >-
+      needs.plan.outputs.build-action-touched == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: tangier
+      - name: Make the workspace the fixture caller
+        run: |
+          set -euo pipefail
+          cp -R tangier/.github/fixtures/uv-caller/. .
+          git init -q
+          git add -A
+          git -c user.name=tangier-ci -c user.email=ci@tangier.invalid commit -q -m fixture
+      - uses: ./tangier/.github/actions/build
+        with:
+          package: multi
+          platform-leg: true
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          tangier-ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  build-action-merge:
+    # Joins the legs from `build-action-multiplatform`, then checks that the
+    # published tag and `:latest` are each an index that holds both platforms.
+    needs: build-action-multiplatform
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: tangier
+      - name: Make the workspace the fixture caller
+        run: |
+          set -euo pipefail
+          cp -R tangier/.github/fixtures/uv-caller/. .
+          git init -q
+          git add -A
+          git -c user.name=tangier-ci -c user.email=ci@tangier.invalid commit -q -m fixture
+      - id: merge
+        uses: ./tangier/.github/actions/build
+        with:
+          package: multi
+          merge-platforms: linux/amd64,linux/arm64
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          tangier-ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Check the index holds both platforms
+        env:
+          TAG: ${{ steps.merge.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for t in "$TAG" latest; do
+            regctl manifest get --format raw-body "ghcr.io/sminnee/tangier-ci-fixture/multi:$t" >index.json
+            python3 - index.json "$t" <<'EOF'
+          import json, sys
+          entries = json.load(open(sys.argv[1])).get("manifests", [])
+          found = {f"{e['platform']['os']}/{e['platform']['architecture']}" for e in entries}
+          print(f":{sys.argv[2]} platforms:", sorted(found))
+          missing = {"linux/amd64", "linux/arm64"} - found
+          if missing:
+              sys.exit(f"::error:::{sys.argv[2]} lacks {sorted(missing)}")
+          EOF
+          done
+
   install-tangier:
     # Runs the install script each way it can install, and checks the version
     # each one gives. The build-action job covers only the git ref.
