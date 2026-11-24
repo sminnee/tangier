@@ -109,5 +109,44 @@ class TestTailscaleArgs(unittest.TestCase):
         self.assertEqual(found, [])
 
 
+def step_blocks(text: str) -> list[str]:
+    """The steps under `runs: steps:`, each as its lines without comments. A line scan, as above."""
+    blocks: list[list[str]] = []
+    in_steps = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if line.startswith("  steps:"):
+            in_steps = True
+            continue
+        if not in_steps or stripped.startswith("#"):
+            continue
+        if line.startswith("    - "):
+            blocks.append([])
+        if blocks:
+            blocks[-1].append(line)
+    return ["\n".join(b) for b in blocks]
+
+
+# A step that holds one of these belongs to that connection method alone.
+METHOD_MARKERS = {
+    "tailnet": ("tailscale", "resolve.sh"),
+    "aws-ssm": ("steps.connect.outputs.aws-", "session-manager-plugin", "connect open"),
+}
+
+
+class TestDeployConnectSteps(unittest.TestCase):
+    def test_each_method_step_runs_only_for_its_method(self) -> None:
+        with open(os.path.join(REPO_ROOT, ".github", "actions", "deploy", "action.yaml"), encoding="utf-8") as f:
+            blocks = step_blocks(f.read())
+        self.assertTrue(blocks)
+        seen = dict.fromkeys(METHOD_MARKERS, 0)
+        for block in blocks:
+            for method, markers in METHOD_MARKERS.items():
+                if any(m in block for m in markers):
+                    seen[method] += 1
+                    self.assertIn(f"if: steps.connect.outputs.connect == '{method}'", block, block)
+        self.assertTrue(all(seen.values()), seen)
+
+
 if __name__ == "__main__":
     unittest.main()

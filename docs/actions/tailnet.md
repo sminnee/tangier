@@ -42,6 +42,18 @@ environment name, because the two are independent: `askastrowww` deploys to a
 GitHub environment called `production` using a tag containing `prod`, and
 `k8s-cluster` uses `tag:k8s-cluster-deploy` with no environment segment at all.
 
+## In the `deploy` action
+
+The `deploy` action joins the tailnet only for an environment whose
+`[deploy.<env>] connect` is `tailnet`, the default. Such an environment needs
+`client-id` and `audience`, and the action fails at once, naming the input, when
+either is empty. See
+[How CI reaches the cluster](../guide/6-other-features.md#how-ci-reaches-the-cluster).
+
+The `environment:` rule below applies to `aws-ssm` too: each environment's IAM
+role trusts only that GitHub Environment's OIDC subject, so a job without the
+line cannot assume it.
+
 ## Inputs
 
 | Input | Required | Default | Purpose |
