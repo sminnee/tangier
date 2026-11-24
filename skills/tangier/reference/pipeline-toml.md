@@ -16,7 +16,8 @@ Each top-level table is a tag, except these reserved names:
 | `image` | How each bucket's image builds. |
 | `k8s` | Which deployments each bucket's image backs. |
 | `deploy` | Deploy environments, rollout tuning and the after-deploy hook. |
-| `tailnet` | How CI reaches the cluster. |
+| `tailnet` | How CI reaches a `tailnet` environment's cluster. |
+| `aws-ssm` | How CI reaches an `aws-ssm` environment's cluster. |
 | `gate` | Gates and gate groups. |
 | `gate-set` | Named lists of gates, selected as `@<name>`. |
 
@@ -144,6 +145,7 @@ The version variable is the bucket name upper-cased, with `-` as `_`, plus `_VER
 [deploy]
 after = "bin/sentry-release ${ENV}"
 digests = true
+connect = "tailnet"
 
 [deploy.uat]
 namespace     = "myorg-uat"
@@ -156,7 +158,7 @@ vars = { APP_HOST = "uat.example.com", CDN_HOST = "" }
 max_wait = 600
 ```
 
-`after`, `digests` and `rollout` are reserved names. Every other `[deploy.<env>]` table is an environment:
+`after`, `digests`, `connect` and `rollout` are reserved names. Every other `[deploy.<env>]` table is an environment:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -166,6 +168,7 @@ max_wait = 600
 | `migration_job` | none | The migration Job's name. `${...}` takes the deploy variables: `vars`, version and digest variables. |
 | `migration_version_bucket` | none | The bucket whose prior version a rollback migrates back to. |
 | `vars` | `{}` | Extra string variables for this environment, substituted beside the version variables. |
+| `connect` | `[deploy] connect`, else `"tailnet"` | How CI reaches this environment's cluster: `tailnet`, `aws-ssm` or `none`. Any other value fails the load. |
 
 `vars` is substituted wherever the version variables are: the render, `--render`, `--versions`,
 the migration Job name, a rollback's prior-tag render, and `after` (its arguments and its
@@ -219,6 +222,37 @@ operator = "aws-k8s-operator"
 | `[tailnet.<env>] operator` | `[tailnet] operator` | The operator for `<env>`, for an environment on another cluster. |
 
 A `[tailnet.<env>]` that names no `[deploy.<env>]` warns, when any deploy environment exists.
+
+## `[aws-ssm]`
+
+For an environment whose `connect` is `aws-ssm`: an SSM port-forward to a cluster node, and a
+kubeconfig whose user runs `aws eks get-token`.
+
+```toml
+[aws-ssm]
+region       = "ap-southeast-6"
+node_tag     = "myorg-k3s-*"
+ca_parameter = "/myorg/k3s/server-ca"
+cluster_name = "myorg"
+
+[aws-ssm.uat]
+role = "arn:aws:iam::123456789012:role/ci/myorg-deploy-uat"
+```
+
+Every key may sit on `[aws-ssm]`, as a default, or on `[aws-ssm.<env>]`, which overrides it.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `role` | required | The IAM role CI assumes through GitHub OIDC, and that signs the token. |
+| `region` | required | The AWS region of the nodes, the SSM parameter and the token. |
+| `node_tag` | required | The `Name` tag of the cluster's nodes. A glob such as `myorg-k3s-*` works. |
+| `ca_parameter` | required | The SSM parameter holding the API server's CA certificate, in PEM. |
+| `cluster_name` | required | The cluster ID aws-iam-authenticator checks the token against. |
+| `local_port` | `6443` | The port the tunnel listens on at `127.0.0.1`. |
+| `remote_port` | `6443` | The API server's port on the node. |
+
+An `aws-ssm` environment missing a required key fails the load, naming each one. An
+`[aws-ssm.<env>]` that names no `[deploy.<env>]` warns, when any deploy environment exists.
 
 ## `[gate]`
 

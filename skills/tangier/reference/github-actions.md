@@ -473,14 +473,21 @@ The job needs `permissions: id-token: write`.
 
 ### `sminnee/tangier/.github/actions/deploy@v0`
 
-The `tailnet` action's steps, then `tangier deploy <env> --summary`. They run at the same ref
-as `deploy`, so pinning `deploy` pins the tailnet connect too.
+Reaches the cluster by the environment's `[deploy.<env>] connect` method, read with
+`tangier connect show`, then runs `tangier deploy <env> --summary`:
+
+- `tailnet` runs the `tailnet` action's steps. They run at the same ref as `deploy`, so pinning
+  `deploy` pins the tailnet connect too.
+- `aws-ssm` assumes `[aws-ssm] role` through GitHub OIDC and runs `tangier connect open`. The job
+  needs `id-token: write`, and the role must trust only the deploy job's Environment.
+- `none` deploys through the job's current `kubectl` context, and fails at once, naming
+  `KUBECONFIG`, without one.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `env` | required | Needs a `[deploy.<env>]` table. |
-| `client-id` | required | As for `tailnet`. |
-| `audience` | required | As for `tailnet`. |
+| `client-id` | `""` | As for `tailnet`. Required for a `tailnet` environment: the action fails at once when it is empty. |
+| `audience` | `""` | As for `tailnet`. Required for a `tailnet` environment, as `client-id`. |
 | `tailscale-version` | `1.104.4` | Tailscale release. Needs 1.90.1 or later. |
 | `uv-version` | `""` | uv release. Empty follows the caller's `required-version`, else the latest. |
 | `tangier-version` | PyPI latest | The CLI release to install. Pass the plan's resolved version. |
@@ -489,6 +496,7 @@ as `deploy`, so pinning `deploy` pins the tailnet connect too.
 | `registry-username` | `registry` | Registry user. Ignored for ECR. |
 | `aws-role-arn` | `""` | IAM role for an ECR `[registry] url`, for the `[deploy] digests` lookup. The job needs `id-token: write`, and the role must trust the deploy job's Environment. Without it, no login. |
 | `regctl-version` | `v0.6.1` | `regctl` release, installed on every run. |
+| `session-manager-plugin-version` | `1.2.889.0` | AWS Session Manager plugin release, for `aws-ssm`, when the runner lacks one. |
 
 The deploy logs in to `[registry] url` only, never the mirrors. With no credential it skips the
 login, and with `digests` on the lookup then fails with a 401.

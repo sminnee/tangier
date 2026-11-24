@@ -9,6 +9,7 @@ import unittest
 
 from tangier.config import (
     DEFAULT_SHA_EXCLUDE,
+    AwsSsmEnv,
     ConfigError,
     GateSet,
     GateSpec,
@@ -588,6 +589,94 @@ class TestTailnet(unittest.TestCase):
     def test_no_warning_when_the_repo_declares_no_deploy_environments(self) -> None:
         # k8s-cluster: helm and kubectl, no images, no deploy envs, tailnet only.
         stderr = parse_toml_stderr('[tailnet.prod]\ntag = "tag:k8s-cluster-deploy"\n')
+        self.assertNotIn("names no deploy environment", stderr)
+
+
+class TestConnect(unittest.TestCase):
+    ENVS = '[deploy.uat]\nnamespace = "u"\noverlay = "o"\n\n[deploy.prod]\nnamespace = "p"\noverlay = "o"\n'
+    AWS = (
+        '[aws-ssm]\nregion = "ap-southeast-6"\nnode_tag = "k3s-*"\nca_parameter = "/k3s/ca"\ncluster_name = "c"\n'
+        '[aws-ssm.uat]\nrole = "arn:aws:iam::1:role/ci/deploy-uat"\n'
+        '[aws-ssm.prod]\nrole = "arn:aws:iam::1:role/ci/deploy-prod"\nlocal_port = 7443\n'
+    )
+
+    def test_an_environment_connects_by_tailnet_by_default(self) -> None:
+        cfg = parse_toml(self.ENVS)
+        self.assertEqual(cfg.deploy.envs["uat"].connect, "tailnet")
+
+    def test_deploy_connect_is_the_default_and_an_environment_overrides_it(self) -> None:
+        # `[deploy]` comes after `[deploy.prod]` on purpose: the default still reaches it.
+        body = (
+            '[deploy.uat]\nnamespace = "u"\noverlay = "o"\n'
+            '[deploy.prod]\nnamespace = "p"\noverlay = "o"\nconnect = "none"\n'
+            '[deploy]\nconnect = "aws-ssm"\n'
+        )
+        cfg = parse_toml(body + self.AWS)
+        self.assertEqual(cfg.deploy.envs["uat"].connect, "aws-ssm")
+        self.assertEqual(cfg.deploy.envs["prod"].connect, "none")
+
+    def test_an_unknown_method_names_the_environment_and_the_methods(self) -> None:
+        assert_config_error(
+            self,
+            '[deploy.uat]\nnamespace = "u"\noverlay = "o"\nconnect = "aws"\n',
+            "deploy.uat",
+            "tailnet, aws-ssm, none",
+        )
+
+    def test_an_unknown_shared_method_fails(self) -> None:
+        assert_config_error(self, '[deploy]\nconnect = "ssh"\n', "[deploy].connect", "tailnet, aws-ssm, none")
+
+    def test_aws_ssm_merges_the_shared_keys_under_the_environment(self) -> None:
+        cfg = parse_toml('[deploy]\nconnect = "aws-ssm"\n' + self.ENVS + self.AWS)
+        self.assertEqual(
+            cfg.aws_ssm.envs["prod"],
+            AwsSsmEnv(
+                name="prod",
+                role="arn:aws:iam::1:role/ci/deploy-prod",
+                region="ap-southeast-6",
+                node_tag="k3s-*",
+                ca_parameter="/k3s/ca",
+                cluster_name="c",
+                local_port=7443,
+                remote_port=6443,
+            ),
+        )
+        self.assertEqual(cfg.aws_ssm.envs["uat"].local_port, 6443)
+
+    def test_an_aws_ssm_environment_without_its_keys_names_each_missing_one(self) -> None:
+        assert_config_error(
+            self,
+            '[deploy]\nconnect = "aws-ssm"\n' + self.ENVS + '[aws-ssm]\nregion = "r"\n[aws-ssm.uat]\nrole = "x"\n',
+            "`[deploy.prod]`",
+            "`role`",
+            "`node_tag`",
+            "`ca_parameter`",
+            "`cluster_name`",
+        )
+
+    def test_aws_ssm_keys_are_needed_only_by_aws_ssm_environments(self) -> None:
+        aws_uat_only = '[aws-ssm]\nregion = "r"\nnode_tag = "n"\nca_parameter = "c"\ncluster_name = "k"\n[aws-ssm.uat]\nrole = "x"\n'
+        prod_none = self.ENVS.replace(
+            '[deploy.prod]\nnamespace = "p"\noverlay = "o"\n',
+            '[deploy.prod]\nnamespace = "p"\noverlay = "o"\nconnect = "none"\n',
+        )
+        cfg = parse_toml('[deploy]\nconnect = "aws-ssm"\n' + prod_none + aws_uat_only)
+        self.assertEqual(cfg.deploy.envs["prod"].connect, "none")
+        self.assertEqual(sorted(cfg.aws_ssm.envs), ["uat"])
+
+    def test_an_unknown_aws_ssm_key_fails(self) -> None:
+        assert_config_error(self, '[aws-ssm]\nrgion = "r"\n', "rgion")
+        assert_config_error(self, "[aws-ssm.uat]\nport = 1\n", "port")
+
+    def test_a_port_must_be_an_integer(self) -> None:
+        assert_config_error(self, '[aws-ssm]\nlocal_port = "6443"\n', "local_port", "integer")
+
+    def test_an_aws_ssm_table_naming_no_deploy_environment_warns(self) -> None:
+        stderr = parse_toml_stderr(self.ENVS + '[aws-ssm.staging]\nrole = "x"\n')
+        self.assertIn("`[aws-ssm.staging]` names no deploy environment", stderr)
+
+    def test_an_aws_ssm_table_naming_a_deploy_environment_does_not_warn(self) -> None:
+        stderr = parse_toml_stderr('[deploy]\nconnect = "aws-ssm"\n' + self.ENVS + self.AWS)
         self.assertNotIn("names no deploy environment", stderr)
 
 

@@ -1,11 +1,13 @@
 name: tangier deploy
 description: >-
-  Connect to the tailnet, then render and apply this environment's manifests
-  with the current content-addressed image tags.
+  Reach this environment's cluster by its `[deploy.<env>] connect` method
+  (tailnet, aws-ssm or none), then render and apply its manifests with the
+  current content-addressed image tags.
 
 # READ docs/actions/tailnet.md BEFORE changing a call site. The separation
 # between uat and prod is enforced by the `environment:` line on the calling
-# job, and it is no longer visible from here.
+# job, for a tailnet identity and an aws-ssm role alike, and it is no longer
+# visible from here.
 
 inputs:
   env:
@@ -13,15 +15,19 @@ inputs:
     required: true
   client-id:
     description: >-
-      OAuth client ID for this environment's deploy identity. Pass the
+      OAuth client ID for this environment's tailnet deploy identity. Pass the
       environment's `vars.TS_DEPLOY_CLIENT_ID` as an expression — a
       composite action cannot read the `vars` context (actions/runner#2551).
-    required: true
+      Required when the environment connects by `tailnet`, unused otherwise.
+    required: false
+    default: ""
   audience:
     description: >-
-      OIDC audience for this environment. Pass the environment's
-      `vars.TS_DEPLOY_AUDIENCE` as an expression.
-    required: true
+      OIDC audience for this environment's tailnet identity. Pass the
+      environment's `vars.TS_DEPLOY_AUDIENCE` as an expression. Required when
+      the environment connects by `tailnet`, unused otherwise.
+    required: false
+    default: ""
   tailscale-version:
     description: >-
       As the `tailnet` action's `version` input. Defaults to the release
@@ -73,16 +79,54 @@ inputs:
     description: regctl release to install, for the `[deploy] digests` lookup. Pinned, never `latest`.
     required: false
     default: v0.6.1
+  session-manager-plugin-version:
+    description: >-
+      AWS Session Manager plugin release to install when the environment
+      connects by `aws-ssm` and the runner lacks one. Pinned, never `latest`.
+    required: false
+    default: 1.2.889.0
 
 runs:
   using: composite
   steps:
-    # The tailnet action's steps, not `uses: .../tailnet@v0`: a nested `uses:`
-    # cannot follow this action's ref, so a caller pinning deploy would still
-    # get whatever tailnet@v0 is now. resolve.sh comes from this checkout.
+    # uv itself is not pinned: this uv stays on PATH for the caller's later steps,
+    # and any uv call in the caller's checkout must satisfy its `required-version`.
+    - uses: astral-sh/setup-uv@v10.3.1
+      with:
+        version: ${{ inputs.uv-version }}
+
+    # Before connecting: `connect show` reads the method, and a bad config then
+    # fails before any network step.
+    - name: Install tangier
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.tangier-version }}
+        INPUT_REF: ${{ inputs.tangier-ref }}
+      run: bash "$GITHUB_ACTION_PATH/../build/install-tangier.sh"
+
+    - name: Read the connection method
+      id: connect
+      shell: bash
+      env:
+        DEPLOY_ENV: ${{ inputs.env }}
+      run: tangier connect show "$DEPLOY_ENV" >>"$GITHUB_OUTPUT"
+
+    - name: Check the connection inputs
+      shell: bash
+      env:
+        CONNECT: ${{ steps.connect.outputs.connect }}
+        DEPLOY_ENV: ${{ inputs.env }}
+        INPUT_CLIENT_ID: ${{ inputs.client-id }}
+        INPUT_AUDIENCE: ${{ inputs.audience }}
+      run: bash "$GITHUB_ACTION_PATH/check-connect.sh"
+
+    # tailnet: the tailnet action's steps, not `uses: .../tailnet@v0`: a nested
+    # `uses:` cannot follow this action's ref, so a caller pinning deploy would
+    # still get whatever tailnet@v0 is now. resolve.sh comes from this checkout.
     # Keep these steps in step with .github/actions/tailnet/action.yaml.
     - name: Resolve the tag, operator and version
       id: resolve
+      if: steps.connect.outputs.connect == 'tailnet'
       shell: bash
       env:
         INPUT_TAG: ""
@@ -92,6 +136,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/../tailnet/resolve.sh"
 
     - name: Connect to the tailnet
+      if: steps.connect.outputs.connect == 'tailnet'
       uses: tailscale/github-action@v4
       with:
         oauth-client-id: ${{ inputs.client-id }}
@@ -101,6 +146,7 @@ runs:
         use-cache: "true"
 
     - name: Point kubectl at the operator
+      if: steps.connect.outputs.connect == 'tailnet'
       shell: bash
       env:
         OPERATOR: ${{ steps.resolve.outputs.operator }}
@@ -109,18 +155,40 @@ runs:
         tailscale configure kubeconfig "$OPERATOR"
         kubectl config current-context
 
-    # uv itself is not pinned: this uv stays on PATH for the caller's later steps,
-    # and any uv call in the caller's checkout must satisfy its `required-version`.
-    - uses: astral-sh/setup-uv@v10.3.1
+    # aws-ssm: assume the environment's role, then open an SSM port-forward to a
+    # cluster node. The keys go out as step outputs only; see deploy.sh.
+    - uses: aws-actions/configure-aws-credentials@v6
+      id: aws-connect
+      if: steps.connect.outputs.connect == 'aws-ssm'
       with:
-        version: ${{ inputs.uv-version }}
+        role-to-assume: ${{ steps.connect.outputs.aws-role }}
+        aws-region: ${{ steps.connect.outputs.aws-region }}
+        output-credentials: true
+        output-env-credentials: false
 
-    - name: Install tangier
+    - name: Install the Session Manager plugin
+      if: steps.connect.outputs.connect == 'aws-ssm'
       shell: bash
       env:
-        INPUT_VERSION: ${{ inputs.tangier-version }}
-        INPUT_REF: ${{ inputs.tangier-ref }}
-      run: bash "$GITHUB_ACTION_PATH/../build/install-tangier.sh"
+        SSM_PLUGIN_VERSION: ${{ inputs.session-manager-plugin-version }}
+      run: bash "$GITHUB_ACTION_PATH/install-session-manager-plugin.sh"
+
+    # The tunnel runs in its own session and outlives this step. The runner
+    # stops it at job end.
+    - name: Open the SSM tunnel
+      id: tunnel
+      if: steps.connect.outputs.connect == 'aws-ssm'
+      shell: bash
+      env:
+        DEPLOY_ENV: ${{ inputs.env }}
+        AWS_REGION: ${{ steps.connect.outputs.aws-region }}
+        AWS_ACCESS_KEY_ID: ${{ steps.aws-connect.outputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ steps.aws-connect.outputs.aws-secret-access-key }}
+        AWS_SESSION_TOKEN: ${{ steps.aws-connect.outputs.aws-session-token }}
+      run: |
+        set -euo pipefail
+        kubeconfig=$(tangier connect open "$DEPLOY_ENV")
+        echo "kubeconfig=$kubeconfig" >>"$GITHUB_OUTPUT"
 
     # regctl and the registry login serve `[deploy] digests`. Whether that is on
     # is not cheap to tell here, so regctl installs every run. These steps run
@@ -168,17 +236,10 @@ runs:
 
     - name: Deploy
       shell: bash
-      # `--summary` writes the build table to $GITHUB_STEP_SUMMARY before
-      # anything is applied — pass 1 overwrites the deployed tags it reads, and
-      # the table is most wanted when the deploy then fails.
-      #
-      # `set -euo pipefail` is a behaviour change from the bash this replaces,
-      # which had no `set -e` and fell through a failing summary into the real
-      # deploy. If it proves annoying, the relief valve is
-      # `continue-on-error: true` on a separate summary step — not dropping
-      # `set -e`.
       env:
         DEPLOY_ENV: ${{ inputs.env }}
-      run: |
-        set -euo pipefail
-        tangier deploy "$DEPLOY_ENV" --summary
+        TUNNEL_KUBECONFIG: ${{ steps.tunnel.outputs.kubeconfig }}
+        TUNNEL_AWS_ACCESS_KEY_ID: ${{ steps.aws-connect.outputs.aws-access-key-id }}
+        TUNNEL_AWS_SECRET_ACCESS_KEY: ${{ steps.aws-connect.outputs.aws-secret-access-key }}
+        TUNNEL_AWS_SESSION_TOKEN: ${{ steps.aws-connect.outputs.aws-session-token }}
+      run: bash "$GITHUB_ACTION_PATH/deploy.sh"

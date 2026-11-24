@@ -183,6 +183,13 @@ fatal `[deploy] after` hook that fails also exits non-zero.
 | --- | --- |
 | `tailnet check [<env>]` | Check, in order: `tailscale` installed and up, `kubectl` installed, a context selected, the context is the operator's, the API server answers, and with `<env>`, this node carries `[tailnet.<env>] tag`. Stops at the first failure with the command that fixes it, exit 2. |
 
+## `connect`
+
+| Command | Behaviour |
+| --- | --- |
+| `connect show <env>` | Print `connect=<method>` as `$GITHUB_OUTPUT` lines, and for `aws-ssm` also `aws-role=` and `aws-region=`. An unknown environment exits 2 and lists the known ones. |
+| `connect open <env> [--dir DIR]` | For an `aws-ssm` environment: pick a running node named `node_tag` that SSM reports online, start the port-forward in the background, write a mode-600 kubeconfig, and print its path once the local port answers. The token command carries `--role-arn` unless the caller already is the role, and runs under `AWS_PROFILE` when that is set. A failure names its cause, leaves no session running, and exits 2; so does another method. `DIR` defaults to a new directory under `$RUNNER_TEMP`, else `~/.kube/tangier/<env>`, which each run overwrites. |
+
 ## `gate`
 
 A selector is a gate's full name, such as `lint.check`, a group's name, which selects every
