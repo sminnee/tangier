@@ -36,13 +36,13 @@ import sys
 import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 # Top-level names that configure tangier rather than declaring a tag. Reserved
 # now even where the behaviour lands later: reserving a name is cheap,
 # un-reserving one after a config author used it as a tag is a breaking change.
 RESERVED_SECTIONS = frozenset(
-    {"tags", "sha", "registry", "deploy", "image", "k8s", "runners", "tailnet", "gate", "gate-set"}
+    {"tags", "sha", "registry", "deploy", "image", "k8s", "runners", "tailnet", "aws-ssm", "gate", "gate-set"}
 )
 
 # Recognised tag-table fields. `_items` is matched by suffix.
@@ -121,6 +121,8 @@ class DeployEnv:
     migration_version_bucket: str | None = None
     # Extra variables, substituted beside the version and digest ones.
     vars: dict[str, str] = field(default_factory=dict)
+    # How CI reaches this environment's cluster: one of `CONNECT_METHODS`.
+    connect: Connect = "tailnet"
 
 
 @dataclass
@@ -190,6 +192,44 @@ class TailnetSettings:
         return own or self.operator
 
 
+# `[deploy] connect` values; see docs/guide/6-other-features.md.
+Connect = Literal["tailnet", "aws-ssm", "none"]
+CONNECT_METHODS: tuple[Connect, ...] = ("tailnet", "aws-ssm", "none")
+
+# Keys an `aws-ssm` environment must end up with, then the optional port keys.
+_AWS_SSM_REQUIRED = ("role", "region", "node_tag", "ca_parameter", "cluster_name")
+_AWS_SSM_PORTS = ("local_port", "remote_port")
+
+
+@dataclass
+class AwsSsmEnv:
+    """One environment's `[aws-ssm]` settings, after `[aws-ssm.<env>]` overrides the shared ones."""
+
+    name: str
+    role: str
+    region: str
+    node_tag: str
+    ca_parameter: str
+    cluster_name: str
+    local_port: int = 6443
+    remote_port: int = 6443
+
+
+@dataclass
+class AwsSsmSettings:
+    """`[aws-ssm]` — how CI reaches an `aws-ssm` environment's cluster.
+
+    Scalars on `[aws-ssm]` are defaults, and an `[aws-ssm.<env>]` table
+    overrides them, as for `[tailnet]`. `envs` holds the merged record of each
+    deploy environment whose `connect` is `aws-ssm`, built once the whole
+    config is read; `tables` holds the raw `[aws-ssm.<env>]` tables.
+    """
+
+    defaults: dict[str, str | int] = field(default_factory=dict)
+    tables: dict[str, dict[str, str | int]] = field(default_factory=dict)
+    envs: dict[str, AwsSsmEnv] = field(default_factory=dict)
+
+
 @dataclass
 class GateSpec:
     """`[gate.<name>]` — a set of commands whose pass is recorded under a key of the content it tested.
@@ -242,6 +282,7 @@ class Config:
     k8s: dict[str, K8sSpec] = field(default_factory=dict)
     deploy: DeploySettings = field(default_factory=DeploySettings)
     tailnet: TailnetSettings = field(default_factory=TailnetSettings)
+    aws_ssm: AwsSsmSettings = field(default_factory=AwsSsmSettings)
     gates: dict[str, GateSpec] = field(default_factory=dict)
     # `[gate-set.<name>]`. See docs/specs/gate.md#gate-set-config.
     gate_sets: dict[str, GateSet] = field(default_factory=dict)
@@ -451,7 +492,12 @@ def _parse_after(path: str, val: object) -> AfterHook:
 
 def _parse_deploy(path: str, body: dict[str, Any]) -> DeploySettings:
     out = DeploySettings()
+    default_connect: Connect = "tailnet"
+    own_connect: dict[str, Connect] = {}
     for name, spec in body.items():
+        if name == "connect":
+            default_connect = _as_connect(path, "deploy", spec)
+            continue
         if name == "digests":
             if not isinstance(spec, bool):
                 raise ConfigError(f"{path}: `[deploy] digests` must be a boolean")
@@ -485,8 +531,18 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> DeploySettings:
             path,
             f"deploy.{name}",
             spec,
-            {"namespace", "overlay", "migration_timeout", "migration_job", "migration_version_bucket", "vars"},
+            {
+                "namespace",
+                "overlay",
+                "migration_timeout",
+                "migration_job",
+                "migration_version_bucket",
+                "vars",
+                "connect",
+            },
         )
+        if "connect" in spec:
+            own_connect[name] = _as_connect(path, f"deploy.{name}", spec["connect"])
         for required in ("namespace", "overlay"):
             if required not in spec:
                 raise ConfigError(f"{path}: `[deploy.{name}]` requires `{required}`")
@@ -505,7 +561,16 @@ def _parse_deploy(path: str, body: dict[str, Any]) -> DeploySettings:
             migration_version_bucket=bucket,
             vars=_parse_vars(path, f"deploy.{name}", spec.get("vars", {})),
         )
+    # After the loop: `[deploy] connect` may come after an environment's table.
+    for name, env in out.envs.items():
+        env.connect = own_connect.get(name, default_connect)
     return out
+
+
+def _as_connect(path: str, section: str, val: object) -> str:
+    if val not in CONNECT_METHODS:
+        raise ConfigError(f"{path}: `[{section}].connect` must be one of {', '.join(CONNECT_METHODS)}, got {val!r}")
+    return str(val)
 
 
 # What `envsubst` and `string.Template` treat as a variable name. Any other
@@ -737,6 +802,61 @@ def _parse_tailnet(path: str, body: dict[str, Any]) -> TailnetSettings:
     return settings
 
 
+def _parse_aws_ssm(path: str, body: dict[str, Any]) -> AwsSsmSettings:
+    """Parse `[aws-ssm]` — shared scalars plus one table per environment, split by type as `[tailnet]` is."""
+    allowed = set(_AWS_SSM_REQUIRED) | set(_AWS_SSM_PORTS)
+
+    def values(section: str, table: dict[str, Any]) -> dict[str, str | int]:
+        out: dict[str, str | int] = {}
+        for k, v in table.items():
+            if k in _AWS_SSM_PORTS:
+                out[k] = _as_int(path, section, k, v)
+            else:
+                out[k] = _as_str(path, section, k, v)
+        return out
+
+    settings = AwsSsmSettings()
+    scalars: dict[str, Any] = {}
+    for key, value in body.items():
+        if isinstance(value, dict):
+            _check_keys(path, f"aws-ssm.{key}", value, allowed)
+            settings.tables[key] = values(f"aws-ssm.{key}", value)
+        elif key in allowed:
+            scalars[key] = value
+        else:
+            raise ConfigError(
+                f"{path}: unknown field `{key}` on `[aws-ssm]` "
+                f"(allowed: {', '.join(sorted(allowed))}, or an `[aws-ssm.<env>]` table)"
+            )
+    settings.defaults = values("aws-ssm", scalars)
+    return settings
+
+
+def _resolve_aws_ssm_envs(cfg: Config, path: str) -> None:
+    """Merge each `aws-ssm` environment's settings, failing the load when a required key is missing."""
+    settings = cfg.aws_ssm
+    for name, env in sorted(cfg.deploy.envs.items()):
+        if env.connect != "aws-ssm":
+            continue
+        merged = {**settings.defaults, **settings.tables.get(name, {})}
+        missing = [k for k in _AWS_SSM_REQUIRED if k not in merged]
+        if missing:
+            raise ConfigError(
+                f"{path}: `[deploy.{name}]` connects by aws-ssm, but neither `[aws-ssm.{name}]` "
+                f"nor `[aws-ssm]` sets {', '.join(f'`{k}`' for k in missing)}"
+            )
+        settings.envs[name] = AwsSsmEnv(
+            name=name,
+            role=str(merged["role"]),
+            region=str(merged["region"]),
+            node_tag=str(merged["node_tag"]),
+            ca_parameter=str(merged["ca_parameter"]),
+            cluster_name=str(merged["cluster_name"]),
+            local_port=int(merged.get("local_port", 6443)),
+            remote_port=int(merged.get("remote_port", 6443)),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tag parsing
 # ---------------------------------------------------------------------------
@@ -859,6 +979,19 @@ def _warn_tailnet_envs_without_deploy(cfg: Config, path: str) -> None:
             known = ", ".join(sorted(cfg.deploy.envs))
             print(
                 f"{path}: warning: `[tailnet.{name}]` names no deploy environment (known: {known})",
+                file=sys.stderr,
+            )
+
+
+def _warn_aws_ssm_envs_without_deploy(cfg: Config, path: str) -> None:
+    """Warn when an `[aws-ssm.<env>]` names no `[deploy.<env>]`, as for `[tailnet.<env>]`."""
+    if not cfg.deploy.envs:
+        return
+    for name in sorted(cfg.aws_ssm.tables):
+        if name not in cfg.deploy.envs:
+            known = ", ".join(sorted(cfg.deploy.envs))
+            print(
+                f"{path}: warning: `[aws-ssm.{name}]` names no deploy environment (known: {known})",
                 file=sys.stderr,
             )
 
@@ -1092,6 +1225,8 @@ def read_config(path: str) -> Config:
             cfg.deploy = _parse_deploy(path, table)
         elif key == "tailnet":
             cfg.tailnet = _parse_tailnet(path, table)
+        elif key == "aws-ssm":
+            cfg.aws_ssm = _parse_aws_ssm(path, table)
         elif key == "gate":
             cfg.gates, cfg.gate_prune_after_days = _parse_gates(path, table)
         elif key == "gate-set":
@@ -1121,7 +1256,9 @@ def read_config(path: str) -> Config:
         raise ConfigError(f"{path}: `[deploy] digests` needs `[registry] url` to look the digests up in")
     _derive(cfg, path)
     _check_deploy_vars(cfg, path)
+    _resolve_aws_ssm_envs(cfg, path)
     _warn_tags_without_input(cfg, path)
     _warn_tags_without_output(cfg, path)
     _warn_tailnet_envs_without_deploy(cfg, path)
+    _warn_aws_ssm_envs_without_deploy(cfg, path)
     return cfg
