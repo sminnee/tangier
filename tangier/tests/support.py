@@ -175,8 +175,9 @@ class RecordingRunner:
     to import `time`.
     """
 
-    def __init__(self, responses: dict[tuple[str, ...], Any] | None = None) -> None:
+    def __init__(self, responses: dict[tuple[str, ...], Any] | None = None, *, spawn_pid: int = 0) -> None:
         self.calls: list[list[str]] = []
+        self.spawn_pid = spawn_pid
         self.pipes: list[list[list[str]]] = []
         self.stdins: list[str | None] = []
         self.envs: list[dict[str, str] | None] = []
@@ -230,7 +231,7 @@ class RecordingRunner:
     ) -> int:
         """Record the call and start nothing. Nothing holds the job's `alive` lock, so the job reads as died."""
         self.spawned.append(list(argv))
-        return 0
+        return self.spawn_pid
 
     def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)

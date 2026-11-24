@@ -7,9 +7,10 @@ import os
 import sys
 
 import tangier
-from tangier.commands import changemap_cmds, deploy_cmds, gate_cmds, image_cmds, tailnet_cmds
+from tangier.commands import changemap_cmds, connect_cmds, deploy_cmds, gate_cmds, image_cmds, tailnet_cmds
 from tangier.commands.args import add_diff_args, add_full
 from tangier.config import Config, ConfigError, read_config
+from tangier.connect import ConnectError
 from tangier.deploy import DeployError
 from tangier.gate import GateError
 from tangier.git import GitError
@@ -63,7 +64,7 @@ def main(argv: list[str] | None = None, *, runner: Runner | None = None) -> int:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
-    except (ImageError, DeployError, TailnetError, GateError, GitError) as e:
+    except (ImageError, DeployError, TailnetError, ConnectError, GateError, GitError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
@@ -93,6 +94,7 @@ def _build_parser() -> argparse.ArgumentParser:
     image_cmds.add_parsers(sub)
     deploy_cmds.add_parsers(sub)
     tailnet_cmds.add_parsers(sub)
+    connect_cmds.add_parsers(sub)
     gate_cmds.add_parsers(sub)
     return p
 
