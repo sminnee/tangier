@@ -80,7 +80,7 @@ Read the guide in order to learn tangier:
 4. [Packages and builds](docs/guide/4-packages-and-builds.md): content-hash versions and images.
 5. [GitHub Actions](docs/guide/5-github-actions.md): the plan job, gate jobs, builds and the
    nightly.
-6. [Other features](docs/guide/6-other-features.md): deploy and tailnet.
+6. [Other features](docs/guide/6-other-features.md): deploy, how CI reaches the cluster, and tailnet.
 
 Look things up in the reference:
 

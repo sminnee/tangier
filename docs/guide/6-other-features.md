@@ -1,7 +1,7 @@
 # 6. Other features
 
-tangier also deploys the images it builds, and checks the network path to the cluster. Both read
-the same `pipeline.toml`. Keys are in the
+tangier also deploys the images it builds, reaches the cluster to deploy to, and checks the network
+path to it. All three read the same `pipeline.toml`. Keys are in the
 [`pipeline.toml` reference](../../skills/tangier/reference/pipeline-toml.md#deploy).
 
 ## `tangier deploy`
@@ -113,10 +113,65 @@ operator = "askastro-k8s-operator"
 An empty string renders as nothing. The rules for `vars` names are in the
 [`pipeline.toml` reference](../../skills/tangier/reference/pipeline-toml.md#deploy).
 
+## How CI reaches the cluster
+
+Each deploy environment names how CI reaches its cluster, in `connect`:
+
+- `tailnet` (the default) joins the Tailscale tailnet as the environment's deploy identity and points
+  `kubectl` at the Tailscale Kubernetes operator. See [`tangier tailnet`](#tangier-tailnet).
+- `aws-ssm` assumes the environment's IAM role through GitHub OIDC, opens an SSM port-forward to a
+  cluster node, and writes a kubeconfig whose user signs an `aws eks get-token` token.
+- `none` uses the kubeconfig the calling job has already selected.
+
+`[deploy.<env>] connect` wins, then `[deploy] connect`, then `tailnet`. An `aws-ssm` environment
+takes its settings from `[aws-ssm.<env>]` over the shared `[aws-ssm]` defaults, and the load fails
+when one of `role`, `region`, `node_tag`, `ca_parameter` or `cluster_name` is missing. A repo whose
+UAT and prod run on AWS, and whose older prod still runs on Linode, writes:
+
+```toml
+[deploy]
+connect = "aws-ssm"
+
+[deploy.prod-linode]
+namespace = "astronort-prod"
+overlay   = "infra/k8s/overlays/prod-linode"
+connect   = "tailnet"
+
+[aws-ssm]
+region       = "ap-southeast-6"
+node_tag     = "askastro-k3s-*"            # the Name tag of the cluster's nodes
+ca_parameter = "/askastro/k3s/server-ca"  # SSM parameter holding the API server's CA
+cluster_name = "askastro"                 # aws-iam-authenticator's cluster ID
+# local_port = 6443, remote_port = 6443   # the defaults
+
+[aws-ssm.uat]
+role = "arn:aws:iam::606311892834:role/ci/askastro-deploy-uat"
+
+[aws-ssm.prod]
+role = "arn:aws:iam::606311892834:role/ci/askastro-deploy-prod"
+
+[tailnet.prod-linode]
+tag = "tag:astronort-prod-deploy"
+```
+
+The `deploy` action reads the method with `tangier connect show <env>` and runs only that method's
+steps.
+
+To break glass from a laptop, sign in with a profile that can use SSM and EC2 on the cluster's nodes
+and can assume the role, then open the same tunnel CI uses:
+
+```sh
+export KUBECONFIG=$(tangier connect open uat)
+kubectl auth whoami
+```
+
+It needs the AWS CLI v2 and the Session Manager plugin. The tunnel outlives the command; it prints the
+process group to stop. The rest is in the [CLI reference](../../skills/tangier/reference/cli.md#connect).
+
 ## `tangier tailnet`
 
-CI reaches the cluster over a Tailscale tailnet. Each environment names the tailnet ACL tag that
-its deploys authenticate as:
+A `tailnet` environment's CI reaches the cluster over a Tailscale tailnet. Each environment names
+the tailnet ACL tag that its deploys authenticate as:
 
 ```toml
 [tailnet.uat]
